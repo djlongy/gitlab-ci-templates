@@ -184,8 +184,8 @@ WIKI_LINKS = {  # the spec: what each docs page's links become in its wiki locat
     # pages: relative to the page's wiki directory, no extension, ./ on siblings (GitLab serves a
     # .md link as the raw file and resolves a bare sibling from the wiki root); attachments keep
     # their extension and relative path
-    "home.md": ["./ops", "./ops/backups", "uploads/1/n.png", "./dev"],
-    "ops.md": ["./dev/release", "./ops/restore", "uploads/1/n.png", "./home", "./dev", "./ops"],
+    "home.md": ["./ops", "./ops/backups", "./uploads/1/n.png", "./dev"],
+    "ops.md": ["./dev/release", "./ops/restore", "./uploads/1/n.png", "./home", "./dev", "./ops"],
     "ops/backups.md": ["../dev/release", "./restore#steps", "../uploads/1/n.png", "../ops", "../home",
                        "https://example.com/a", "mailto:a@b.c", "/abs/path", "../../outside.md"],
     "ops/restore.md": ["./backups#top"],
