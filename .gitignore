@@ -1,0 +1,7 @@
+*.log
+*.tmp
+reports/
+.scannerwork/
+__pycache__/
+.agent/
+.agents/

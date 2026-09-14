@@ -1,0 +1,75 @@
+# Reusable Dependency-Track SBOM upload template
+# Usage:
+#   include:
+#     - project: 'platform/ci-templates'
+#       file: '/security/dtrack-upload.yml'
+#       ref: main
+#   variables:
+#     DTRACK_PROJECT_NAME: "myapp"
+#     DTRACK_PROJECT_VERSION: "${CI_COMMIT_SHORT_SHA}"
+#
+# Requires CI variables (set in GitLab project/group settings):
+#   DTRACK_URL: "https://dtrack.example.com"
+#   DTRACK_API_KEY: (masked, from Vault)
+
+.dtrack-upload:
+  stage: enrich
+  image:
+    name: alpine:3.20
+    entrypoint: [""]
+  variables:
+    DTRACK_URL: ""
+    DTRACK_API_KEY: ""
+    DTRACK_PROJECT_NAME: "${CI_PROJECT_NAME}"
+    DTRACK_PROJECT_VERSION: "${CI_COMMIT_SHORT_SHA}"
+    SBOM_FILE: "sbom.cdx.json"
+  before_script:
+    - apk add --no-cache curl jq
+  script:
+    - |
+      if [ -z "${DTRACK_URL}" ] || [ -z "${DTRACK_API_KEY}" ]; then
+        echo "ERROR: DTRACK_URL and DTRACK_API_KEY must be set"
+        exit 1
+      fi
+    - |
+      if [ ! -f "${SBOM_FILE}" ]; then
+        echo "ERROR: SBOM file ${SBOM_FILE} not found. Run trivy-scan first."
+        exit 1
+      fi
+    # Base64 encode the SBOM for API upload
+    - SBOM_BASE64=$(base64 -w 0 "${SBOM_FILE}" 2>/dev/null || base64 "${SBOM_FILE}")
+    # Upload to Dependency-Track
+    - |
+      RESPONSE=$(curl -s -w "\n%{http_code}" -X PUT \
+        "${DTRACK_URL}/api/v1/bom" \
+        -H "X-Api-Key: ${DTRACK_API_KEY}" \
+        -H "Content-Type: application/json" \
+        -d "{
+          \"projectName\": \"${DTRACK_PROJECT_NAME}\",
+          \"projectVersion\": \"${DTRACK_PROJECT_VERSION}\",
+          \"autoCreate\": true,
+          \"bom\": \"${SBOM_BASE64}\"
+        }")
+      HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+      BODY=$(echo "$RESPONSE" | head -n -1)
+      echo "DTrack response: HTTP ${HTTP_CODE}"
+      echo "${BODY}" | jq . 2>/dev/null || echo "${BODY}"
+      if [ "${HTTP_CODE}" -lt 200 ] || [ "${HTTP_CODE}" -ge 300 ]; then
+        echo "ERROR: SBOM upload failed with HTTP ${HTTP_CODE}"
+        exit 1
+      fi
+      echo "SBOM uploaded successfully for ${DTRACK_PROJECT_NAME}:${DTRACK_PROJECT_VERSION}"
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - if: '$CI_COMMIT_TAG'
+  allow_failure: true
+
+dtrack-upload:
+  extends: .dtrack-upload
+  needs:
+    - job: syft-sbom
+      artifacts: true
+      optional: true
+    - job: trivy-image
+      artifacts: true
+      optional: true

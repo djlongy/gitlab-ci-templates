@@ -1,0 +1,107 @@
+# Reusable Trivy container image scan + SBOM generation template (GATE MODE)
+# Usage:
+#   include:
+#     - project: 'platform/ci-templates'
+#       file: '/security/trivy-image.yml'
+#       ref: main
+#   variables:
+#     TRIVY_IMAGE: "registry.example.com/myteam/myapp:${CI_COMMIT_SHORT_SHA}"
+#
+# Gate mode: TRIVY_EXIT_CODE defaults to "1" — pipeline FAILS on vulnerabilities
+# matching TRIVY_SEVERITY. Set to "0" for advisory mode (report only, don't fail).
+#
+# Toggle variables:
+#   TRIVY_VERSION:        Trivy image tag (default: 0.69.3, pinned — supply chain safe)
+#   TRIVY_SEVERITY:       Comma-separated severities to gate on (default: CRITICAL,HIGH)
+#   TRIVY_EXIT_CODE:      "1" = fail pipeline, "0" = advisory only
+#   TRIVY_IGNORE_UNFIXED: "true" = don't fail on CVEs with no fix available
+#   SBOM_FORMAT:          "cyclonedx" or "spdx" (default: cyclonedx)
+#   SBOM_ENABLED:         "true" to generate SBOM artifact (default: true)
+#   SARIF_ENABLED:        "true" to generate SARIF report (default: true)
+
+.trivy-image:
+  stage: scan
+  image:
+    # PINNED: 0.69.3 is the last safe release before the supply chain compromise
+    # (0.69.4/5/6 were backdoored March 19-22 2026, :latest tag was also affected)
+    # See: https://www.aquasec.com/blog/trivy-supply-chain-attack-what-you-need-to-know/
+    name: aquasec/trivy:${TRIVY_VERSION}
+    entrypoint: [""]
+  variables:
+    TRIVY_VERSION: "0.69.3"
+    TRIVY_IMAGE: ""
+    TRIVY_SEVERITY: "CRITICAL,HIGH"
+    TRIVY_EXIT_CODE: "1"
+    TRIVY_IGNORE_UNFIXED: "true"
+    SBOM_FORMAT: "cyclonedx"
+    SBOM_ENABLED: "true"
+    SARIF_ENABLED: "true"
+  script:
+    - |
+      # Auto-construct TRIVY_IMAGE from dotenv if not explicitly set
+      if [ -z "${TRIVY_IMAGE}" ] && [ -n "${IMAGE_NAME}" ] && [ -n "${BUILDKIT_TAG}" ]; then
+        export TRIVY_IMAGE="${IMAGE_NAME}:${BUILDKIT_TAG}"
+        echo "Auto-detected: TRIVY_IMAGE=${TRIVY_IMAGE}"
+      fi
+      if [ -z "${TRIVY_IMAGE}" ]; then
+        echo "ERROR: TRIVY_IMAGE variable must be set"
+        exit 1
+      fi
+      echo "=== Trivy Image Scan (Gate Mode) ==="
+      echo "Image: ${TRIVY_IMAGE}"
+      echo "Severity gate: ${TRIVY_SEVERITY}"
+      echo "Exit code: ${TRIVY_EXIT_CODE} (1=fail, 0=advisory)"
+      echo "Ignore unfixed: ${TRIVY_IGNORE_UNFIXED}"
+      echo "SBOM format: ${SBOM_FORMAT} (enabled: ${SBOM_ENABLED})"
+    # Configure registry auth for remote image scanning
+    - |
+      if [ -n "${REGISTRY_USER}" ] && [ -n "${REGISTRY_PASSWORD}" ]; then
+        REGISTRY=$(echo "${TRIVY_IMAGE}" | cut -d/ -f1)
+        export TRIVY_USERNAME="${REGISTRY_USER}"
+        export TRIVY_PASSWORD="${REGISTRY_PASSWORD}"
+        echo "Registry auth configured for ${REGISTRY}"
+      fi
+    # Generate SBOM (toggleable format)
+    - |
+      if [ "${SBOM_ENABLED}" = "true" ]; then
+        if [ "${SBOM_FORMAT}" = "spdx" ]; then
+          trivy image --format spdx-json --output sbom.spdx.json "${TRIVY_IMAGE}"
+          echo "SBOM generated: sbom.spdx.json (SPDX)"
+        else
+          trivy image --format cyclonedx --output sbom.cdx.json "${TRIVY_IMAGE}"
+          echo "SBOM generated: sbom.cdx.json (CycloneDX)"
+        fi
+      fi
+    # Generate SARIF report (for GitLab security dashboard)
+    - |
+      if [ "${SARIF_ENABLED}" = "true" ]; then
+        trivy image --format sarif --output trivy-report.sarif "${TRIVY_IMAGE}"
+      fi
+    # Generate JSON vulnerability report (for cosign vuln attestation)
+    - trivy image --format json --output trivy-report.json --severity "${TRIVY_SEVERITY}" "${TRIVY_IMAGE}"
+    # Human-readable table + gate
+    - |
+      UNFIXED_FLAG=""
+      if [ "${TRIVY_IGNORE_UNFIXED}" = "true" ]; then
+        UNFIXED_FLAG="--ignore-unfixed"
+      fi
+      trivy image --format table --severity "${TRIVY_SEVERITY}" \
+        ${UNFIXED_FLAG} --exit-code "${TRIVY_EXIT_CODE}" "${TRIVY_IMAGE}"
+  artifacts:
+    reports:
+      sast: trivy-report.sarif
+    paths:
+      - sbom.cdx.json
+      - sbom.spdx.json
+      - trivy-report.sarif
+      - trivy-report.json
+    when: always
+    expire_in: 1 week
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - if: '$CI_COMMIT_TAG'
+  allow_failure: false
+
+trivy-image:
+  extends: .trivy-image

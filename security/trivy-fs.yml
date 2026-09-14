@@ -1,0 +1,82 @@
+# Reusable Trivy filesystem scan template (SCA + secrets + misconfig)
+# Usage:
+#   include:
+#     - project: 'platform/ci-templates'
+#       file: '/security/trivy-fs.yml'
+#       ref: main
+#
+# Scans source code BEFORE building for:
+#   - Vulnerable dependencies (SCA) in lockfiles
+#   - Hardcoded secrets (API keys, passwords, tokens)
+#   - IaC misconfigurations (Terraform, K8s, Docker)
+#
+# Gate mode: TRIVY_EXIT_CODE defaults to "1" — pipeline FAILS on vulnerabilities
+# matching TRIVY_SEVERITY. Set to "0" for advisory mode (report only, don't fail).
+#
+# Toggle variables:
+#   TRIVY_VERSION:    Trivy image tag (default: 0.69.3, pinned — supply chain safe)
+#   TRIVY_SEVERITY:   Comma-separated severities to gate on (default: CRITICAL,HIGH)
+#   TRIVY_EXIT_CODE:  "1" = fail pipeline, "0" = advisory only
+#   TRIVY_SCANNERS:   Comma-separated scanners (default: vuln,secret,misconfig)
+#   TRIVY_SKIP_DIRS:  Additional directories to skip
+
+.trivy-fs:
+  stage: verify
+  image:
+    # PINNED: 0.69.3 is the last safe release before supply chain compromise
+    name: aquasec/trivy:${TRIVY_VERSION}
+    entrypoint: [""]
+  variables:
+    TRIVY_VERSION: "0.69.3"
+    TRIVY_SEVERITY: "CRITICAL,HIGH"
+    TRIVY_EXIT_CODE: "1"
+    TRIVY_SCANNERS: "vuln,secret,misconfig"
+    TRIVY_SKIP_DIRS: ""
+  script:
+    - |
+      echo "=== Trivy Filesystem Scan (SCA + Secrets + Misconfig) ==="
+      echo "Scanners: ${TRIVY_SCANNERS}"
+      echo "Severity: ${TRIVY_SEVERITY}"
+    - >
+      trivy fs
+      --format sarif
+      --output trivy-fs.sarif
+      --scanners "${TRIVY_SCANNERS}"
+      --severity "${TRIVY_SEVERITY}"
+      ${TRIVY_SKIP_DIRS:+--skip-dirs "$TRIVY_SKIP_DIRS"}
+      --skip-dirs "**/vendor"
+      .
+    - >
+      trivy fs
+      --format json
+      --output trivy-fs.json
+      --scanners "${TRIVY_SCANNERS}"
+      --severity "${TRIVY_SEVERITY}"
+      ${TRIVY_SKIP_DIRS:+--skip-dirs "$TRIVY_SKIP_DIRS"}
+      --skip-dirs "**/vendor"
+      .
+    - >
+      trivy fs
+      --format table
+      --scanners "${TRIVY_SCANNERS}"
+      --severity "${TRIVY_SEVERITY}"
+      --exit-code "${TRIVY_EXIT_CODE}"
+      ${TRIVY_SKIP_DIRS:+--skip-dirs "$TRIVY_SKIP_DIRS"}
+      --skip-dirs "**/vendor"
+      .
+  artifacts:
+    reports:
+      sast: trivy-fs.sarif
+    paths:
+      - trivy-fs.sarif
+      - trivy-fs.json
+    when: always
+    expire_in: 1 week
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - if: '$CI_COMMIT_TAG'
+  allow_failure: false
+
+trivy-fs:
+  extends: .trivy-fs

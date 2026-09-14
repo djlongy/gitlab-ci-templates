@@ -1,0 +1,122 @@
+# ─── Monorepo (multiple images) ──────────────────────────────────────
+# For repos that build multiple images (e.g. frontend + API).
+# Copy this file to your repo as .gitlab-ci.yml and update IMAGE_NAME
+# and the per-service blocks.
+#
+# Pipeline: verify → secret-scan → build → test → scan → sign
+#
+# To release:
+#   git tag 0.1.18 && git push origin 0.1.18
+#
+# Required CI/CD variables (set at group or project level):
+#   REGISTRY_USER      — Container registry username
+#   REGISTRY_PASSWORD  — Container registry password (masked)
+#   VAULT_TOKEN      — Vault token with svc-cosign-sign policy (masked)
+
+include:
+  - project: 'platform/ci-templates'
+    file: '/pipelines/devsecops.yml'
+    ref: main
+
+variables:
+  IMAGE_NAME: "registry.example.com/myproject/frontend"  # ← default image
+
+gitleaks:
+  allow_failure: true
+
+# ── Disable jobs we don't use ──────────────────────────────────────
+ko-build:
+  rules:
+    - when: never
+jib-build:
+  rules:
+    - when: never
+helm-oci-publish:
+  rules:
+    - when: never
+syft-sbom:
+  rules:
+    - when: never
+
+# ═══════════════════════════════════════════════════════════════════
+# Frontend (root Dockerfile)
+# ═══════════════════════════════════════════════════════════════════
+
+buildkit-build:
+  extends: .buildkit-build
+  variables:
+    BUILDKIT_TAG: "${CI_COMMIT_TAG}"
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^\d+\.\d+\.\d+(-[a-zA-Z0-9.]+)?$/'
+
+trivy-image:
+  extends: .trivy-image
+  variables:
+    TRIVY_IMAGE: "${IMAGE_NAME}:${CI_COMMIT_TAG}"
+  needs:
+    - job: buildkit-build
+      artifacts: true
+    - job: smoke-test  # Wait for smoke test before scanning
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^\d+\.\d+\.\d+(-[a-zA-Z0-9.]+)?$/'
+
+cosign-sign:
+  extends: .cosign-sign
+  needs:
+    - job: buildkit-build
+      artifacts: true
+    - job: trivy-image
+      artifacts: true
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^\d+\.\d+\.\d+(-[a-zA-Z0-9.]+)?$/'
+
+# ═══════════════════════════════════════════════════════════════════
+# API (apps/api/Dockerfile)
+# ═══════════════════════════════════════════════════════════════════
+
+buildkit-build-api:
+  extends: .buildkit-build
+  variables:
+    IMAGE_NAME: "registry.example.com/myproject/api"  # ← change this
+    BUILD_CONTEXT: "apps/api"
+    DOCKERFILE_PATH: "Dockerfile"
+    BUILDKIT_TAG: "${CI_COMMIT_TAG}"
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^\d+\.\d+\.\d+(-[a-zA-Z0-9.]+)?$/'
+
+trivy-image-api:
+  extends: .trivy-image
+  variables:
+    TRIVY_IMAGE: "registry.example.com/myproject/api:${CI_COMMIT_TAG}"
+  needs:
+    - job: buildkit-build-api
+      artifacts: true
+    - job: smoke-test
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^\d+\.\d+\.\d+(-[a-zA-Z0-9.]+)?$/'
+
+cosign-sign-api:
+  extends: .cosign-sign
+  needs:
+    - job: buildkit-build-api
+      artifacts: true
+    - job: trivy-image-api
+      artifacts: true
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^\d+\.\d+\.\d+(-[a-zA-Z0-9.]+)?$/'
+
+# ═══════════════════════════════════════════════════════════════════
+# Smoke Test (runs after all images are built, before scan)
+# ═══════════════════════════════════════════════════════════════════
+
+smoke-test:
+  extends: .smoke-test
+  variables:
+    API_IMAGE: "registry.example.com/myproject/api:${CI_COMMIT_TAG}"
+    FRONTEND_IMAGE: "registry.example.com/myproject/frontend:${CI_COMMIT_TAG}"
+  needs:
+    - job: buildkit-build
+    - job: buildkit-build-api
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^\d+\.\d+\.\d+(-[a-zA-Z0-9.]+)?$/'
+

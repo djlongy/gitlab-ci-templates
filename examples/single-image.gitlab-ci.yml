@@ -1,0 +1,80 @@
+# ─── Single-Image Service ────────────────────────────────────────────
+# Copy this file to your repo as .gitlab-ci.yml and update IMAGE_NAME.
+#
+# Pipeline: verify → secret-scan → build → scan → sign
+#
+# Triggers:
+#   Push to main    → verify + secret scan only (no image build)
+#   Semver git tag  → full pipeline: build, scan, sign
+#
+# To release:
+#   git tag 1.0.0 && git push origin 1.0.0
+#
+# Required CI/CD variables (set at group or project level):
+#   REGISTRY_USER      — Container registry username
+#   REGISTRY_PASSWORD  — Container registry password (masked)
+#   VAULT_TOKEN      — Vault token with svc-cosign-sign policy (masked)
+
+include:
+  - project: 'platform/ci-templates'
+    file: '/pipelines/devsecops.yml'
+    ref: main
+
+variables:
+  IMAGE_NAME: "registry.example.com/myteam/my-service"  # ← change this
+
+# ── Verify (runs on every push) ────────────────────────────────────
+# semgrep, trivy-fs, gitleaks run automatically from devsecops.yml.
+# Override only if you need custom settings:
+
+gitleaks:
+  allow_failure: true  # Advisory — don't block on historical leaks
+
+# trivy-fs:
+#   variables:
+#     TRIVY_SKIP_DIRS: "test,vendor"  # Skip directories if needed
+
+# ── Build (semver tags only) ───────────────────────────────────────
+buildkit-build:
+  extends: .buildkit-build
+  variables:
+    BUILDKIT_TAG: "${CI_COMMIT_TAG}"
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^\d+\.\d+\.\d+(-[a-zA-Z0-9.]+)?$/'
+
+# ── Scan ───────────────────────────────────────────────────────────
+trivy-image:
+  extends: .trivy-image
+  variables:
+    TRIVY_IMAGE: "${IMAGE_NAME}:${CI_COMMIT_TAG}"
+    TRIVY_EXIT_CODE: "0"  # Record vulns without blocking the release
+  needs:
+    - job: buildkit-build
+      artifacts: true
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^\d+\.\d+\.\d+(-[a-zA-Z0-9.]+)?$/'
+
+# ── Sign + Attest ──────────────────────────────────────────────────
+cosign-sign:
+  extends: .cosign-sign
+  needs:
+    - job: buildkit-build
+      artifacts: true
+    - job: trivy-image
+      artifacts: true
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^\d+\.\d+\.\d+(-[a-zA-Z0-9.]+)?$/'
+
+# ── Disable jobs we don't use ──────────────────────────────────────
+ko-build:
+  rules:
+    - when: never
+jib-build:
+  rules:
+    - when: never
+helm-oci-publish:
+  rules:
+    - when: never
+syft-sbom:
+  rules:
+    - when: never

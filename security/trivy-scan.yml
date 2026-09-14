@@ -1,0 +1,55 @@
+# Reusable Trivy container scan + SBOM generation template
+# Usage:
+#   include:
+#     - project: 'platform/ci-templates'
+#       file: '/security/trivy-scan.yml'
+#       ref: main
+#   variables:
+#     TRIVY_IMAGE: "registry.example.com/myteam/myapp:${CI_COMMIT_SHORT_SHA}"
+
+.trivy-scan:
+  stage: scan
+  image:
+    # PINNED: 0.69.3 is the last safe release before the supply chain compromise
+    # (0.69.4/5/6 were backdoored March 19-22 2026, :latest tag was also affected)
+    # See: https://www.aquasec.com/blog/trivy-supply-chain-attack-what-you-need-to-know/
+    # Update ONLY when Aqua Security publishes a verified clean release
+    name: aquasec/trivy:${TRIVY_VERSION}
+    entrypoint: [""]
+  variables:
+    TRIVY_VERSION: "0.69.3"
+    TRIVY_IMAGE: ""
+    TRIVY_SEVERITY: "CRITICAL,HIGH,MEDIUM"
+    TRIVY_EXIT_CODE: "0"
+  script:
+    - 'echo "NOTICE: trivy-scan.yml is deprecated. Migrate to trivy-image.yml"'
+    - |
+      if [ -z "${TRIVY_IMAGE}" ]; then
+        echo "ERROR: TRIVY_IMAGE variable must be set"
+        exit 1
+      fi
+    # Generate CycloneDX SBOM
+    - trivy image --format cyclonedx --output sbom.cdx.json "${TRIVY_IMAGE}"
+    # Generate SARIF vulnerability report (for GitLab SAST widget)
+    - trivy image --format sarif --output trivy-report.sarif "${TRIVY_IMAGE}"
+    # Generate JSON vulnerability report (for processing/upload)
+    - trivy image --format json --output trivy-report.json --severity "${TRIVY_SEVERITY}" "${TRIVY_IMAGE}"
+    # Generate human-readable table
+    - trivy image --format table --severity "${TRIVY_SEVERITY}" --exit-code "${TRIVY_EXIT_CODE}" "${TRIVY_IMAGE}"
+  artifacts:
+    reports:
+      sast: trivy-report.sarif
+    paths:
+      - sbom.cdx.json
+      - trivy-report.sarif
+      - trivy-report.json
+    when: always
+    expire_in: 1 week
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - if: '$CI_COMMIT_TAG'
+  allow_failure: false
+
+trivy-scan:
+  extends: .trivy-scan
