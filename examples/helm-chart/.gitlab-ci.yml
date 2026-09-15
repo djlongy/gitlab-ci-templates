@@ -1,0 +1,22 @@
+---
+# examples/helm-chart/.gitlab-ci.yml
+#
+# A repository whose deliverable is a Helm chart.
+#
+# `chart-paths` is everything that gets validated, one per line; `chart-path` is
+# the single chart that gets packaged and published. They differ when a
+# repository carries a chart plus its test fixtures or subcharts.
+#
+# A project that also builds a container image runs that as a separate pipeline.
+# Two root compositions cannot be merged: each owns `workflow:` and `stages:`.
+include:
+  - project: 'platform/gitlab-ci-templates'
+    ref: 'REPLACE_WITH_APPROVED_SHARED_CI_REF'
+    file: '/pipelines/helm-chart.yml'
+    inputs:
+      instance: demo-app
+      chart-paths: |
+        charts/demo-app
+      chart-path: 'charts/demo-app'
+      chart-repository: 'registry.example.com/charts'
+      kubernetes-version: '1.31.0'

@@ -1,0 +1,44 @@
+---
+# container-buildkit-onboarding/.ci/project.yml
+#
+# The record of what this project adopted from the shared CI repository.
+# Contract: docs/gitlab-ci-agent-standard.md section 4, schema
+# tests/contracts/project.schema.json, field guide docs/reference/project-yml.md.
+#
+# Metadata, not GitLab configuration: nothing reads this at pipeline time. It
+# exists so the next reader can see which composition is in use, under which
+# instance names, and what was decided on the way in. The project path below is
+# illustrative, as is everything else in examples/.
+schema_version: 1
+project: demo/api
+shared_ci:
+  project: platform/gitlab-ci-templates
+  ref: REPLACE_WITH_APPROVED_SHARED_CI_REF
+workload:
+  name: container-buildkit
+  adoption: composition
+compositions:
+  - file: /pipelines/container-buildkit.yml
+    instances:
+      - api
+    inputs:
+      instance: api
+      image-repository: registry.example.com/dev/platform/api
+      semgrep-rules: ci/semgrep-rules.yml
+      lockfiles: go.sum
+      sast-policy-mode: advisory
+bespoke_jobs:
+  - name: unit-tests
+    stage: verify
+    reason: No component runs this project's Go test suite; the composition covers the release
+      chain, not the language toolchain.
+retired_jobs:
+  - name: trivy-fs
+    reason: Replaced by api:security-filesystem-trivy, which writes scan-result.json and fails
+      on a scanner error instead of ending in `|| true`.
+environments:
+  - name: prod
+    target: registry.example.com/prod
+notes: sast-policy-mode is advisory while the backlog of existing semgrep findings is worked
+  down. Every other gate is blocking, secret detection included, and the relaxation is this
+  one input rather than an allow_failure anywhere. Return it to blocking before the next release.

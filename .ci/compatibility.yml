@@ -1,0 +1,161 @@
+---
+# Tested server, runner and report-mode combinations.
+#
+# Contract: docs/gitlab-ci-agent-standard.md sections 4 and 14.1.
+# A row is evidence that the combination was exercised, with the date and the
+# means. Do not add a row for a combination nobody has run.
+
+schema_version: 1
+
+combinations:
+  - gitlab: 18.9.1-ee
+    # Nothing in the runner configuration pins a gitlab-runner version, and the
+    # runners API was not queried for it.
+    runner: unresolved
+    executor: docker
+    report_mode: artifact-only
+    verified_at: 2026/09/15
+    # Section 14.1 evidence labels, cumulative and not interchangeable.
+    evidence:
+      - gitlab-linted
+    notes: >-
+      Merged-config lint through POST /api/v4/projects/:id/ci/lint of every
+      component and composition in 1.0.0-rc.1, of the four legacy consumer
+      configurations that must keep their job names, and of the repository's
+      own pipeline. No pipeline was executed on this combination.
+
+  - gitlab: 18.9.1-ee
+    runner: unresolved
+    executor: docker
+    report_mode: artifact-only
+    verified_at: 2026/09/16
+    evidence:
+      - integration-tested
+      - report-ingestion-tested
+    notes: >-
+      Consumer pipelines on the originating estate, 2026/09: eleven projects
+      executed shared ref 1.0.0-rc.2. report-ingestion-tested is earned by
+      quality-sonarqube alone — one consumer imported two SARIF reports into
+      SonarQube Community Build and the gate result was read back from the
+      server. Nothing else in this release has been proven to reach a report
+      sink.
+
+# Evidence held per component and composition, as of 1.0.0.
+#
+# Section 14.1's labels are cumulative and not interchangeable. Every entry
+# below also holds `source-reviewed` and `yaml-parsed`; only the highest label
+# reached is recorded here. The authority for each one is the `validation`
+# block of that component's own `contract.yml`, reproduced into
+# `.ci/catalog.yml` by the generator. This file is the summary, not the source:
+# when the two disagree, the contract is right.
+#
+# What counts as a run, and what does not. A component is integration-tested
+# when a consumer pipeline EXECUTED its job and that job went green. A job
+# GitLab created and nobody started is not a run: one consumer's pipeline
+# created two terraform-apply jobs as manual and both are still unstarted. A job
+# a rule skipped is not a run: another created ansible-lint and skipped it
+# behind a red preflight. A lint is not a run at all.
+#
+# A composition is integration-tested when a real pipeline has run every job it
+# creates. terraform-deploy, container-buildkit and terraform-module each had
+# their verify half executed on rc.2 and their apply, build or publish half not,
+# so all three stay experimental; their contracts say which half ran where.
+
+evidence:
+
+  # Evidence below comes from consumer pipelines on the originating estate,
+  # 2026/09, all on shared ref 1.0.0-rc.2: eleven projects covering wiki sync, a
+  # documentation site, three GitOps repositories, three Terraform repositories,
+  # a chart repository and an Ansible repository. Project names and pipeline ids
+  # are not reproduced here; each component's own contract.yml records the run
+  # that promoted it.
+  integration-tested:
+    - container-export-skopeo
+    - container-list-rke2
+    - container-mirror-skopeo
+    - docs-wiki-sync
+    - kubernetes-validate
+    - quality-sonarqube
+    - security-filesystem-trivy
+    - security-sast-semgrep
+    - security-secrets-gitleaks
+    - terraform-fmt
+    - terraform-plan
+    - terraform-validate
+  compositions-integration-tested:
+    - container-mirror
+    - docs-wiki
+    - kubernetes-gitops
+
+  # A report reached its sink and was read back from it. One consumer imported
+  # two SARIF reports and a coverage report into SonarQube Community Build and
+  # the job read the resulting gate verdict back from the server, recording it
+  # in advisory mode. A second reached "QUALITY GATE STATUS: PASSED" with no
+  # SARIF, which establishes ingestion of the analysis but not of a scanner
+  # report.
+  report-ingestion-tested:
+    - quality-sonarqube
+
+  # The merged configuration compiles against GitLab 18.9.1-ee through
+  # POST /api/v4/projects/:id/ci/lint, AND the component's runtime helpers pass
+  # their unit tests in tests/runtime/. Each of these is experimental and its
+  # contract says why.
+  runtime-tested:
+    - ansible-check
+    - ansible-lint
+    - ansible-syntax
+    - container-promote-harbor
+    - container-sign-attest-cosign
+    - helm-package-publish
+    - helm-validate
+    - quality-dependency-lockfiles
+    - security-filesystem-grype
+    - security-image-grype
+    - security-image-trivy
+    - security-repository-audit
+    - security-sbom-syft
+    - security-sbom-upload-dtrack
+    - security-sync-vigil
+    - security-verify-vigil
+    - terraform-apply
+    - terraform-module-publish
+
+  # The merged configuration compiles, and that is all. These components carry
+  # no separable runtime, or their runtime is the job script itself.
+  gitlab-linted:
+    - container-build-buildkit
+    - container-build-jib
+    - container-build-ko
+    - container-smoke-test
+    - release-trigger-jenkins
+    - release-trigger-semaphore
+
+  # Compositions that have not run every job they create. A composition's lint
+  # evidence is the lint of its own merged configuration; it inherits nothing
+  # from the components it includes, and a released component inside it does not
+  # make it released.
+  compositions-gitlab-linted:
+    - ansible-verify
+    - container-buildkit
+    - container-jib
+    - container-ko
+    - helm-chart
+    - repository-secret-audit
+    - terraform-deploy
+    - terraform-module
+    - terraform-verify
+
+report_modes:
+  artifact-only:
+    supported: true
+    # Scanners write SARIF as job artifacts. templates/quality-sonarqube imports
+    # them with sonar.sarifReportPaths against SonarQube Community Build 26.4.
+    # docs/SAST_TO_SONARQUBE.md records the 2026/09/09 verification.
+    verified_at: 2026/09/09
+  gitlab-native:
+    # Needs a licence tier this estate has not confirmed; see gitlab.tier in
+    # .ci/estate.yml.
+    supported: unresolved
+  sarif:
+    # Same dependency as gitlab-native: GitLab's own SARIF ingestion.
+    supported: unresolved

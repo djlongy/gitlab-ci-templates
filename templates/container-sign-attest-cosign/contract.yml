@@ -1,0 +1,81 @@
+---
+name: container-sign-attest-cosign
+kind: component
+status: experimental
+introduced_in: 1.0.0
+minimum_gitlab: '18.9'
+# Retry policy: the `max-retries` input (0, 1 or 2, default 1) sets `retry: max`,
+# and `retry: when` is `runner_system_failure` and nothing else. A job killed by
+# its runner runs again; a failed gate never does.
+emitted_jobs:
+  - pattern: '{instance}:container-sign-attest-cosign'
+    stage: attest
+    blocking: true
+outputs:
+  - path: .ci-artifacts/{instance}/container-sign-attest-cosign/attestation-result.json
+    producer: '{instance}:container-sign-attest-cosign'
+    format: JSON
+    schema: >-
+      schema_version 1; status, subject, digest, signer (tool, version, verified
+      binary sha256, key URI, Vault address, auth path and role),
+      transparency_log_upload, attached evidence with predicate hashes,
+      created_at.
+    subject_identity: repository@sha256 digest from the build's image.json.
+    retention: 1 week
+required_secrets:
+  - name: VAULT_ID_TOKEN
+    kind: id-token
+    audience: 'https://vault.example.com:8200'
+    role: gitlab-ci
+    scope: >-
+      Exchanged at the jwt auth mount for a token permitted to sign with the
+      Transit key named by cosign-key. Audience, mount and role are inputs.
+    protected_ref_required: false
+  - name: HARBOR_USER
+    kind: ci-variable
+    scope: Read image manifests from the candidate project, write signatures beside them.
+  - name: HARBOR_PASSWORD
+    kind: ci-variable
+    scope: Read image manifests from the candidate project, write signatures beside them.
+runtime_image:
+  reference: 'docker.io/python@sha256:cd7c412d000912f29075a1b8803e43cb2f38bb67f104019df526df5ceaf30569'
+  pinning: digest
+  tool_versions:
+    python: '3.12'
+    cosign: v2.4.1
+trust:
+  privileged: false
+  network_egress:
+    - registry.example.com
+    - vault.example.com
+    - github.com (the pinned cosign release asset)
+  runner_profile: >-
+    Any unprivileged Docker executor with outbound access to Vault and the
+    registry. No Docker socket.
+  protected_ref_required: true
+validation:
+  evidence:
+    - source-reviewed
+    - yaml-parsed
+    - gitlab-linted
+    - runtime-tested
+  verified_at: 2026/09/15
+  environment: gitlab.example.com 18.9.1-ee, project 18
+  notes: >-
+    Failure semantics, all hard: no ID token, a rejected Vault login, a login
+    without a client token, a cosign download whose sha256 does not match
+    runtime/sign/cosign_checksums.txt, an unreadable Transit key, a missing SBOM
+    or vulnerability record while its attestation is enabled, an SBOM whose
+    subject is a different image, or any non-zero cosign exit. The predecessor
+    exited 0 on the first three and on both missing-evidence cases. No SLSA
+    provenance is produced: section 11.1 forbids labelling hand-written source
+    metadata as a verified SLSA level, and no builder-produced provenance is
+    available to attach instead. The vulnerability predicate is the scan job's
+    scan-result.json. gitlab-linted through the CI Lint API; no job ran.
+    runtime-tested: unit tests cover every failure path above with cosign and
+    the HTTP layer stubbed. No image has been signed by this component, and the
+    v2.4.1 checksums were read from the published cosign_checksums.txt on
+    2026/09/15. Status: experimental, because no consumer pipeline has run this
+    component on 1.0.0-rc.2. `released` in this repository means a consumer job
+    executed green, not that the component looks finished. platform/demo-app's build
+    source is tags-only, so no candidate chain job was created.

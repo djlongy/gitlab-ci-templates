@@ -1,0 +1,32 @@
+---
+# examples/container-buildkit-tags-only/.gitlab-ci.yml
+#
+# The same Dockerfile release pipeline as examples/container-buildkit, for a
+# project that releases on a tag and only on a tag.
+#
+# `build-sources: tags-only` confines the candidate chain — the build, the smoke
+# test, the SBOM, the image scan, the signature and the attestations — to a
+# protected tag push. A merge request and a default-branch push still run the
+# four verify jobs; they create no build job, push no image to Harbor and sign
+# nothing. The default, `default-branch-and-tags`, builds a candidate on every
+# default-branch push as well, which is the right shape for a project whose main
+# branch is meant to produce a deployable image.
+#
+# Choose tags-only when a push to the default branch must not mutate a registry.
+#
+# `ref` must be a protected release tag or a full commit SHA. .ci/estate.yml
+# records shared_ci.approved_ref as unresolved because no release tag exists
+# yet; put the approved one here, never a branch name.
+include:
+  - project: 'platform/gitlab-ci-templates'
+    ref: 'REPLACE_WITH_APPROVED_SHARED_CI_REF'
+    file: '/pipelines/container-buildkit.yml'
+    inputs:
+      instance: api
+      image-repository: 'registry.example.com/dev/platform/api'
+      dockerfile: 'Dockerfile'
+      semgrep-rules: 'ci/semgrep-rules.yml'
+      lockfiles: 'go.sum'
+      build-sources: 'tags-only'
+      tags:
+        - '$CI_COMMIT_TAG'

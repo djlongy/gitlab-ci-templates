@@ -1,0 +1,73 @@
+---
+name: helm-validate
+kind: component
+status: experimental
+introduced_in: 1.0.0
+minimum_gitlab: '18.9'
+
+# Retry policy: the `max-retries` input (0, 1 or 2, default 1) sets `retry: max`,
+# and `retry: when` is `runner_system_failure` and nothing else. A job killed by
+# its runner runs again; a failed gate never does.
+emitted_jobs:
+  - pattern: '{instance}:helm-validate'
+    stage: verify
+    blocking: true
+
+outputs:
+  - path: .ci-artifacts/{instance}/helm-validate/{chart}[--{values}].rendered.yaml
+    producer: '{instance}:helm-validate'
+    format: yaml
+    subject_identity: >-
+      The chart directory and values file the render came from, both in the file
+      name. This is review evidence, not a release identity: helm template
+      renders without a cluster, so `lookup` is always empty and a hook-driven
+      resource is absent. It records what was validated, not what a cluster will
+      hold after an install.
+    retention: 1 week
+
+required_secrets: []
+
+runtime_image:
+  reference: 'docker.io/alpine/helm@sha256:ed9dfc49d43d034df3f9880eb777caf0183e5156508672478b80412c63f3db4f'
+  pinning: digest
+  tool_versions:
+    helm: 3.16.3
+    kubeconform: 0.6.7
+    architecture: linux/amd64
+
+trust:
+  privileged: false
+  network_egress:
+    # The execution image.
+    - registry.example.com
+    # The pinned kubeconform release and its checksum file.
+    - github.com
+    - objects.githubusercontent.com
+    # kubeconform's built-in schema catalogue. This is a MOVING remote: the
+    # schemas come from the master branch of yannh/kubernetes-json-schema, so
+    # the scan configuration is not fully pinned in the sense of section 12.
+    # Mirror the catalogue and pass schema-locations to close that gap.
+    - raw.githubusercontent.com
+    # Any chart repository a chart's Chart.lock points at.
+  runner_profile: shared-docker
+  protected_ref_required: false
+
+validation:
+  evidence:
+    - source-reviewed
+    - yaml-parsed
+    - gitlab-linted
+    - runtime-tested
+  verified_at: 2026/09/15
+  environment: >-
+    alpine/helm 3.16.3 at the pinned digest, linux/amd64 under Docker on macOS,
+    against the real kubeconform v0.6.7 release and its published CHECKSUMS.
+  notes: >-
+    Runtime-tested as the copy embedded in template.yml, not as the file under
+    runtime/: the embedding is where a literal newline or a heredoc terminator
+    changes meaning, so the source file passing proves nothing about the job.
+    Seven cases were exercised: a clean chart; a chart that fails to render; a
+    chart that renders a schema-invalid resource; a chart declaring dependencies
+    with no Chart.lock; a chart path escaping the checkout; a tampered checksum
+    pin; and a chart validated once per values file. No pipeline has been run:
+    the merged configuration is linted only.

@@ -1,0 +1,19 @@
+# Python dependencies of the wiki runtime, pinned by version and hash.
+#
+# docfilter.py and wiki-sync.py import yaml to read exclude_docs / not_in_nav
+# from a consumer's mkdocs.yml. That is the only third-party import in the
+# runtime, and the component installs it with --require-hashes so an index
+# serving a different artefact for this version fails the job instead of
+# running. Section 12: pin runtime tools and dependency sources.
+#
+# Install exactly as the component does:
+#   pip install --no-deps --require-hashes -r requirements.txt
+#
+# Hashes are the PyPI sha256 digests for 6.0.2: the source distribution and the
+# two CPython 3.12 manylinux wheels (x86_64, aarch64). Add a hash when the
+# execution image's interpreter or architecture changes, or the install fails
+# closed — which is the intended behaviour, not a bug to work around.
+pyyaml==6.0.2 \
+    --hash=sha256:d584d9ec91ad65861cc08d42e834324ef890a082e591037abe114850ff7bbc3e \
+    --hash=sha256:80bab7bfc629882493af4aa31a4cfa43a4c57c83813253626916b8c7ada83476 \
+    --hash=sha256:1f71ea527786de97d1a0cc0eacd1defc0985dcf6b3f17bb77dcfc8c34bec4dc5

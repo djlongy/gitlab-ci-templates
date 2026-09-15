@@ -1,0 +1,27 @@
+---
+# terraform-module/.ci/project.yml
+#
+# The record of what this project adopted from the shared CI repository.
+# Contract: docs/gitlab-ci-agent-standard.md section 4, schema
+# tests/contracts/project.schema.json, field guide docs/reference/project-yml.md.
+#
+# Metadata, not GitLab configuration: nothing reads this at pipeline time. It
+# exists so the next reader can see which composition is in use, under which
+# instance names, and what was decided on the way in. The project path below is
+# illustrative, as is everything else in examples/.
+schema_version: 1
+project: demo/terraform-modules
+shared_ci:
+  project: platform/gitlab-ci-templates
+  ref: REPLACE_WITH_APPROVED_SHARED_CI_REF
+workload:
+  name: terraform-module
+  adoption: composition
+compositions:
+  - file: /pipelines/terraform-module.yml
+    instances:
+      - hypervisor-vm
+    inputs:
+      instance: hypervisor-vm
+      module-name: vm
+      module-system: hypervisor

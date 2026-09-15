@@ -1,0 +1,70 @@
+---
+# Machine-readable half of the component contract (section 6.1).
+name: container-build-ko
+kind: component
+status: experimental
+introduced_in: 1.0.0
+minimum_gitlab: '18.9'
+# Retry policy: the `max-retries` input (0, 1 or 2, default 1) sets `retry: max`,
+# and `retry: when` is `runner_system_failure` and nothing else. A job killed by
+# its runner runs again; a failed gate never does.
+emitted_jobs:
+  - pattern: '{instance}:container-build-ko'
+    stage: build
+    blocking: true
+outputs:
+  - path: '.ci-artifacts/{instance}/container-build-ko/image.json'
+    producer: '{instance}:container-build-ko'
+    format: json
+    schema: 'image identity schema 1, section 9.1'
+    subject_identity: 'repository@sha256 digest, taken from ko --image-refs'
+    retention: 1 week
+  - path: '.ci-artifacts/{instance}/container-build-ko/build.env'
+    producer: '{instance}:container-build-ko'
+    format: dotenv
+    schema: 'CI_TPL_IMAGE_REFERENCE and CI_TPL_IMAGE_PUSHED'
+    subject_identity: 'same digest as image.json; convenience only, never authoritative'
+    retention: 1 week
+required_secrets:
+  - name: HARBOR_USER
+    kind: ci-variable
+    scope: 'push to the candidate registry project'
+    protected_ref_required: false
+  - name: HARBOR_PASSWORD
+    kind: ci-variable
+    scope: 'push to the candidate registry project'
+    protected_ref_required: false
+runtime_image:
+  reference: 'docker.io/golang@sha256:383395b794dffa5b53012a212365d40c8e37109a626ca30d6151c8348d380b5f'
+  pinning: digest
+  tool_versions:
+    go: '1.23-alpine'
+    ko: v0.19.1
+    base-image: 'cgr.dev/chainguard/static@sha256:bf639cba19ba56329e6907ac26a7afcdde57a80b6aa66d5100da6883196e6b82'
+trust:
+  privileged: false
+  network_egress:
+    - 'proxy.golang.org and sum.golang.org: pinned ko install and module verification'
+    - 'cgr.dev: default base image'
+    - 'registry.example.com: candidate registry push'
+  runner_profile: >-
+    Docker executor, no nested build privileges. ko builds and pushes from the
+    Go toolchain image directly.
+  protected_ref_required: false
+validation:
+  evidence:
+    - source-reviewed
+    - yaml-parsed
+    - gitlab-linted
+  verified_at: 2026/09/15
+  notes: >-
+    Failure semantics (section 10.1). The job fails when ko exits non-zero, when
+    it writes no reference file, when the reference is not repository@digest,
+    and when the repository it pushed to differs from image-repository. The
+    previous template took the last line of ko's merged stdout and stderr, so a
+    warning printed last became the image identity. Tag aliases now come only
+    from the tags input: the implicit latest push is gone. ko is installed at a
+    pinned version through the Go module proxy, which is section 12's verified
+    immutable source; go install ...@latest is gone. Not runtime-tested: no
+    pipeline has executed this component, and the -buildvcs=false setting that
+    removes the git dependency has not been exercised against a real module.

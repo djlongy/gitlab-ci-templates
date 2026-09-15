@@ -1,0 +1,74 @@
+---
+name: quality-dependency-lockfiles
+kind: component
+status: experimental
+introduced_in: 1.0.0
+minimum_gitlab: '18.9'
+# Retry policy: the `max-retries` input (0, 1 or 2, default 1) sets `retry: max`,
+# and `retry: when` is `runner_system_failure` and nothing else. A job killed by
+# its runner runs again; a failed gate never does.
+emitted_jobs:
+  - pattern: '{instance}:quality-dependency-lockfiles'
+    stage: verify
+    blocking: true
+outputs:
+  - path: .ci-artifacts/{instance}/quality-dependency-lockfiles/lockfile-result.json
+    producer: '{instance}:quality-dependency-lockfiles'
+    format: JSON
+    schema: >-
+      schema_version 1; subject, declared (`set` or `none`), one check per
+      declared lockfile with present, pinned and detail, overall status
+    subject_identity: project path and commit SHA of the checked source
+    retention: 1 week
+required_secrets: []
+runtime_image:
+  reference: 'docker.io/alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc'
+  pinning: digest
+  tool_versions:
+    alpine: '3.20'
+trust:
+  privileged: false
+  network_egress:
+    - registry.example.com
+  runner_profile: shared-docker
+  protected_ref_required: false
+validation:
+  evidence:
+    - source-reviewed
+    - yaml-parsed
+    - gitlab-linted
+    - runtime-tested
+  verified_at: 2026/09/15
+  environment: 'gitlab.example.com 18.9.1-ee, project 18'
+  notes: >-
+    Scope. Checks that every lockfile the consumer declares exists, is
+    non-empty, and where it is a requirements-style file, that every requirement
+    line is pinned. Nothing is inferred from the checkout: the template this
+    replaces detected languages by looking for marker files in the root only, so
+    a monorepo with services/api/package.json was reported as having no Node
+    project and passed. Declaring the set per language root is what makes an
+    unchecked root visible, and the lockfiles input is therefore required with
+    no default. Failure semantics. A declared lockfile that is missing, empty or
+    unpinned fails the job; there is no advisory mode, because the check has no
+    severity scale and nothing to grade. A usage error (an absolute path, a path
+    that traverses out of the working directory, an empty declaration, or the
+    `none` sentinel combined with a path) exits 2 and fails the job. The literal
+    `none` is a declaration and not a path: it says the project has no lockfile,
+    records `declared: none` with an empty check list, and passes. It exists
+    because the container compositions always instantiate this component, so a
+    project with no third-party dependencies -- a stdlib-only Go module, whose
+    go.sum is empty -- could not otherwise get a green pipeline. An empty value
+    is still an error, so an input nobody filled in cannot read as one saying
+    there is nothing to fill in. Reproducibility is judged per line, not per
+    file: a requirements.txt in which one dependency is pinned and the rest
+    float fails, which the previous `grep -q "=="` check passed. -r/-c includes,
+    --hash lines and PEP 508 direct references count as pinned; an unpinned or
+    range requirement does not. Evidence: unit tests in
+    tests/runtime/scan/test_lockfiles.py covering the missing, empty, partially
+    pinned and traversal cases, CI Lint through tests/pipelines/. Status:
+    experimental. The component HAS run in a consumer pipeline and failed:
+    platform/demo-app (project 56) pipelines 5734 and 5745, jobs 47796 and 47859,
+    because a stdlib-only Go module had no lockfile to declare and an empty
+    declaration is a usage error. The `none` sentinel added in 1.0.0 is the fix,
+    and it has not itself been run in a pipeline, so there is still no green
+    consumer run to promote on.

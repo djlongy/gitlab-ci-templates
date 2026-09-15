@@ -1,0 +1,82 @@
+---
+# Contract for the ansible-syntax component. Schema: tests/contracts/contract.schema.json.
+# The inputs are not restated here; the catalogue generator reads them from the
+# spec header of template.yml.
+name: ansible-syntax
+kind: component
+status: experimental
+introduced_in: 1.0.0
+minimum_gitlab: '18.9'
+
+# Retry policy: the `max-retries` input (0, 1 or 2, default 1) sets `retry: max`,
+# and `retry: when` is `runner_system_failure` and nothing else. A job killed by
+# its runner runs again; a failed gate never does.
+emitted_jobs:
+  - pattern: '{instance}:ansible-syntax'
+    stage: verify
+    # ansible-playbook --syntax-check exits non-zero on a parse error, an
+    # unresolvable import or a vault file it cannot decrypt, and that exit code
+    # is the job's. Nothing swallows it.
+    blocking: true
+
+# The syntax check writes to the job log and produces no file. Section 9 defines
+# no artifact contract for it.
+outputs: []
+
+required_secrets:
+  - name: ANSIBLE_VAULT_PASSWORD
+    kind: ci-variable
+    scope: >-
+      Needed only when the play reads Ansible Vault encrypted variable files.
+      The component takes the variable NAME through the vault-password-secret
+      input; this entry records the name platform/infrastructure uses today. It must be a
+      masked variable and not a file type variable, since the job reads its
+      value. A merge request pipeline on an unprotected branch does not receive
+      a protected variable, so a tree with vaulted group_vars fails the syntax
+      check there. That is a credential scoping decision for the consumer, not
+      something this component papers over.
+    protected_ref_required: true
+
+runtime_image:
+  # The estate execution environment, built from ansible/execution/Containerfile
+  # in the infrastructure repository and published by that repository, not this one.
+  # It carries ansible-core 2.18 and the runtime collection set from
+  # ansible/execution/catalog.yml. Collections come from the image; nothing is
+  # fetched from Galaxy during the job.
+  reference: >-
+    registry.example.com/shared/base/ansible-ee@sha256:64703d0cec04567ef5b5108b755528ad911db3a6ebb5dfa90d20cabc145d3c9b
+  pinning: digest
+  tool_versions:
+    ansible-core: 2.18.x
+    collections: ansible.posix, ansible.utils, community.general, community.crypto, community.hashi_vault
+
+trust:
+  privileged: false
+  # The image pull only. --syntax-check parses locally and opens no connection
+  # to a managed host.
+  network_egress:
+    - registry.example.com
+  runner_profile: linux/amd64 docker executor, unprivileged
+  protected_ref_required: false
+
+validation:
+  evidence:
+    - source-reviewed
+    - yaml-parsed
+    - gitlab-linted
+    - runtime-tested
+  verified_at: 2026/09/15
+  environment: gitlab.example.com 18.9.1-ee, project 18
+  notes: >-
+    gitlab-linted through the CI Lint API by
+    tests/pipelines/test_ansible_components.py. The job shell is behaviour
+    tested by tests/runtime/ansible/ with ansible-playbook stubbed, covering the
+    checkout escape check, the path validation, the vault password handling and
+    the exact argument list. runtime-tested covers the tool invocation only: the
+    pinned image was run by hand on 2026/09/15 with the argument list this job
+    builds, exit 0 on a valid playbook and exit 4 on one with a malformed task.
+    Nothing here was executed by a GitLab runner, so this is not
+    integration-tested. The image tag was resolved to this digest with `crane
+    digest` on 2026/09/15; `:latest` moves, the digest does not. Status:
+    experimental, because no consumer pipeline has run any ansible component;
+    platform/infrastructure's ansible jobs were skipped behind a red preflight.

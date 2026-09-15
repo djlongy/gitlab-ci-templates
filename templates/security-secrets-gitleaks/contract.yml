@@ -1,0 +1,73 @@
+---
+name: security-secrets-gitleaks
+kind: component
+status: released
+introduced_in: 1.0.0
+minimum_gitlab: '18.9'
+# Retry policy: the `max-retries` input (0, 1 or 2, default 1) sets `retry: max`,
+# and `retry: when` is `runner_system_failure` and nothing else. A job killed by
+# its runner runs again; a failed gate never does.
+emitted_jobs:
+  - pattern: '{instance}:security-secrets-gitleaks'
+    stage: verify
+    blocking: true
+outputs:
+  - path: .ci-artifacts/{instance}/security-secrets-gitleaks/gitleaks.json
+    producer: '{instance}:security-secrets-gitleaks'
+    format: gitleaks JSON
+    subject_identity: source commit CI_COMMIT_SHA over GIT_DEPTH commits of history
+    retention: 1 week
+  - path: .ci-artifacts/{instance}/security-secrets-gitleaks/severities.txt
+    producer: '{instance}:security-secrets-gitleaks'
+    format: one line per finding
+    retention: 1 week
+  - path: .ci-artifacts/{instance}/security-secrets-gitleaks/scan-result.json
+    producer: '{instance}:security-secrets-gitleaks'
+    format: JSON
+    schema: section 9.2 scan-result, schema_version 1
+    subject_identity: project path and commit SHA of the scanned source
+    retention: 1 week
+required_secrets: []
+runtime_image:
+  reference: 'docker.io/zricethezav/gitleaks@sha256:0e99e8821643ea5b235718642b93bb32486af9c8162c8b8731f7cbdc951a7f46'
+  pinning: digest
+  tool_versions:
+    gitleaks: 8.21.2
+trust:
+  privileged: false
+  network_egress:
+    - registry.example.com
+  runner_profile: shared-docker
+  protected_ref_required: false
+validation:
+  evidence:
+    - source-reviewed
+    - yaml-parsed
+    - gitlab-linted
+    - runtime-tested
+    - integration-tested
+  verified_at: 2026/09/16
+  revision: '1.0.0-rc.2'
+  environment: >-
+    gitlab.example.com 18.9.1-ee, project 18, POST /api/v4/projects/<project-id>/ci/lint.
+    Executed on shared ref 1.0.0-rc.2 in: platform/cluster-gitops (29) 5719 (merge
+    request) and 5722 (main); platform/platform-gitops (12) 5721 and 5725;
+    platform/demo-app (56) 5734 and 5745. Both paths are covered: cluster-gitops is a
+    clean tree, platform-gitops carries real findings suppressed by a
+    .gitleaksignore under a reviewed exception.
+  notes: >-
+    Failure semantics. A detected secret fails the job under the default
+    blocking policy and is recorded under advisory. Any execution failure fails
+    the job in BOTH modes: gitleaks 8.21.2 returns 1 for a leak and also for a
+    source it cannot read, so the wrapper resolves that code against the report
+    and treats "exit 1 with no finding" as an execution failure rather than a
+    gate result. A missing or empty report fails the job, as does a gitleaks
+    exit of 0 alongside findings in the report. No SARIF is produced: the estate
+    report mode is artifact-only, its only SARIF sink is SonarQube, and a leaked
+    credential is meant to fail this job rather than land on a dashboard.
+    History coverage is explicit: GIT_DEPTH comes from the history-depth input
+    (default 0, full history) instead of being inherited, because `gitleaks
+    detect` scans commits and a shallow clone silently narrows the scan.
+    Evidence: unit tests in tests/runtime/scan/, exit codes measured against the
+    pinned image on 2026/09/15, CI Lint through tests/pipelines/. No pipeline
+    has executed this component.

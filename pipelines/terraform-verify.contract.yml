@@ -1,0 +1,54 @@
+---
+# pipelines/terraform-verify.contract.yml — the contract for the composition beside it.
+#
+# Section 6.3. The catalogue generator reads this plus the spec:inputs header
+# of terraform-verify.yml; do not restate inputs here.
+name: terraform-verify
+kind: pipeline
+status: experimental
+introduced_in: 1.0.0
+minimum_gitlab: '18.9'
+emitted_jobs:
+  - pattern: '{instance}:terraform-fmt'
+    stage: verify
+    blocking: true
+  - pattern: '{instance}:terraform-validate'
+    stage: verify
+    blocking: true
+  - pattern: '{instance}:security-filesystem-trivy'
+    stage: verify
+    blocking: true
+outputs:
+  - path: .ci-artifacts/{instance}/security-filesystem-trivy/scan-result.json
+    producer: '{instance}:security-filesystem-trivy'
+    format: JSON
+    schema: section 9.2 scan-result, schema_version 1
+    subject_identity: project path and commit SHA of the scanned configuration.
+    retention: 1 week
+required_secrets: []
+runtime_image:
+  reference: 'per component: every include forwards a digest-pinned execution image, and the
+    ones a consumer may need to change are inputs of this composition'
+  pinning: input
+trust:
+  privileged: false
+  network_egress:
+    - registry.example.com
+    - registry.terraform.io
+    - gitlab.example.com
+    - the trivy vulnerability database and check bundle sources
+  runner_profile: shared-docker, the estate instance runners. They are registered untagged,
+    so runner-tags selects nothing today and a tag is not a permission boundary.
+  protected_ref_required: false
+validation:
+  evidence:
+    - source-reviewed
+    - yaml-parsed
+    - gitlab-linted
+  verified_at: 2026/09/15
+  environment: gitlab.example.com 18.9.1-ee, project 18, POST /api/v4/projects/<project-id>/ci/lint
+  notes: Verification only. This composition holds no state credentials, produces no plan
+    and applies nothing; a green run must not be reported as infrastructure security or as
+    evidence a change is safe to apply. `terraform validate` runs `terraform init -backend=false`,
+    which still reaches the provider mirror, so it is not offline. Several roots are several
+    includes with distinct instances. Evidence is gitlab-linted only.

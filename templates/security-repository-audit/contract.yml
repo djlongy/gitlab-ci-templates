@@ -1,0 +1,102 @@
+---
+name: security-repository-audit
+kind: component
+status: experimental
+introduced_in: 1.0.0
+minimum_gitlab: '18.9'
+minimum_runner: '16.0'
+
+# Retry policy: the `max-retries` input (0, 1 or 2, default 1) sets `retry: max`,
+# and `retry: when` is `runner_system_failure` and nothing else. A job killed by
+# its runner runs again; a failed gate never does.
+emitted_jobs:
+  - pattern: '{instance}:security-repository-audit'
+    stage: verify
+    blocking: true
+
+outputs:
+  - path: '.ci-artifacts/{instance}/security-repository-audit/audit-coverage.json'
+    producer: '{instance}:security-repository-audit'
+    format: json
+    schema: >-
+      schema_version 1; source (explicit|group), group_path, generated_at,
+      in_scope, cloned, repositories[] with path and outcome
+    subject_identity: >-
+      The full path of every repository in scope, with whether it was actually
+      cloned. This is the coverage claim the audit is allowed to make.
+    retention: 1 week
+  - path: '.ci-artifacts/{instance}/security-repository-audit/scan-result.json'
+    producer: '{instance}:security-repository-audit'
+    format: json
+    schema: >-
+      schema_version 1; subject, coverage (the record above, embedded), scanners
+      with the outcome of each (clean|findings|error|skipped), policy_mode,
+      source_commit, pipeline_id, job_id, completed_at
+    subject_identity: The repository set named in the embedded coverage record.
+    retention: 1 week
+  - path: '.ci-artifacts/{instance}/security-repository-audit/gitleaks/<repository>.json'
+    producer: '{instance}:security-repository-audit'
+    format: json
+    schema: Native gitleaks JSON report, one per scanned repository, redacted.
+    subject_identity: Repository directory name, which is its full path with / replaced by _.
+    retention: 1 week
+  - path: '.ci-artifacts/{instance}/security-repository-audit/terraform-audit.log'
+    producer: '{instance}:security-repository-audit'
+    format: text
+    schema: Console output of audit-secrets.sh; written only when scan-terraform is true.
+    retention: 1 week
+  - path: '.ci-artifacts/{instance}/security-repository-audit/terraform-state-scan.log'
+    producer: '{instance}:security-repository-audit'
+    format: text
+    schema: Console output of scan-state.sh; written only when scan-terraform is true.
+    retention: 1 week
+
+required_secrets:
+  - name: GROUP_SCAN_TOKEN
+    kind: ci-variable
+    scope: >-
+      Default name only; the consumer names the variable through the
+      api-token-variable input. read_api is needed for a group listing,
+      read_repository to clone. Section 10.2 prefers a short-lived identity here;
+      this is a static token inherited from security/group-scan.yml and is
+      recorded as such rather than presented as compliant.
+    protected_ref_required: false
+
+runtime_image:
+  reference: 'docker.io/zricethezav/gitleaks@sha256:0e99e8821643ea5b235718642b93bb32486af9c8162c8b8731f7cbdc951a7f46'
+  pinning: digest
+  tool_versions:
+    gitleaks: v8.21.2
+
+# No checkout: this job reads the named producer's artifacts and the APIs it
+# calls, so it runs with GIT_STRATEGY none and never clones the consumer
+# repository. tests/contracts/test_git_strategy.py holds both halves together.
+trust:
+  privileged: false
+  network_egress:
+    - gitlab.example.com
+    - registry.example.com
+    - the Alpine package mirror, for bash, curl, jq and git
+  runner_profile: shared-docker
+  protected_ref_required: false
+
+validation:
+  evidence:
+    - source-reviewed
+    - yaml-parsed
+    - gitlab-linted
+    - runtime-tested
+  verified_at: 2026/09/15
+  environment: >-
+    The runtime is tested against local git repositories and a stubbed gitleaks,
+    which pins exit-code handling but not gitleaks v8.21.2 itself. The job has
+    not been executed at this revision.
+  notes: >-
+    Failure semantics (section 10.1): an unresolvable repository set, a listing
+    call that fails, a set that resolves to nothing, any repository that fails to
+    clone, a gitleaks run that does not complete or produces an unparsable
+    report, a non-zero Terraform audit or state scan, or both scanners disabled
+    each fail the job. gitleaks findings and gitleaks execution errors are
+    distinguished and both block. The whole clone set stays inside the job:
+    unlike security/terraform-audit.yml, no cloned repository is uploaded as an
+    artifact.

@@ -1,0 +1,179 @@
+---
+# pipelines/helm-chart.yml
+#
+# Validate a Helm chart and publish it to an OCI registry.
+#
+#   verify  -> helm-validate (lint, render, schema-validate), gitleaks
+#   publish -> helm-package-publish, producing chart.json with the registry
+#              digest the push actually returned
+#
+# `helm lint` alone is not schema validation, which is why helm-validate renders
+# every chart and checks the result against the target Kubernetes API version.
+#
+# Publication rules. The consumer this replaces published on every default
+# branch push and on any tag with no gate at all. That behaviour is kept for the
+# default branch, and the tag half is narrowed to a PROTECTED tag: an
+# unprotected tag is not a release authorisation (section 7.2), and nothing in
+# the estate depended on publishing from one. Immutability is enforced by
+# `allow-overwrite: false`, so a version already in the registry is refused
+# rather than replaced.
+#
+# This composition does not build or scan a container image. A project that
+# ships both a chart and an image runs the chart publication as a separate
+# pipeline or a child pipeline: two complete compositions cannot be merged,
+# because their `stages:` and `workflow:` arrays conflict (section 6.2).
+
+#### Consumer interface ####
+spec:
+  inputs:
+    instance:
+      type: string
+      description: >-
+        Chart identifier. Jobs are `<instance>:helm-validate`,
+        `<instance>:security-secrets-gitleaks` and
+        `<instance>:helm-package-publish`.
+      regex: '^[a-z][a-z0-9-]{0,47}$'
+    working-directory:
+      type: string
+      description: Directory the chart paths are relative to.
+      default: '.'
+    chart-paths:
+      type: string
+      description: >-
+        Chart directories to validate, one per line, each containing a
+        Chart.yaml. A list that names no chart fails the job: validating nothing
+        is not a pass.
+    chart-path:
+      type: string
+      description: >-
+        The single chart that is packaged and published, relative to
+        working-directory. It must be one of chart-paths.
+    chart-repository:
+      type: string
+      description: >-
+        OCI namespace the chart is pushed into, as <registry-host>/<project>,
+        with no chart name, no tag and no oci:// scheme, for example
+        registry.example.com/charts. helm derives the name and tag from
+        Chart.yaml.
+      regex: '^[a-z0-9][a-z0-9.:-]*(/[a-z0-9][a-z0-9._-]*)+$'
+    values-files:
+      type: string
+      description: >-
+        Values files rendered during validation, one per line, relative to
+        working-directory. Empty means the chart defaults only.
+      default: ''
+    release-name:
+      type: string
+      description: Release name used for the validation render.
+      default: 'validate'
+    kubernetes-version:
+      type: string
+      description: Kubernetes API version the rendered manifests are checked against.
+      default: '1.31.0'
+    schema-locations:
+      type: string
+      description: >-
+        Extra schema locations for custom resources, one per line. Empty means
+        the bundled schemas only.
+      default: ''
+    ignore-missing-schemas:
+      type: boolean
+      description: >-
+        Skip resources with no schema instead of failing. Off by default: a CRD
+        with no schema is unvalidated, and silently passing it is how an invalid
+        manifest reaches a cluster.
+      default: false
+    registry-username-variable:
+      type: string
+      description: >-
+        Name of the CI variable holding the registry username. The name, never
+        the value.
+      regex: '^[A-Z][A-Z0-9_]*$'
+      default: 'HARBOR_USER'
+    registry-password-variable:
+      type: string
+      description: >-
+        Name of the CI variable holding the registry password. The name, never
+        the value.
+      regex: '^[A-Z][A-Z0-9_]*$'
+      default: 'HARBOR_PASSWORD'
+    runner-tags:
+      type: array
+      description: Approved runner selection from the estate profile.
+      default: []
+    helm-image:
+      type: string
+      description: Approved Helm image pinned by digest.
+      regex: '^.+@sha256:[0-9a-f]{64}$'
+      default: 'docker.io/alpine/helm@sha256:ed9dfc49d43d034df3f9880eb777caf0183e5156508672478b80412c63f3db4f'
+    gitleaks-image:
+      type: string
+      description: Approved gitleaks image pinned by digest.
+      regex: '^.+@sha256:[0-9a-f]{64}$'
+      default: 'docker.io/zricethezav/gitleaks@sha256:0e99e8821643ea5b235718642b93bb32486af9c8162c8b8731f7cbdc951a7f46'
+---
+
+#### Pipeline ownership ####
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG'
+    - when: never
+
+stages:
+  - verify
+  - publish
+
+#### Components at the same shared-CI revision ####
+include:
+  - local: '/templates/helm-validate/template.yml'
+    inputs:
+      instance: $[[ inputs.instance ]]
+      stage: verify
+      working-directory: $[[ inputs.working-directory ]]
+      chart-paths: $[[ inputs.chart-paths ]]
+      values-files: $[[ inputs.values-files ]]
+      release-name: $[[ inputs.release-name ]]
+      kubernetes-version: $[[ inputs.kubernetes-version ]]
+      schema-locations: $[[ inputs.schema-locations ]]
+      ignore-missing-schemas: $[[ inputs.ignore-missing-schemas ]]
+      execution-image: $[[ inputs.helm-image ]]
+      runner-tags: $[[ inputs.runner-tags ]]
+      run-rules:
+        - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG'
+
+  - local: '/templates/security-secrets-gitleaks/template.yml'
+    inputs:
+      instance: $[[ inputs.instance ]]
+      stage: verify
+      working-directory: $[[ inputs.working-directory ]]
+      execution-image: $[[ inputs.gitleaks-image ]]
+      runner-tags: $[[ inputs.runner-tags ]]
+      policy-mode: blocking
+      run-rules:
+        - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG'
+
+  # No `needs:` on the publish job, so the verify stage is its barrier: a chart
+  # that fails validation or carries a secret is never pushed.
+  - local: '/templates/helm-package-publish/template.yml'
+    inputs:
+      instance: $[[ inputs.instance ]]
+      stage: publish
+      working-directory: $[[ inputs.working-directory ]]
+      chart-path: $[[ inputs.chart-path ]]
+      chart-repository: $[[ inputs.chart-repository ]]
+      registry-username-variable: $[[ inputs.registry-username-variable ]]
+      registry-password-variable: $[[ inputs.registry-password-variable ]]
+      allow-overwrite: false
+      execution-image: $[[ inputs.helm-image ]]
+      runner-tags: $[[ inputs.runner-tags ]]
+      run-rules:
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG && $CI_COMMIT_REF_PROTECTED == "true"'

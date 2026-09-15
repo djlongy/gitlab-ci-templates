@@ -1,0 +1,66 @@
+---
+# Machine-readable half of the component contract (section 6.1).
+name: container-smoke-test
+kind: component
+status: experimental
+introduced_in: 1.0.0
+minimum_gitlab: '18.9'
+# Retry policy: the `max-retries` input (0, 1 or 2, default 1) sets `retry: max`,
+# and `retry: when` is `runner_system_failure` and nothing else. A job killed by
+# its runner runs again; a failed gate never does.
+emitted_jobs:
+  - pattern: '{instance}:container-smoke-test'
+    stage: test
+    blocking: true
+outputs:
+  - path: '.ci-artifacts/{instance}/container-smoke-test/'
+    producer: '{instance}:container-smoke-test'
+    format: 'whatever the make target writes'
+    schema: >-
+      No file contract of its own. The directory is exported to the make target
+      as CI_TPL_ARTIFACT_DIR and uploaded on failure only.
+    retention: 3 days
+required_secrets:
+  - name: HARBOR_USER
+    kind: ci-variable
+    scope: 'pull the images under test from the candidate registry'
+    protected_ref_required: false
+  - name: HARBOR_PASSWORD
+    kind: ci-variable
+    scope: 'pull the images under test from the candidate registry'
+    protected_ref_required: false
+runtime_image:
+  reference: 'docker.io/docker@sha256:aa3df78ecf320f5fafdce71c659f1629e96e9de0968305fe1de670e0ca9176ce'
+  pinning: digest
+  tool_versions:
+    docker: '27'
+trust:
+  privileged: true
+  network_egress:
+    - 'registry.example.com: pull the images under test'
+  runner_profile: >-
+    Docker-in-Docker. The job needs a runner whose executor permits a privileged
+    service container. The estate's two instance runners are configured
+    privileged false, so this component cannot run on them as they stand: a
+    privileged runner has to be registered before any consumer adopts it.
+  protected_ref_required: false
+validation:
+  evidence:
+    - source-reviewed
+    - yaml-parsed
+    - gitlab-linted
+  verified_at: 2026/09/15
+  notes: >-
+    Consumer contract. The working directory must hold the compose file named by
+    compose-file and a Makefile with the target named by make-target. Both were
+    previously stated only in a header comment; the compose file is now checked
+    before the test runs. Failure semantics (section 10.1). The job fails when an
+    image-identities entry names an unusable variable, when a named image.json is
+    missing or does not validate, when image-identities is empty, when the compose
+    file is absent, and when the make target exits non-zero. Daemon TLS is on:
+    DOCKER_TLS_CERTDIR is /certs and the daemon is reached on 2376, replacing the
+    previous plaintext 2375. Known gap against section 12: make is installed with
+    apk at job time because the Docker CLI image does not carry it; supplying an
+    execution-image that already has the test tooling removes that install. Not
+    runtime-tested: no pipeline has executed this component, and the previous
+    template emitted no runnable job at all.

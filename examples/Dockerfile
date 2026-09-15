@@ -6,6 +6,7 @@
 # 3. Non-root user        — required by Kyverno policies
 # 4. apk upgrade          — fix known CVEs in base packages
 #
+# For Python services, see the Vigil Dockerfile as reference.
 # For Go services, use the distroless pattern below.
 # For Node services, use node:22-alpine.
 

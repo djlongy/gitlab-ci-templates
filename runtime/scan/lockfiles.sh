@@ -1,0 +1,187 @@
+#!/bin/sh
+# Declared-lockfile validator for quality-dependency-lockfiles.
+#
+# The template this replaces inferred the languages from whatever sat in the
+# checkout root, so a monorepo with services/api/package.json was reported as
+# having no Node project and passed. Here the consumer declares every lockfile
+# that must exist, per language root, and an undeclared root cannot be missed
+# because nothing is inferred.
+#
+# It also refuses the "one pinned line is reproducibility" reading: for a
+# requirements-style file EVERY requirement must be pinned, not merely one.
+#
+# Delivery: embedded verbatim in the component job script, because an
+# `include:` imports YAML and never checks out this repository.
+# tests/runtime/scan/test_embedded_runtime.py fails when the copy drifts.
+#
+# Usage:
+#   lockfiles.sh --out <file> --lockfiles <comma-separated relative paths>
+#   lockfiles.sh --out <file> --lockfiles none
+#
+# `none` is the one value that is not a path. It declares that the project has
+# no dependency lock file, which a project with no third-party dependencies
+# genuinely does not: a stdlib-only Go module commits an empty go.sum. An empty
+# list is still refused, because "I did not fill this in" and "there is nothing
+# to fill in" must not be the same input. `none` cannot be combined with a path.
+#
+# The list arrives as one comma-separated string because a GitLab `array` input
+# can only be interpolated where YAML expects an array (tags, rules, needs), not
+# into a variable a shell can read. Splitting it here rather than in the job
+# keeps the parsing under test.
+#
+# Exit codes: 0 every declared lockfile is present and pinned, 1 a declared
+# lockfile is missing, empty or unpinned, 2 usage or environment error.
+
+set -eu
+
+die() {
+  echo "lockfiles: ERROR: $1" >&2
+  exit 2
+}
+
+jstr() {
+  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+}
+
+# A requirements-style file is reproducible only when every requirement line
+# names an exact version. Hash lines and nested -r/-c includes are part of the
+# pinning mechanism; an editable install (-e) and a bare or range requirement
+# are not.
+requirements_unpinned() {
+  # Strip comments, indentation, a line-continuation backslash and trailing
+  # whitespace, so an indented --hash continuation is recognised as part of the
+  # pin rather than counted as a floating requirement.
+  sed -e 's/[[:space:]]*#.*$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*\\$//' \
+    -e 's/[[:space:]]*$//' "$1" | while IFS= read -r line; do
+    case "$line" in
+      '') continue ;;
+      -r*|--requirement*|-c*|--constraint*|--hash*|--index-url*|--extra-index-url*|--find-links*|--no-binary*|--only-binary*|--trusted-host*|--pre) continue ;;
+      *'=='*) continue ;;
+      *'@'*) continue ;;
+      *) printf '%s\n' "$line" ;;
+    esac
+  done
+}
+
+out=''
+lockfiles=''
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --out) out=$2 ; shift 2 ;;
+    --lockfiles)
+      old_ifs=$IFS
+      IFS=','
+      for declared in $2; do
+        IFS=$old_ifs
+        case "$declared" in
+          '') continue ;;
+          /*) die "lockfile path must be relative to the working directory: $declared" ;;
+          *..*) die "lockfile path must not traverse outside the working directory: $declared" ;;
+          *[[:space:]]*) die "lockfile path must not contain whitespace: $declared" ;;
+        esac
+        lockfiles="$lockfiles $declared"
+        IFS=','
+      done
+      IFS=$old_ifs
+      shift 2
+      ;;
+    *) die "unknown argument: $1" ;;
+  esac
+done
+
+[ -n "$out" ] || die 'missing --out'
+[ -n "$lockfiles" ] || die 'no lockfile declared; this component validates a declared set, it does not guess one'
+
+declared=set
+case " $lockfiles " in
+  *' none '*)
+    # A declaration, not a path. Mixing it with one is ambiguous -- it would
+    # read both as "there is nothing to check" and as "check this" -- so it is
+    # refused rather than resolved in either direction.
+    [ "$lockfiles" = ' none' ] ||
+      die "'none' declares that there is no lockfile, so it cannot be combined with a path:$lockfiles"
+    declared=none
+    lockfiles=''
+    ;;
+esac
+
+failed=0
+mkdir -p "$(dirname "$out")"
+
+{
+  printf '{\n'
+  printf '  "schema_version": 1,\n'
+  printf '  "subject": {\n'
+  printf '    "project": "%s",\n' "$(jstr "${CI_PROJECT_PATH:-unresolved}")"
+  printf '    "commit": "%s",\n' "$(jstr "${CI_COMMIT_SHA:-unresolved}")"
+  printf '    "working_directory": "%s"\n' "$(jstr "$(pwd)")"
+  printf '  },\n'
+  printf '  "declared": "%s",\n' "$declared"
+  printf '  "checks": [\n'
+} > "$out"
+
+first=1
+for lockfile in $lockfiles; do
+  present=true
+  pinned=true
+  detail=''
+
+  if [ ! -f "$lockfile" ]; then
+    present=false
+    pinned=false
+    detail='declared lockfile is missing'
+  elif [ ! -s "$lockfile" ]; then
+    pinned=false
+    detail='declared lockfile is empty'
+  else
+    case "$(basename "$lockfile")" in
+      requirements*.txt|constraints*.txt)
+        unpinned_count=$(requirements_unpinned "$lockfile" | wc -l | tr -d ' ')
+        if [ "$unpinned_count" -gt 0 ]; then
+          pinned=false
+          detail="$unpinned_count requirement line(s) are not pinned to an exact version"
+          requirements_unpinned "$lockfile" | head -5 | while IFS= read -r bad; do
+            echo "lockfiles:   unpinned: $lockfile: $bad" >&2
+          done
+        fi
+        ;;
+    esac
+  fi
+
+  if [ "$present" = true ] && [ "$pinned" = true ]; then
+    echo "lockfiles: OK   $lockfile"
+  else
+    echo "lockfiles: FAIL $lockfile: $detail" >&2
+    failed=1
+  fi
+
+  if [ "$first" -eq 1 ]; then first=0; else printf ',\n' >> "$out"; fi
+  printf '    {"path": "%s", "present": %s, "pinned": %s, "detail": "%s"}' \
+    "$(jstr "$lockfile")" "$present" "$pinned" "$(jstr "$detail")" >> "$out"
+done
+
+{
+  printf '\n  ],\n'
+  if [ "$failed" -eq 0 ]; then
+    printf '  "status": "pass",\n'
+  else
+    printf '  "status": "fail",\n'
+  fi
+  printf '  "created_at": "%s",\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  printf '  "pipeline_id": "%s",\n' "$(jstr "${CI_PIPELINE_ID:-unresolved}")"
+  printf '  "job_id": "%s"\n' "$(jstr "${CI_JOB_ID:-unresolved}")"
+  printf '}\n'
+} >> "$out"
+
+echo "lockfiles: evidence written to $out"
+
+if [ "$failed" -ne 0 ]; then
+  echo 'lockfiles: FAIL: one or more declared lockfiles are missing or unpinned.' >&2
+  exit 1
+fi
+if [ "$declared" = none ]; then
+  echo 'lockfiles: PASS: the project declares no lockfile (lockfiles: none); nothing to validate.'
+else
+  echo 'lockfiles: PASS: every declared lockfile is present and pinned.'
+fi

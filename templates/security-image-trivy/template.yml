@@ -1,0 +1,739 @@
+---
+# Trivy vulnerability scan of one built image, by digest.
+#
+# The image comes from the build job's image.json, so the subject is the exact
+# manifest that was built rather than whatever a tag points at when the scan
+# runs. The predecessor built its target as `${IMAGE_NAME}:${BUILDKIT_TAG}` from
+# a dotenv file and never compared it with the build's identity record.
+#
+# This component does not produce an SBOM. `security/trivy-image.yml` wrote
+# sbom.cdx.json by default, the same path security-sbom-syft writes, in the same
+# stage of the same pipeline, so which SBOM got signed depended on artifact
+# download order. Section 9.2 allows one authoritative SBOM producer per image
+# and that is security-sbom-syft.
+
+#### Public interface ####
+spec:
+  inputs:
+    instance:
+      type: string
+      description: Unique workload instance used in the job name.
+      regex: '^[a-z][a-z0-9-]{0,47}$'
+    stage:
+      type: string
+      description: Stage supplied by the owning composition.
+      default: scan
+    execution-image:
+      type: string
+      description: >-
+        Approved Trivy image pinned by digest. 0.69.3 is the last release before
+        the March 2026 supply-chain compromise of 0.69.4 to 0.69.6.
+      default: 'docker.io/aquasec/trivy@sha256:bcc376de8d77cfe086a917230e818dc9f8528e3c852f7b1aff648949b6258d1c'
+      regex: '^.+@sha256:[0-9a-f]{64}$'
+    runner-tags:
+      type: array
+      description: Runner selection from the estate profile.
+      default: []
+    max-retries:
+      type: number
+      description: >-
+        How many times the runner may retry this job. The condition is
+        runner_system_failure only, so this retries infrastructure and never a
+        failed gate.
+      default: 1
+      options: [0, 1, 2]
+    run-rules:
+      type: array
+      description: Job eligibility set by the composition.
+      default:
+        - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG'
+    build-job:
+      type: string
+      description: Exact name of the job whose image.json identifies the subject.
+    build-component:
+      type: string
+      description: Component name the build job writes its artifacts under.
+      default: container-build-buildkit
+    gate-jobs:
+      type: array
+      description: >-
+        Additional jobs that must succeed first, as needs entries with
+        artifacts false. The build producer above is always included.
+      default: []
+    policy-mode:
+      type: string
+      description: >-
+        blocking fails the job on a finding at or above the threshold. advisory
+        records findings and still fails on a scanner error, a missing database
+        or an unreadable report.
+      default: blocking
+      options: [blocking, advisory]
+    severity-threshold:
+      type: string
+      description: Lowest severity that gates. A minimum, not an exact match.
+      default: high
+      options: [critical, high, medium, low, negligible]
+    ignore-unfixed:
+      type: string
+      description: >-
+        true excludes vulnerabilities with no fix available. The predecessor set
+        this by default; the default here gates them, because an unfixed
+        critical is still a critical.
+      default: 'false'
+      options: ['true', 'false']
+    scanners:
+      type: string
+      description: Trivy scanners to run against the image.
+      default: vuln
+---
+"$[[ inputs.instance ]]:security-image-trivy":
+  stage: $[[ inputs.stage ]]
+  image:
+    name: $[[ inputs.execution-image ]]
+    entrypoint: ['']
+  tags: $[[ inputs.runner-tags ]]
+  variables:
+    CI_TPL_RUNTIME_DIR: /tmp/ci-runtime
+    CI_TPL_ARTIFACT_DIR: '.ci-artifacts/$[[ inputs.instance ]]/security-image-trivy'
+    CI_TPL_IDENTITY_FILE: '.ci-artifacts/$[[ inputs.instance ]]/$[[ inputs.build-component ]]/image.json'
+    CI_TPL_POLICY_MODE: $[[ inputs.policy-mode ]]
+    CI_TPL_SEVERITY_THRESHOLD: $[[ inputs.severity-threshold ]]
+    CI_TPL_IGNORE_UNFIXED: '$[[ inputs.ignore-unfixed ]]'
+    CI_TPL_SCANNERS: $[[ inputs.scanners ]]
+    CI_TPL_REGISTRY_USER: '$HARBOR_USER'
+    CI_TPL_REGISTRY_PASSWORD: '$HARBOR_PASSWORD'
+  needs:
+    - job: $[[ inputs.build-job ]]
+      artifacts: true
+    - $[[ inputs.gate-jobs ]]
+  before_script:
+    - |
+      # BEGIN embed inline runtime/registry/image-json.sh
+      #!/bin/sh
+      # Image identity helpers for the container build and container test components.
+      #
+      # Section 9.1 of docs/gitlab-ci-agent-standard.md makes image.json the
+      # authoritative identity record for a built image, and section 10.1 makes a
+      # missing or unverifiable identity a job failure rather than a warning. Every
+      # function here fails loudly; none of them falls back to a tag.
+      #
+      # POSIX sh with awk only. The builder images are busybox userlands with no jq
+      # and no python3, so the JSON handling below is deliberately small.
+      #
+      # This file is embedded verbatim into each component's before_script, because a
+      # component include imports YAML and never checks out this repository (section
+      # 12). tests/runtime/registry/test_embedded_helper.py fails when a copy drifts.
+
+      CI_TPL_DIGEST_PATTERN='^sha256:[0-9a-f]\{64\}$'
+
+      # Print the string value of the first "<key>": "<value>" pair in a JSON file.
+      # Key matching is literal, so a key containing dots (BuildKit writes
+      # "containerimage.digest") needs no escaping. Values carrying escaped quotes are
+      # out of scope: every field read here is a digest, a reference or a media type.
+      ci_tpl_json_string() {
+          awk -v key="$2" '
+              { blob = blob $0 }
+              END {
+                  needle = "\"" key "\""
+                  p = index(blob, needle)
+                  if (p == 0) exit 1
+                  rest = substr(blob, p + length(needle))
+                  c = index(rest, ":")
+                  if (c == 0) exit 1
+                  rest = substr(rest, c + 1)
+                  q = index(rest, "\"")
+                  if (q == 0) exit 1
+                  rest = substr(rest, q + 1)
+                  e = index(rest, "\"")
+                  if (e == 0) exit 1
+                  printf "%s", substr(rest, 1, e - 1)
+              }
+          ' "$1"
+      }
+
+      # GitLab renders an array input used in a string context as a JSON array
+      # literal. Split one into a value per line so the job can quote each item as a
+      # single argument. No eval: the values are consumer data.
+      ci_tpl_json_list() {
+          printf '%s' "$1" | awk '
+              { blob = blob $0 }
+              END {
+                  n = length(blob)
+                  inside = 0
+                  item = ""
+                  for (i = 1; i <= n; i++) {
+                      c = substr(blob, i, 1)
+                      if (inside) {
+                          if (c == "\\") { i++; item = item substr(blob, i, 1); continue }
+                          if (c == "\"") { print item; item = ""; inside = 0; continue }
+                          item = item c
+                      } else if (c == "\"") {
+                          inside = 1
+                      }
+                  }
+              }
+          '
+      }
+
+      ci_tpl_fail() {
+          echo "ERROR: $*" >&2
+          return 1
+      }
+
+      # A digest is sha256 followed by 64 hex characters. Anything else -- a tag, an
+      # empty string, a truncated digest -- is refused here rather than written into a
+      # field named digest.
+      ci_tpl_require_digest() {
+          case "$1" in
+              '') ci_tpl_fail "no image digest was produced; refusing to continue without one" ;;
+              *)
+                  if expr "$1" : "$CI_TPL_DIGEST_PATTERN" >/dev/null; then
+                      return 0
+                  fi
+                  ci_tpl_fail "'$1' is not a sha256 digest; a tag is not an identity"
+                  ;;
+          esac
+      }
+
+      # A repository is registry[:port]/path with no tag and no digest attached.
+      ci_tpl_require_repository() {
+          case "$1" in
+              '') ci_tpl_fail "image-repository is empty" ;;
+              *@*) ci_tpl_fail "image-repository '$1' carries a digest; pass the repository alone" ;;
+              */*) ;;
+              *) ci_tpl_fail "image-repository '$1' has no registry host" ;;
+          esac || return 1
+          # A colon is only legitimate in the registry host, as a port.
+          case "${1#*/}" in
+              *:*) ci_tpl_fail "image-repository '$1' carries a tag; pass the repository alone" ;;
+              *) return 0 ;;
+          esac
+      }
+
+      # A comma-separated platform list of more than one entry is pushed as an index.
+      ci_tpl_subject_kind_from_platforms() {
+          case "$1" in
+              *,*) echo index ;;
+              *) echo manifest ;;
+          esac
+      }
+
+      # BuildKit records the pushed descriptor's media type. That is the authoritative
+      # answer to index-versus-manifest; the platform list is only the request.
+      ci_tpl_subject_kind_from_metadata() {
+          media_type=$(ci_tpl_json_string "$1" mediaType 2>/dev/null) || media_type=''
+          case "$media_type" in
+              *index*|*manifest.list*) echo index ;;
+              '') ci_tpl_subject_kind_from_platforms "$2" ;;
+              *) echo manifest ;;
+          esac
+      }
+
+      # BuildKit writes both the exported image digest and the image config digest.
+      # containerimage.digest is the manifest digest cosign and every scanner need;
+      # containerimage.config.digest is not. Read the right one, or fail.
+      ci_tpl_buildkit_digest() {
+          digest=$(ci_tpl_json_string "$1" containerimage.digest 2>/dev/null) || digest=''
+          ci_tpl_require_digest "$digest" || return 1
+          echo "$digest"
+      }
+
+      # ko --image-refs writes one fully qualified repository@digest per built import
+      # path. Parse it as a reference, never as "the last line of the build output".
+      ci_tpl_reference_digest() {
+          case "$1" in
+              *@*) digest=${1##*@} ;;
+              *) ci_tpl_fail "'$1' is not a repository@digest reference" ; return 1 ;;
+          esac
+          ci_tpl_require_digest "$digest" || return 1
+          echo "$digest"
+      }
+
+      ci_tpl_reference_repository() {
+          echo "${1%@*}"
+      }
+
+      # An OCI tag. The pattern is deliberately narrower than the specification: a
+      # tag that still contains a dollar sign means GitLab did not expand the variable
+      # it came from, and pushing a literal '$CI_COMMIT_SHORT_SHA' would be worse than
+      # failing here.
+      ci_tpl_require_tag() {
+          expr "$1" : '^[A-Za-z0-9_][A-Za-z0-9._-]\{0,126\}$' >/dev/null && return 0
+          ci_tpl_fail "'$1' is not a usable image tag"
+      }
+
+      ci_tpl_require_build_arg() {
+          expr "$1" : '^[A-Za-z_][A-Za-z0-9_]*=' >/dev/null && return 0
+          ci_tpl_fail "'$1' is not a NAME=VALUE build argument"
+      }
+
+      ci_tpl_json_array() {
+          # Render a comma-separated list as a JSON array of strings.
+          echo "$1" | awk -F, '{
+              out = ""
+              for (i = 1; i <= NF; i++) {
+                  if (out != "") out = out ", "
+                  out = out "\"" $i "\""
+              }
+              printf "[%s]", out
+          }'
+      }
+
+      # Write image.json (schema 1) and the optional build.env convenience dotenv.
+      # Arguments: artifact-dir repository digest platforms-csv subject-kind
+      ci_tpl_write_image_json() {
+          ci_tpl_require_repository "$2" || return 1
+          ci_tpl_require_digest "$3" || return 1
+          mkdir -p "$1"
+          cat > "$1/image.json" <<JSON
+      {
+        "schema_version": 1,
+        "repository": "$2",
+        "digest": "$3",
+        "reference": "$2@$3",
+        "source_commit": "${CI_COMMIT_SHA}",
+        "pipeline_id": "${CI_PIPELINE_ID}",
+        "job_id": "${CI_JOB_ID}",
+        "platforms": $(ci_tpl_json_array "$4"),
+        "subject_kind": "$5",
+        "created_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      }
+      JSON
+          {
+              printf 'CI_TPL_IMAGE_REFERENCE=%s@%s\n' "$2" "$3"
+              printf 'CI_TPL_IMAGE_PUSHED=true\n'
+          } > "$1/build.env"
+          ci_tpl_validate_image_json "$1/image.json"
+      }
+
+      # A build that did not push has no registry identity, so it writes no image.json
+      # at all. Anything downstream then fails its own validation rather than scanning
+      # or signing a reference that does not resolve.
+      ci_tpl_write_unpushed_env() {
+          mkdir -p "$1"
+          printf 'CI_TPL_IMAGE_PUSHED=false\n' > "$1/build.env"
+      }
+
+      # Producers validate their own output before reporting success (section 9.4).
+      # Consumers run the same check on what they downloaded.
+      ci_tpl_validate_image_json() {
+          file=$1
+          [ -f "$file" ] || { ci_tpl_fail "$file does not exist"; return 1; }
+          grep -q '"schema_version": 1' "$file" ||
+              { ci_tpl_fail "$file is not image.json schema 1"; return 1; }
+          repository=$(ci_tpl_json_string "$file" repository 2>/dev/null) || repository=''
+          digest=$(ci_tpl_json_string "$file" digest 2>/dev/null) || digest=''
+          reference=$(ci_tpl_json_string "$file" reference 2>/dev/null) || reference=''
+          commit=$(ci_tpl_json_string "$file" source_commit 2>/dev/null) || commit=''
+          pipeline=$(ci_tpl_json_string "$file" pipeline_id 2>/dev/null) || pipeline=''
+          job=$(ci_tpl_json_string "$file" job_id 2>/dev/null) || job=''
+          platforms=$(ci_tpl_json_string "$file" platforms 2>/dev/null) || platforms=''
+          kind=$(ci_tpl_json_string "$file" subject_kind 2>/dev/null) || kind=''
+          created=$(ci_tpl_json_string "$file" created_at 2>/dev/null) || created=''
+          ci_tpl_require_repository "$repository" || return 1
+          ci_tpl_require_digest "$digest" || return 1
+          [ "$reference" = "$repository@$digest" ] ||
+              { ci_tpl_fail "$file reference '$reference' disagrees with its repository and digest"; return 1; }
+          expr "$commit" : '^[0-9a-f]\{40\}$' >/dev/null ||
+              { ci_tpl_fail "$file source_commit '$commit' is not a full commit sha"; return 1; }
+          [ -n "$pipeline" ] && [ -n "$job" ] ||
+              { ci_tpl_fail "$file is missing pipeline_id or job_id"; return 1; }
+          [ -n "$platforms" ] ||
+              { ci_tpl_fail "$file records no platforms"; return 1; }
+          case "$kind" in
+              manifest|index) ;;
+              *) ci_tpl_fail "$file subject_kind '$kind' is neither manifest nor index"; return 1 ;;
+          esac
+          [ -n "$created" ] ||
+              { ci_tpl_fail "$file records no created_at"; return 1; }
+          return 0
+      }
+
+      # Print the validated reference from an image.json.
+      ci_tpl_image_reference() {
+          ci_tpl_validate_image_json "$1" || return 1
+          ci_tpl_json_string "$1" reference
+      }
+
+      # Write a registry auth file from CI_TPL_REGISTRY_USER and
+      # CI_TPL_REGISTRY_PASSWORD. The credentials are read from the environment, never
+      # passed as arguments, so they do not appear in the process table. base64 wraps
+      # at 76 columns in both busybox and coreutils, so the newlines are stripped:
+      # a wrapped credential produces a config.json that no client can parse.
+      ci_tpl_write_registry_auth() {
+          config_dir=$1
+          registry=$2
+          [ -n "$CI_TPL_REGISTRY_USER" ] && [ -n "$CI_TPL_REGISTRY_PASSWORD" ] ||
+              { ci_tpl_fail "registry credentials are not set; this job cannot push"; return 1; }
+          mkdir -p "$config_dir"
+          auth=$(printf '%s:%s' "$CI_TPL_REGISTRY_USER" "$CI_TPL_REGISTRY_PASSWORD" | base64 | tr -d '\n')
+          printf '{"auths":{"%s":{"auth":"%s"}}}' "$registry" "$auth" > "$config_dir/config.json"
+          chmod 600 "$config_dir/config.json"
+      }
+
+      ci_tpl_registry_host() {
+          echo "${1%%/*}"
+      }
+      # END embed
+    - |
+      # BEGIN embed inline runtime/scan/scan.sh
+      #!/bin/sh
+      # SBOM and image-scan helpers for the components that act on a built image.
+      #
+      # Functions only; sourcing this runs nothing. The scanner components embed it
+      # verbatim after runtime/registry/image-json.sh, whose identity helpers it uses,
+      # so both are in scope for the script block that follows.
+      #
+      # Embedded rather than called as runtime/scan/scan.sh for the reason in section
+      # 12: `include:` imports YAML, not files, so a consumer job never has this
+      # repository checked out. tests/runtime/test_template_script_lockstep.py proves
+      # each embedded copy is byte-identical to this file.
+      #
+      # POSIX sh with busybox applets only. anchore/syft and anchore/grype ship
+      # busybox and the scanner binary, so there is no jq and no python3 here.
+
+      # The scanners' own template output is what counts findings and components, so
+      # the tool parses its own data model and nothing greps its JSON. One severity or
+      # one package name per line; the counts are then exact.
+      ci_tpl_write_scan_templates() {
+          mkdir -p "$1"
+          printf '{{range .artifacts}}{{.name}}\n{{end}}\n' > "$1/syft-components.tmpl"
+          printf '{{range .Matches}}{{.Vulnerability.Severity}}\n{{end}}\n' > "$1/grype-severities.tmpl"
+          printf '{{ range . }}{{ range .Vulnerabilities }}{{ .Severity }}\n{{ end }}{{ end }}\n' \
+              > "$1/trivy-severities.tmpl"
+      }
+
+      # Count the lines of a listing, telling "nothing matched" apart from "could not
+      # look". grep exits 1 for the first and 2 or more for the second: an unreadable
+      # file, a directory where a file was expected, a pattern the tool refused. Every
+      # count here was written `count=$(grep -c ...) || count=0`, which gave all of
+      # them the same answer, so a severity listing the job could not read produced a
+      # clean scan-result.json and gated on nothing. `|| true` has the same defect and
+      # is not the fix.
+      #
+      # ci_tpl_count_matching <file> <grep-option>... <pattern>
+      ci_tpl_count_matching() {
+          ci_tpl_count_file=$1
+          shift
+          ci_tpl_count_value=$(grep -c "$@" "$ci_tpl_count_file")
+          ci_tpl_count_status=$?
+          if [ "$ci_tpl_count_status" -ge 2 ]; then
+              ci_tpl_fail "grep exited $ci_tpl_count_status reading $ci_tpl_count_file; a listing that cannot be read is not a count of zero"
+              return 1
+          fi
+          [ "$ci_tpl_count_status" -eq 0 ] || ci_tpl_count_value=0
+          echo "$ci_tpl_count_value"
+      }
+
+      # --------------------------------------------------------------------------
+      # Authoritative SBOM
+      # --------------------------------------------------------------------------
+
+      # Validate a CycloneDX SBOM and write the subject record that says which image
+      # it describes. Section 9.2 requires both files; the predecessor emitted only
+      # the SBOM, and its sole check was a grep count of '"name"', so a truncated or
+      # component-free document passed.
+      #
+      # ci_tpl_write_sbom_subject <sbom> <components> <image.json> <output>
+      ci_tpl_write_sbom_subject() {
+          sbom=$1
+          components=$2
+          identity=$3
+          output=$4
+
+          [ -s "$sbom" ] || { ci_tpl_fail "syft produced no SBOM at $sbom"; return 1; }
+
+          # The three ways this file can be wrong: not CycloneDX at all, cut short by
+          # a killed writer, or structurally fine and empty of packages.
+          tr -d ' \n' < "$sbom" | grep -q '"bomFormat":"CycloneDX"' ||
+              { ci_tpl_fail "$sbom is not a CycloneDX document"; return 1; }
+          [ "$(tr -d ' \n\r' < "$sbom" | tail -c 1)" = "}" ] ||
+              { ci_tpl_fail "$sbom is truncated: it does not end with a closing brace"; return 1; }
+          [ -f "$components" ] ||
+              { ci_tpl_fail "syft wrote no component listing at $components"; return 1; }
+
+          component_count=$(ci_tpl_count_matching "$components" .) || return 1
+          [ "$component_count" -ge 1 ] || {
+              ci_tpl_fail "$sbom catalogued no components; that is a producer failure, not a clean SBOM"
+              return 1
+          }
+
+          reference=$(ci_tpl_image_reference "$identity") || return 1
+          repository=$(ci_tpl_json_string "$identity" repository)
+          digest=$(ci_tpl_json_string "$identity" digest)
+          source_commit=$(ci_tpl_json_string "$identity" source_commit)
+          sbom_sha256=$(sha256sum "$sbom" | cut -d' ' -f1)
+
+          cat > "$output" <<JSON
+      {
+        "schema_version": 1,
+        "image_reference": "$reference",
+        "repository": "$repository",
+        "digest": "$digest",
+        "source_commit": "$source_commit",
+        "pipeline_id": "${CI_PIPELINE_ID:-}",
+        "job_id": "${CI_JOB_ID:-}",
+        "sbom_file": "$(basename "$sbom")",
+        "sbom_sha256": "$sbom_sha256",
+        "sbom_format": "CycloneDX JSON",
+        "component_count": $component_count,
+        "created_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      }
+      JSON
+
+          [ -s "$output" ] || { ci_tpl_fail "failed to write $output"; return 1; }
+          echo "subject recorded: $reference ($component_count components)"
+      }
+
+      # Print the image reference an SBOM claims, but only if it is the image we meant
+      # to scan. Section 9.2: a job scanning a supplied SBOM validates its declared
+      # subject; it does not switch targets because a file named sbom.cdx.json exists.
+      # The predecessor chose its target with `[ -f "sbom.cdx.json" ]`.
+      #
+      # ci_tpl_match_sbom_subject <subject.json> <image.json>
+      ci_tpl_match_sbom_subject() {
+          [ -s "$1" ] ||
+              { ci_tpl_fail "the SBOM producer left no subject record at $1"; return 1; }
+          subject_reference=$(ci_tpl_json_string "$1" image_reference) ||
+              { ci_tpl_fail "$1 declares no image_reference"; return 1; }
+          [ -n "$subject_reference" ] ||
+              { ci_tpl_fail "$1 declares no image_reference"; return 1; }
+
+          intended_reference=$(ci_tpl_image_reference "$2") || return 1
+
+          [ "$subject_reference" = "$intended_reference" ] || {
+              ci_tpl_fail "the SBOM describes $subject_reference, not the image to scan ($intended_reference)"
+              return 1
+          }
+          echo "$intended_reference"
+      }
+
+      # --------------------------------------------------------------------------
+      # Scan result and gate
+      # --------------------------------------------------------------------------
+
+      ci_tpl_severity_rank() {
+          case "$(echo "$1" | tr 'A-Z' 'a-z')" in
+              critical) echo 5 ;;
+              high) echo 4 ;;
+              medium) echo 3 ;;
+              low) echo 2 ;;
+              negligible) echo 1 ;;
+              *) echo 0 ;;
+          esac
+      }
+
+      # A report that is missing, empty, or without the marker its scanner always
+      # writes means the scan did not complete. That is a failure in advisory mode as
+      # well as blocking mode (section 10.1), and it is how an unhydratable database
+      # stops reading as a clean image.
+      #
+      # ci_tpl_require_report <path> <marker>
+      ci_tpl_require_report() {
+          [ -s "$1" ] || {
+              ci_tpl_fail "the scanner wrote no report at $1; that is a scanner failure, not a clean scan"
+              return 1
+          }
+          grep -q "$2" "$1" || {
+              ci_tpl_fail "$1 does not contain the expected marker $2; that is a scanner failure, not a clean scan"
+              return 1
+          }
+      }
+
+      # Count the severities the scanner reported, write scan-result.json, and decide.
+      # Returns 0 when nothing gates, 1 when a blocking finding meets the threshold.
+      # Evidence problems have already failed through ci_tpl_require_report.
+      #
+      # ci_tpl_write_scan_result <severities> <output> <scanner> <version> <subject>
+      #                          <kind> <threshold> <policy-mode> <ignore-unfixed>
+      #                          <database-updated-at> [<report> ...]
+      ci_tpl_write_scan_result() {
+          severities=$1; output=$2; scanner=$3; scanner_version=$4
+          subject_reference=$5; subject_kind=$6; threshold=$7; policy_mode=$8
+          ignore_unfixed=$9
+          shift 9
+          database_updated_at=$1
+          shift
+
+          case "$policy_mode" in
+              blocking|advisory) ;;
+              *) ci_tpl_fail "policy mode must be blocking or advisory, not '$policy_mode'"; return 1 ;;
+          esac
+
+          threshold_rank=$(ci_tpl_severity_rank "$threshold")
+          [ "$threshold_rank" -ne 0 ] ||
+              { ci_tpl_fail "'$threshold' is not a known severity"; return 1; }
+          [ -f "$severities" ] ||
+              { ci_tpl_fail "the scanner wrote no severity listing at $severities"; return 1; }
+
+          critical=$(ci_tpl_count_matching "$severities" -ci '^critical$') || return 1
+          high=$(ci_tpl_count_matching "$severities" -ci '^high$') || return 1
+          medium=$(ci_tpl_count_matching "$severities" -ci '^medium$') || return 1
+          low=$(ci_tpl_count_matching "$severities" -ci '^low$') || return 1
+          negligible=$(ci_tpl_count_matching "$severities" -ci '^negligible$') || return 1
+          total=$(ci_tpl_count_matching "$severities" .) || return 1
+          unknown=$((total - critical - high - medium - low - negligible))
+          [ "$unknown" -ge 0 ] || unknown=0
+
+          at_or_above=0
+          if [ "$threshold_rank" -le 5 ]; then at_or_above=$((at_or_above + critical)); fi
+          if [ "$threshold_rank" -le 4 ]; then at_or_above=$((at_or_above + high)); fi
+          if [ "$threshold_rank" -le 3 ]; then at_or_above=$((at_or_above + medium)); fi
+          if [ "$threshold_rank" -le 2 ]; then at_or_above=$((at_or_above + low)); fi
+          if [ "$threshold_rank" -le 1 ]; then at_or_above=$((at_or_above + negligible)); fi
+
+          if [ "$ignore_unfixed" = "true" ]; then
+              unfixed_treatment=ignored
+          else
+              unfixed_treatment=gated
+          fi
+
+          report_json=''
+          separator=''
+          for report_path in "$@"; do
+              [ -n "$report_path" ] || continue
+              report_json="$report_json$separator
+            {\"path\": \"$report_path\", \"sha256\": \"$(sha256sum "$report_path" | cut -d' ' -f1)\"}"
+              separator=','
+          done
+
+          cat > "$output" <<JSON
+      {
+        "schema_version": 1,
+        "status": "completed",
+        "subject": {
+          "kind": "$subject_kind",
+          "reference": "$subject_reference"
+        },
+        "scanner": {
+          "name": "$scanner",
+          "version": "$scanner_version"
+        },
+        "database": {
+          "updated_at": "${database_updated_at:-unresolved}"
+        },
+        "counts": {
+          "critical": $critical,
+          "high": $high,
+          "medium": $medium,
+          "low": $low,
+          "negligible": $negligible,
+          "unknown": $unknown,
+          "total": $total,
+          "at_or_above_threshold": $at_or_above
+        },
+        "policy": {
+          "mode": "$policy_mode",
+          "threshold": "$threshold",
+          "unfixed_vulnerabilities": "$unfixed_treatment",
+          "exceptions": []
+        },
+        "reports": [$report_json
+        ],
+        "created_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      }
+      JSON
+
+          [ -s "$output" ] || { ci_tpl_fail "failed to write $output"; return 1; }
+          echo "scan completed: $total finding(s); $at_or_above at or above $threshold"
+
+          if [ "$at_or_above" -gt 0 ]; then
+              if [ "$policy_mode" = "advisory" ]; then
+                  echo "advisory mode: $at_or_above finding(s) at or above $threshold recorded, not gating"
+                  return 0
+              fi
+              ci_tpl_fail "$at_or_above finding(s) at or above $threshold on $subject_reference"
+              return 1
+          fi
+          return 0
+      }
+      # END embed
+  script:
+    # One shell block, not several: a value computed in one script entry is not
+    # guaranteed to survive into the next, and the subject, the scanner version
+    # and the database timestamp are all carried from one step to a later one.
+    - |
+      mkdir -p "$CI_TPL_ARTIFACT_DIR" || exit 1
+      ci_tpl_write_scan_templates "$CI_TPL_RUNTIME_DIR" || exit 1
+      CI_TPL_SUBJECT=$(ci_tpl_image_reference "$CI_TPL_IDENTITY_FILE") || exit 1
+      echo "scan subject: $CI_TPL_SUBJECT"
+
+      if [ -n "$CI_TPL_REGISTRY_USER" ] && [ -n "$CI_TPL_REGISTRY_PASSWORD" ]; then
+        TRIVY_USERNAME="$CI_TPL_REGISTRY_USER"
+        export TRIVY_USERNAME
+        TRIVY_PASSWORD="$CI_TPL_REGISTRY_PASSWORD"
+        export TRIVY_PASSWORD
+        echo "registry authentication configured for $(ci_tpl_registry_host "$CI_TPL_SUBJECT")"
+      fi
+
+      # Hydrate the database as its own step. A scan against a database that
+      # never downloaded reports nothing, which a naive gate reads as clean.
+      trivy image --download-db-only || exit 1
+      CI_TPL_DB_UPDATED_AT=$(trivy version --format json |
+        sed -n 's/.*"UpdatedAt"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+      CI_TPL_SCANNER_VERSION=$(trivy version --format json |
+        sed -n 's/.*"Version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+      echo "trivy ${CI_TPL_SCANNER_VERSION:-unknown}, database updated at ${CI_TPL_DB_UPDATED_AT:-unresolved}"
+
+      # Scan once, then convert the captured result into the other formats,
+      # which is what section 10.3 asks for when several are needed.
+      # --ignore-unfixed is a scan-time filter, so it is decided here.
+      CI_TPL_UNFIXED_FLAG=''
+      if [ "$CI_TPL_IGNORE_UNFIXED" = "true" ]; then
+        CI_TPL_UNFIXED_FLAG='--ignore-unfixed'
+      fi
+      trivy image \
+        --scanners "$CI_TPL_SCANNERS" \
+        $CI_TPL_UNFIXED_FLAG \
+        --format json \
+        --output "$CI_TPL_ARTIFACT_DIR/trivy-image.json" \
+        "$CI_TPL_SUBJECT" || exit 1
+
+      trivy convert --format sarif \
+        --output "$CI_TPL_ARTIFACT_DIR/trivy-image.sarif" \
+        "$CI_TPL_ARTIFACT_DIR/trivy-image.json" || exit 1
+      trivy convert --format template \
+        --template "@$CI_TPL_RUNTIME_DIR/trivy-severities.tmpl" \
+        --output "$CI_TPL_ARTIFACT_DIR/severities.txt" \
+        "$CI_TPL_ARTIFACT_DIR/trivy-image.json" || exit 1
+
+      ci_tpl_require_report "$CI_TPL_ARTIFACT_DIR/trivy-image.json" '"SchemaVersion"' || exit 1
+      ci_tpl_require_report "$CI_TPL_ARTIFACT_DIR/trivy-image.sarif" '"runs"' || exit 1
+      ci_tpl_write_scan_result \
+        "$CI_TPL_ARTIFACT_DIR/severities.txt" \
+        "$CI_TPL_ARTIFACT_DIR/scan-result.json" \
+        trivy "${CI_TPL_SCANNER_VERSION:-unknown}" \
+        "$CI_TPL_SUBJECT" image \
+        "$CI_TPL_SEVERITY_THRESHOLD" "$CI_TPL_POLICY_MODE" "$CI_TPL_IGNORE_UNFIXED" \
+        "${CI_TPL_DB_UPDATED_AT:-unresolved}" \
+        "$CI_TPL_ARTIFACT_DIR/trivy-image.json" \
+        "$CI_TPL_ARTIFACT_DIR/trivy-image.sarif" || exit 1
+  artifacts:
+    name: '$[[ inputs.instance ]]-security-image-trivy-$CI_JOB_ID'
+    paths:
+      - '.ci-artifacts/$[[ inputs.instance ]]/security-image-trivy/'
+    when: always
+    # .ci/estate.yml retention.evidence. The SARIF is an artifact only: this
+    # estate's report_mode is artifact-only and section 10.3 forbids declaring
+    # raw tool SARIF as reports:sast.
+    expire_in: 1 week
+  rules: $[[ inputs.run-rules ]]
+  allow_failure: false
+  interruptible: true
+  # Infrastructure only. Section 10.1 forbids weakening an outcome, and any
+  # condition other than runner_system_failure would retry a failed gate;
+  # tests/contracts/test_retry_policy.py fails the build on one.
+  retry:
+    max: $[[ inputs.max-retries ]]
+    when: [runner_system_failure]
+  # Insulation from the consumer's `default:` block (section 13.1). A component
+  # job runs in the image the component pins and the shell the component ships;
+  # a consumer's global image, before_script, after_script, cache, services,
+  # artifacts or hooks reaching it is a component running something nobody
+  # reviewed. Runner selection and timeouts are the consumer's to set, so those
+  # stay inherited. `retry` and `id_tokens` stay too: this component sets both
+  # itself, and a consumer-level definition is a deliberate estate choice.
+  inherit:
+    default: [tags, timeout, interruptible, retry, id_tokens]

@@ -1,0 +1,21 @@
+---
+# examples/container-jib/.gitlab-ci.yml
+#
+# A JVM service built by Jib from a Gradle build, with the SBOM uploaded to
+# Dependency-Track.
+#
+# `gradle-command: ./gradlew` uses the project's own wrapper, which pins the
+# Gradle version in the repository rather than taking whatever the execution
+# image ships.
+include:
+  - project: 'platform/gitlab-ci-templates'
+    ref: 'REPLACE_WITH_APPROVED_SHARED_CI_REF'
+    file: '/pipelines/container-jib.yml'
+    inputs:
+      instance: ledger
+      image-repository: 'registry.example.com/dev/platform/ledger'
+      gradle-command: './gradlew'
+      semgrep-rules: 'ci/semgrep-rules.yml'
+      lockfiles: 'gradle/verification-metadata.xml'
+      dependency-track: 'true'
+      dependency-track-api-url: 'https://dtrack.example.com/api'

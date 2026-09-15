@@ -1,0 +1,68 @@
+---
+# Machine-readable half of the component contract (section 6.1).
+name: container-build-jib
+kind: component
+status: experimental
+introduced_in: 1.0.0
+minimum_gitlab: '18.9'
+# Retry policy: the `max-retries` input (0, 1 or 2, default 1) sets `retry: max`,
+# and `retry: when` is `runner_system_failure` and nothing else. A job killed by
+# its runner runs again; a failed gate never does.
+emitted_jobs:
+  - pattern: '{instance}:container-build-jib'
+    stage: build
+    blocking: true
+outputs:
+  - path: '.ci-artifacts/{instance}/container-build-jib/image.json'
+    producer: '{instance}:container-build-jib'
+    format: json
+    schema: 'image identity schema 1, section 9.1'
+    subject_identity: 'repository@sha256 digest, taken from Jib''s imageJson output'
+    retention: 1 week
+  - path: '.ci-artifacts/{instance}/container-build-jib/build.env'
+    producer: '{instance}:container-build-jib'
+    format: dotenv
+    schema: 'CI_TPL_IMAGE_REFERENCE and CI_TPL_IMAGE_PUSHED'
+    subject_identity: 'same digest as image.json; convenience only, never authoritative'
+    retention: 1 week
+required_secrets:
+  - name: HARBOR_USER
+    kind: ci-variable
+    scope: 'push to the candidate registry project'
+    protected_ref_required: false
+  - name: HARBOR_PASSWORD
+    kind: ci-variable
+    scope: 'push to the candidate registry project'
+    protected_ref_required: false
+runtime_image:
+  reference: 'docker.io/gradle@sha256:eb2209db6d5a025a0a8711a6f1a5556b654ecc07f05dc8703d2317eab410aa8e'
+  pinning: digest
+  tool_versions:
+    gradle: '8-jdk21-alpine'
+    base-image: 'gcr.io/distroless/java21-debian12@sha256:7e37784d94dccbf5ccb195c73b295f5ad00cd266512dfbac12eb9c3c28f8077d'
+trust:
+  privileged: false
+  network_egress:
+    - 'the consumer project''s Gradle plugin and dependency repositories'
+    - 'gcr.io: default base image'
+    - 'registry.example.com: candidate registry push'
+  runner_profile: 'Docker executor, no nested build privileges.'
+  protected_ref_required: false
+validation:
+  evidence:
+    - source-reviewed
+    - yaml-parsed
+    - gitlab-linted
+  verified_at: 2026/09/15
+  notes: >-
+    Failure semantics (section 10.1). The job fails when Gradle exits non-zero,
+    when Jib writes no imageJson, when its imageDigest is not a sha256 digest,
+    and when the image it reports pushing is not under image-repository. The
+    previous template wrote the target tag verbatim into a field named
+    IMAGE_DIGEST and never resolved a digest at all. Credentials now reach Jib
+    through DOCKER_CONFIG rather than -Djib.to.auth.password, so they are no
+    longer visible in the process table. Reproducibility gap: the Jib plugin
+    version lives in the consumer project's build file and this component cannot
+    pin it; the execution image and the base image are pinned by digest here.
+    Not runtime-tested: no pipeline has executed this component, and the
+    jibBuildTar path used when push-candidate is false is unexercised.

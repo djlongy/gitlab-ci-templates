@@ -1,0 +1,34 @@
+---
+# repository-secret-audit/.ci/project.yml
+#
+# The record of what this project adopted from the shared CI repository.
+# Contract: docs/gitlab-ci-agent-standard.md section 4, schema
+# tests/contracts/project.schema.json, field guide docs/reference/project-yml.md.
+#
+# Metadata, not GitLab configuration: nothing reads this at pipeline time. It
+# exists so the next reader can see which composition is in use, under which
+# instance names, and what was decided on the way in. The project path below is
+# illustrative, as is everything else in examples/.
+schema_version: 1
+project: demo/security-audit
+shared_ci:
+  project: platform/gitlab-ci-templates
+  ref: REPLACE_WITH_APPROVED_SHARED_CI_REF
+workload:
+  name: repository-secret-audit
+  adoption: composition
+compositions:
+  - file: /pipelines/repository-secret-audit.yml
+    instances:
+      - secrets
+      - terraform
+    inputs:
+      secrets-instance: secrets
+      group-path: platform
+      terraform-instance: terraform
+      terraform-repositories: platform/terraform-dns platform/terraform-hypervisor-vms platform/terraform-modules
+      api-token-variable: GROUP_SCAN_TOKEN
+      clone-depth: 0
+notes: 'One include, two component instances: `secrets` audits the group and `terraform` audits
+  the named Terraform repositories. api-token-variable holds the NAME of the masked CI variable,
+  never its value.'

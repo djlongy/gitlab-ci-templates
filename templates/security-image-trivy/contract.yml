@@ -1,0 +1,79 @@
+---
+name: security-image-trivy
+kind: component
+status: experimental
+introduced_in: 1.0.0
+minimum_gitlab: '18.9'
+# Retry policy: the `max-retries` input (0, 1 or 2, default 1) sets `retry: max`,
+# and `retry: when` is `runner_system_failure` and nothing else. A job killed by
+# its runner runs again; a failed gate never does.
+emitted_jobs:
+  - pattern: '{instance}:security-image-trivy'
+    stage: scan
+    blocking: true
+outputs:
+  - path: .ci-artifacts/{instance}/security-image-trivy/trivy-image.json
+    producer: '{instance}:security-image-trivy'
+    format: Trivy native JSON
+    subject_identity: repository@sha256 digest from the build's image.json.
+    retention: 1 week
+  - path: .ci-artifacts/{instance}/security-image-trivy/trivy-image.sarif
+    producer: '{instance}:security-image-trivy'
+    format: >-
+      SARIF 2.1.0, converted from the captured JSON. Artifact only: the estate's
+      report_mode is artifact-only and it is not declared as reports:sast.
+    retention: 1 week
+  - path: .ci-artifacts/{instance}/security-image-trivy/scan-result.json
+    producer: '{instance}:security-image-trivy'
+    format: JSON
+    schema: >-
+      schema_version 1; status, subject, scanner, database.updated_at, counts by
+      severity, policy mode and threshold, unfixed treatment, exceptions, report
+      hashes, created_at.
+    subject_identity: repository@sha256 digest.
+    retention: 1 week
+  - path: .ci-artifacts/{instance}/security-image-trivy/severities.txt
+    producer: '{instance}:security-image-trivy'
+    format: One finding severity per line, from trivy's template output.
+    retention: 1 week
+required_secrets:
+  - name: HARBOR_USER
+    kind: ci-variable
+    scope: Read access to the candidate registry project.
+  - name: HARBOR_PASSWORD
+    kind: ci-variable
+    scope: Read access to the candidate registry project.
+runtime_image:
+  reference: 'docker.io/aquasec/trivy@sha256:bcc376de8d77cfe086a917230e818dc9f8528e3c852f7b1aff648949b6258d1c'
+  pinning: digest
+  tool_versions:
+    trivy: 0.69.3
+trust:
+  privileged: false
+  network_egress:
+    - registry.example.com
+    - Trivy vulnerability database source (ghcr.io by default)
+  runner_profile: Any unprivileged Docker executor.
+  protected_ref_required: false
+validation:
+  evidence:
+    - source-reviewed
+    - yaml-parsed
+    - gitlab-linted
+    - runtime-tested
+  verified_at: 2026/09/15
+  environment: gitlab.example.com 18.9.1-ee, project 18
+  notes: >-
+    Failure semantics: a finding at or above severity-threshold fails the job in
+    blocking mode and is recorded in advisory mode. A scanner crash, a database
+    that did not download, an empty report or a report missing its SchemaVersion
+    marker fails the job in BOTH modes. Unfixed vulnerabilities gate by default,
+    unlike the predecessor template, which set TRIVY_IGNORE_UNFIXED true.
+    gitlab-linted through the CI Lint API; no job ran. runtime-tested: the scan
+    wrapper has unit tests, and trivy's --download-db-only, convert-to-sarif,
+    convert-to-template and version extraction were executed against the pinned
+    image digest on 2026/09/15. Status: experimental, because no consumer
+    pipeline has run this component on 1.0.0-rc.2. `released` in this repository
+    means a consumer job executed green, not that the component looks finished.
+    platform/demo-app's build source is tags-only, so nothing was built for it to
+    scan.

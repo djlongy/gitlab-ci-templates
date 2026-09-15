@@ -1,0 +1,411 @@
+---
+spec:
+  inputs:
+    instance:
+      type: string
+      description: Unique workload instance used in the job name.
+      regex: '^[a-z][a-z0-9-]{0,47}$'
+    stage:
+      type: string
+      description: Stage supplied by the owning composition.
+      default: verify
+    working-directory:
+      type: string
+      description: Directory the chart paths are relative to, inside the checkout.
+      default: '.'
+    chart-paths:
+      type: string
+      description: >-
+        Chart directories to lint, render and schema-validate, one per line,
+        relative to working-directory. Every entry must contain a Chart.yaml.
+        A list that names no chart fails the job: validating nothing is not a
+        pass. A newline-separated string rather than an array because GitLab
+        rejects an array input in a variable value.
+    values-files:
+      type: string
+      description: >-
+        Values files, one per line, relative to working-directory. Each chart is
+        validated once with its own values and once per file listed here, which
+        is how a chart with per-environment values is covered.
+      default: ''
+    release-name:
+      type: string
+      description: Release name passed to helm template; it only affects rendered names.
+      regex: '^[a-z0-9][a-z0-9-]{0,52}$'
+      default: validate
+    kubernetes-version:
+      type: string
+      description: Kubernetes version whose API schemas the rendered resources are checked against.
+      regex: '^[0-9]+\.[0-9]+\.[0-9]+$'
+      default: 1.31.0
+    schema-locations:
+      type: string
+      description: >-
+        Additional kubeconform schema locations, one per line. Supply a CRD
+        schema source here rather than setting ignore-missing-schemas.
+      default: ''
+    ignore-missing-schemas:
+      type: boolean
+      description: >-
+        Accept a resource whose schema kubeconform cannot find. Off by default:
+        a CRD-backed resource with no schema is unvalidated, not valid.
+      default: false
+    execution-image:
+      type: string
+      description: Approved helm execution image, pinned by digest.
+      regex: '^.+@sha256:[0-9a-f]{64}$'
+      default: 'docker.io/alpine/helm@sha256:ed9dfc49d43d034df3f9880eb777caf0183e5156508672478b80412c63f3db4f'
+    runner-tags:
+      type: array
+      description: Runner selection from the estate profile.
+      default: []
+    max-retries:
+      type: number
+      description: >-
+        How many times the runner may retry this job. The condition is
+        runner_system_failure only, so this retries infrastructure and never a
+        failed gate.
+      default: 1
+      options: [0, 1, 2]
+    run-rules:
+      type: array
+      description: Job eligibility set by the composition.
+      default:
+        - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG'
+---
+
+"$[[ inputs.instance ]]:helm-validate":
+  stage: $[[ inputs.stage ]]
+  image:
+    name: $[[ inputs.execution-image ]]
+    entrypoint: ['']
+  tags: $[[ inputs.runner-tags ]]
+  variables:
+    CI_TPL_WORKING_DIRECTORY: $[[ inputs.working-directory ]]
+    CI_TPL_CHART_PATHS: $[[ inputs.chart-paths ]]
+    CI_TPL_VALUES_FILES: $[[ inputs.values-files ]]
+    CI_TPL_RELEASE_NAME: $[[ inputs.release-name ]]
+    CI_TPL_SCHEMA_LOCATIONS: $[[ inputs.schema-locations ]]
+    CI_TPL_ARTIFACT_DIR: $CI_PROJECT_DIR/.ci-artifacts/$[[ inputs.instance ]]/helm-validate
+  dependencies: []
+  before_script:
+    - |
+      project_root=$(cd "$CI_PROJECT_DIR" && pwd -P)
+      cd "$CI_PROJECT_DIR/$CI_TPL_WORKING_DIRECTORY"
+      case "$(pwd -P)" in
+        "$project_root"|"$project_root"/*) ;;
+        *) echo 'ERROR: working-directory escapes the checkout'; exit 1 ;;
+      esac
+    - |
+      # BEGIN embed inline runtime/kubernetes/toolchain.sh
+      #!/bin/sh
+      # Shared shell for the helm and kubernetes validation components.
+      #
+      # It defines functions only; sourcing it runs nothing. The components embed it
+      # verbatim as the last before_script entry, so the functions are in scope for
+      # the script block that follows. tests/runtime/test_template_script_lockstep.py
+      # proves the embedded copy is byte-identical to this file.
+      #
+      # Why embedded rather than called as runtime/kubernetes/toolchain.sh: section 12
+      # of docs/gitlab-ci-agent-standard.md - `include:` imports YAML, not files, so a
+      # consumer job never has this repository checked out. The upgrade path is an
+      # execution image built from images/kubernetes/ shipping these tools already
+      # installed; until one exists and is published, the job fetches them.
+      #
+      # List-shaped inputs arrive as newline-separated strings in CI_TPL_ variables,
+      # because a GitLab `array` input cannot be interpolated into a variable value -
+      # the CI Lint API rejects it with "variable definition must be either a string
+      # or a hash". Every loop below sets IFS to a newline so a path may contain
+      # spaces, and skips empty lines.
+      set -e
+
+      # A newline, built rather than written. A literal newline here would be a
+      # continuation line, and this file is embedded into a YAML block scalar where
+      # every line picks up the block's indentation - the value would be a newline
+      # followed by six spaces, and IFS would then split on spaces too.
+      CI_TPL_NEWLINE=$(printf '\nx')
+      CI_TPL_NEWLINE=${CI_TPL_NEWLINE%x}
+
+      # Fetch a URL to a file. curl where present (alpine/helm has it), busybox wget
+      # otherwise (alpine has no curl). Both fail non-zero on an HTTP error.
+      ci_tpl_fetch() {
+        if command -v curl >/dev/null 2>&1; then
+          curl -fsSL --retry 3 -o "$2" "$1"
+        else
+          wget -q -O "$2" "$1"
+        fi
+      }
+
+      # Install a pinned release asset, verified twice: the release's checksum file
+      # must match a SHA-256 pinned in the component, and the asset must match the
+      # line for it inside that checksum file. Pinning only the asset hash would need
+      # one pin per architecture; pinning the checksum file covers every asset in the
+      # release with one constant. Section 12 requires an independently verified
+      # checksum for an unavoidable runtime download, and a failure on any mismatch.
+      #
+      # ci_tpl_install_tool <name> <asset-url> <checksums-url> <checksums-sha256> \
+      #                     <asset-filename> <archive-member> <bin-dir>
+      ci_tpl_install_tool() {
+        ci_tpl_tool_name=$1
+        ci_tpl_asset_url=$2
+        ci_tpl_checksums_url=$3
+        ci_tpl_checksums_sha256=$4
+        ci_tpl_asset_name=$5
+        ci_tpl_member=$6
+        ci_tpl_bin_dir=$7
+
+        ci_tpl_work=$(mktemp -d)
+        ci_tpl_fetch "$ci_tpl_checksums_url" "$ci_tpl_work/CHECKSUMS"
+        if ! echo "${ci_tpl_checksums_sha256}  ${ci_tpl_work}/CHECKSUMS" | sha256sum -c - >/dev/null 2>&1; then
+          echo "ERROR: the ${ci_tpl_tool_name} checksum file does not match its pinned SHA-256" >&2
+          echo "ERROR: expected ${ci_tpl_checksums_sha256}, got $(sha256sum "${ci_tpl_work}/CHECKSUMS" | cut -d' ' -f1)" >&2
+          return 1
+        fi
+
+        # The published format is "<sha256>  <filename>", sometimes "*<filename>".
+        ci_tpl_asset_sha256=$(awk -v n="$ci_tpl_asset_name" \
+          '$2 == n || $2 == "*" n {print $1}' "$ci_tpl_work/CHECKSUMS")
+        if [ -z "$ci_tpl_asset_sha256" ]; then
+          echo "ERROR: ${ci_tpl_asset_name} is not listed in the ${ci_tpl_tool_name} checksum file" >&2
+          return 1
+        fi
+
+        ci_tpl_fetch "$ci_tpl_asset_url" "$ci_tpl_work/$ci_tpl_asset_name"
+        if ! echo "${ci_tpl_asset_sha256}  ${ci_tpl_work}/${ci_tpl_asset_name}" | sha256sum -c - >/dev/null 2>&1; then
+          echo "ERROR: downloaded ${ci_tpl_asset_name} does not match its published checksum" >&2
+          return 1
+        fi
+
+        mkdir -p "$ci_tpl_bin_dir"
+        tar -xzf "$ci_tpl_work/$ci_tpl_asset_name" -C "$ci_tpl_bin_dir" "$ci_tpl_member"
+        chmod +x "$ci_tpl_bin_dir/$ci_tpl_member"
+        rm -rf "$ci_tpl_work"
+        echo "installed ${ci_tpl_tool_name} to ${ci_tpl_bin_dir}/${ci_tpl_member}"
+      }
+
+      # Fail when a path resolves outside the checkout. These paths come from
+      # component inputs; a ../ segment or a symlink must not let one of them read or
+      # write outside CI_PROJECT_DIR.
+      ci_tpl_require_inside_checkout() {
+        ci_tpl_root=$(cd "$CI_PROJECT_DIR" && pwd -P)
+        if ! ci_tpl_parent=$(cd "$(dirname -- "$1")" 2>/dev/null && pwd -P); then
+          echo "ERROR: '$1' has no existing parent directory" >&2
+          return 1
+        fi
+        ci_tpl_target="${ci_tpl_parent%/}/$(basename -- "$1")"
+        case "$ci_tpl_target" in
+          "$ci_tpl_root" | "$ci_tpl_root"/*) ;;
+          *)
+            echo "ERROR: '$1' resolves to '$ci_tpl_target', outside the checkout" >&2
+            return 1
+            ;;
+        esac
+      }
+
+      # Run kubeconform over one rendered manifest file. It exits 0 for a clean run,
+      # 1 for a validation failure and other codes for execution errors; every
+      # non-zero outcome fails the job, which is what section 10.1 requires. Missing
+      # schemas are rejected unless the component was explicitly configured to
+      # tolerate them: a CRD-backed resource with no schema is an unvalidated
+      # resource, not a passing one.
+      ci_tpl_kubeconform() {
+        ci_tpl_manifest=$1
+        set -- -strict -summary -output text \
+          -kubernetes-version "$CI_TPL_KUBERNETES_VERSION"
+        if [ "${CI_TPL_IGNORE_MISSING_SCHEMAS:-false}" = "true" ]; then
+          set -- "$@" -ignore-missing-schemas
+        fi
+        ci_tpl_saved_ifs=$IFS
+        IFS=$CI_TPL_NEWLINE
+        for ci_tpl_location in ${CI_TPL_SCHEMA_LOCATIONS:-}; do
+          [ -n "$ci_tpl_location" ] || continue
+          set -- "$@" -schema-location "$ci_tpl_location"
+        done
+        IFS=$ci_tpl_saved_ifs
+        echo "+ kubeconform $* ${ci_tpl_manifest}"
+        kubeconform "$@" "$ci_tpl_manifest"
+      }
+      # END embed
+    - |
+      # The two settings that decide what the gate accepts are assigned here
+      # from the interpolated input, not read from a CI variable. Section 6.1:
+      # a reserved CI_TPL_ name can be overridden by a higher-precedence project
+      # or group variable, and these assignments overwrite any such override.
+      # Their input regexes keep the values shell-safe.
+      CI_TPL_KUBERNETES_VERSION='$[[ inputs.kubernetes-version ]]'
+      CI_TPL_IGNORE_MISSING_SCHEMAS='$[[ inputs.ignore-missing-schemas ]]'
+      export CI_TPL_KUBERNETES_VERSION CI_TPL_IGNORE_MISSING_SCHEMAS
+      ci_tpl_install_tool kubeconform \
+        'https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz' \
+        'https://github.com/yannh/kubeconform/releases/download/v0.6.7/CHECKSUMS' \
+        '5946c6300e94d5f43c877cb41ff7117c63130f1710ce20f04fd721f99fb0485e' \
+        'kubeconform-linux-amd64.tar.gz' kubeconform /tmp/ci-tpl-bin
+      PATH="/tmp/ci-tpl-bin:$PATH"
+      export PATH
+  script:
+    - |
+      # BEGIN embed inline runtime/helm/validate.sh
+      #!/bin/sh
+      # helm-validate: lint every chart, render it, and validate the rendered
+      # resources against the target Kubernetes schema.
+      #
+      # Embedded verbatim as the script block of templates/helm-validate/template.yml;
+      # tests/runtime/test_template_script_lockstep.py proves the two copies match.
+      # Requires the functions from runtime/kubernetes/toolchain.sh.
+      #
+      # Four defects in the pipelines this replaces are fixed here, each with a test
+      # named after it in tests/runtime/helm/test_helm_validate.py:
+      #
+      #  1. `helm template ... | kubeconform` (platform/demo-app) hides a helm failure:
+      #     without pipefail the pipeline reports kubeconform's status, so a chart
+      #     that does not render at all validates clean. This renders to a file and
+      #     checks helm's own exit code before anything reads the file.
+      #  2. build/helm-oci.yml and platform/platform-gitops suppress the exit status of
+      #     `helm dependency update` and `helm repo add`, turning a missing
+      #     dependency into a silent skip. Section 11.4 forbids it; failing to
+      #     resolve a dependency is a validation failure.
+      #  3. `-ignore-missing-schemas` unconditionally (platform/demo-app) passes every
+      #     CRD-backed resource without looking at it. It is off by default here and
+      #     is an input the consumer has to set deliberately.
+      #  4. platform/platform-gitops and platform/cluster-gitops skip a chart whose pull failed
+      #     and still exit 0, so a run can validate nothing and pass. An empty chart
+      #     set, or a path that is not a chart, fails here.
+      set -e
+
+      : "${CI_TPL_CHART_PATHS:?chart-paths is required}"
+      : "${CI_TPL_KUBERNETES_VERSION:?kubernetes-version is required}"
+      : "${CI_TPL_RELEASE_NAME:?release-name is required}"
+      : "${CI_TPL_ARTIFACT_DIR:?artifact directory is required}"
+
+      ci_tpl_slug() {
+        printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '-'
+      }
+
+      # Lint, render and schema-validate one chart with one optional values file.
+      # An empty second argument means the chart's own values.
+      ci_tpl_validate_pass() {
+        ci_tpl_chart=$1
+        ci_tpl_values=$2
+
+        if [ -n "$ci_tpl_values" ]; then
+          ci_tpl_require_inside_checkout "$ci_tpl_values"
+          if [ ! -f "$ci_tpl_values" ]; then
+            echo "ERROR: values file '${ci_tpl_values}' does not exist" >&2
+            return 1
+          fi
+          ci_tpl_label="$(ci_tpl_slug "$ci_tpl_chart")--$(ci_tpl_slug "$ci_tpl_values")"
+          set -- --values "$ci_tpl_values"
+        else
+          ci_tpl_label=$(ci_tpl_slug "$ci_tpl_chart")
+          set --
+        fi
+
+        echo "=== helm lint ${ci_tpl_chart} ${ci_tpl_values} ==="
+        helm lint "$ci_tpl_chart" "$@"
+
+        # Rendered to a file, not piped: a pipeline reports only the last command's
+        # status, so piping helm into kubeconform discards helm's exit code.
+        ci_tpl_render="${CI_TPL_ARTIFACT_DIR}/${ci_tpl_label}.rendered.yaml"
+        echo "=== helm template ${ci_tpl_chart} ${ci_tpl_values} ==="
+        helm template "$CI_TPL_RELEASE_NAME" "$ci_tpl_chart" "$@" >"$ci_tpl_render"
+        if [ ! -s "$ci_tpl_render" ]; then
+          echo "ERROR: '${ci_tpl_chart}' rendered no resources; there is nothing to validate" >&2
+          return 1
+        fi
+
+        ci_tpl_kubeconform "$ci_tpl_render"
+      }
+
+      ci_tpl_validate_chart() {
+        ci_tpl_this_chart=$1
+
+        ci_tpl_require_inside_checkout "$ci_tpl_this_chart"
+        if [ ! -f "$ci_tpl_this_chart/Chart.yaml" ]; then
+          echo "ERROR: '${ci_tpl_this_chart}' is not a chart directory: no Chart.yaml" >&2
+          return 1
+        fi
+
+        # Dependencies must resolve. `build` installs the versions in Chart.lock, so
+        # CI validates what the repository pins; `update` would re-resolve them and
+        # validate something the repository does not describe.
+        if grep -q '^dependencies:' "$ci_tpl_this_chart/Chart.yaml"; then
+          if [ ! -f "$ci_tpl_this_chart/Chart.lock" ]; then
+            echo "ERROR: '${ci_tpl_this_chart}' declares dependencies but has no Chart.lock." >&2
+            echo "ERROR: run 'helm dependency update' and commit the lock file, so CI" >&2
+            echo "ERROR: validates the dependency versions the repository pins." >&2
+            return 1
+          fi
+          echo "=== helm dependency build ${ci_tpl_this_chart} ==="
+          helm dependency build "$ci_tpl_this_chart"
+        fi
+
+        ci_tpl_validate_pass "$ci_tpl_this_chart" ''
+
+        # Split the values list into this function's own positional parameters.
+        # Newline-only splitting keeps a path containing spaces intact; `set -f`
+        # stops a path with a glob character expanding against the file system.
+        ci_tpl_saved_ifs=$IFS
+        IFS=$CI_TPL_NEWLINE
+        set -f
+        # shellcheck disable=SC2086
+        set -- ${CI_TPL_VALUES_FILES:-}
+        IFS=$ci_tpl_saved_ifs
+        set +f
+        for ci_tpl_values_path in "$@"; do
+          [ -n "$ci_tpl_values_path" ] || continue
+          ci_tpl_validate_pass "$ci_tpl_this_chart" "$ci_tpl_values_path"
+        done
+      }
+
+      mkdir -p "$CI_TPL_ARTIFACT_DIR"
+      ci_tpl_charts_seen=0
+
+      ci_tpl_saved_ifs=$IFS
+      IFS=$CI_TPL_NEWLINE
+      set -f
+      # shellcheck disable=SC2086
+      set -- $CI_TPL_CHART_PATHS
+      IFS=$ci_tpl_saved_ifs
+      set +f
+
+      for ci_tpl_chart_path in "$@"; do
+        [ -n "$ci_tpl_chart_path" ] || continue
+        ci_tpl_validate_chart "$ci_tpl_chart_path"
+        ci_tpl_charts_seen=$((ci_tpl_charts_seen + 1))
+      done
+
+      # A run that validated nothing is not a passing run. Section 10.1: missing
+      # evidence fails. Same failure mode as an audit that scans zero repositories
+      # and reports success.
+      if [ "$ci_tpl_charts_seen" -eq 0 ]; then
+        echo "ERROR: chart-paths listed no charts; nothing was validated" >&2
+        exit 1
+      fi
+      echo "helm-validate: ${ci_tpl_charts_seen} chart(s) linted, rendered and schema-validated"
+      # END embed
+  artifacts:
+    name: "$[[ inputs.instance ]]-helm-validate"
+    when: always
+    expire_in: 1 week
+    paths:
+      - .ci-artifacts/$[[ inputs.instance ]]/helm-validate/
+  rules: $[[ inputs.run-rules ]]
+  allow_failure: false
+  interruptible: true
+  # Infrastructure only. Section 10.1 forbids weakening an outcome, and any
+  # condition other than runner_system_failure would retry a failed gate;
+  # tests/contracts/test_retry_policy.py fails the build on one.
+  retry:
+    max: $[[ inputs.max-retries ]]
+    when: [runner_system_failure]
+  # Insulation from the consumer's `default:` block (section 13.1). A component
+  # job runs in the image the component pins and the shell the component ships;
+  # a consumer's global image, before_script, after_script, cache, services,
+  # artifacts or hooks reaching it is a component running something nobody
+  # reviewed. Runner selection and timeouts are the consumer's to set, so those
+  # stay inherited. `retry` and `id_tokens` stay too: this component sets both
+  # itself, and a consumer-level definition is a deliberate estate choice.
+  inherit:
+    default: [tags, timeout, interruptible, retry, id_tokens]

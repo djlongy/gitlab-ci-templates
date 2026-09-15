@@ -1,0 +1,25 @@
+---
+# examples/repository-secret-audit/.gitlab-ci.yml
+#
+# The scheduled estate audit, as the whole pipeline of the project that runs it.
+#
+# Scope is declared here, never inferred. `group-path` resolves a group and its
+# subgroups through the API at job time; `terraform-repositories` is an explicit
+# list. A repository in scope that cannot be cloned fails the audit and reports
+# incomplete coverage, because scanning zero repositories is not success.
+#
+# The schedule and the token belong to this project, not to the shared
+# repository: create the pipeline schedule, and set the CI variable named by
+# `api-token-variable` to a token that can list and clone everything in scope.
+include:
+  - project: 'platform/gitlab-ci-templates'
+    ref: 'REPLACE_WITH_APPROVED_SHARED_CI_REF'
+    file: '/pipelines/repository-secret-audit.yml'
+    inputs:
+      secrets-instance: secrets
+      group-path: 'platform'
+      terraform-instance: terraform
+      terraform-repositories: >-
+        platform/terraform-dns platform/terraform-hypervisor-vms platform/terraform-modules
+      api-token-variable: 'GROUP_SCAN_TOKEN'
+      clone-depth: 0

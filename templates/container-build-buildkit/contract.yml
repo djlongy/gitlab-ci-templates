@@ -1,0 +1,75 @@
+---
+# Machine-readable half of the component contract (section 6.1). The input
+# surface is declared in template.yml and read from there by the catalogue
+# generator, so it is not restated here.
+name: container-build-buildkit
+kind: component
+status: experimental
+introduced_in: 1.0.0
+minimum_gitlab: '18.9'
+# Retry policy: the `max-retries` input (0, 1 or 2, default 1) sets `retry: max`,
+# and `retry: when` is `runner_system_failure` and nothing else. A job killed by
+# its runner runs again; a failed gate never does.
+emitted_jobs:
+  - pattern: '{instance}:container-build-buildkit'
+    stage: build
+    blocking: true
+outputs:
+  - path: '.ci-artifacts/{instance}/container-build-buildkit/image.json'
+    producer: '{instance}:container-build-buildkit'
+    format: json
+    schema: 'image identity schema 1, section 9.1'
+    subject_identity: 'repository@sha256 digest, taken from BuildKit''s exported metadata'
+    retention: 1 week
+  - path: '.ci-artifacts/{instance}/container-build-buildkit/build.env'
+    producer: '{instance}:container-build-buildkit'
+    format: dotenv
+    schema: 'CI_TPL_IMAGE_REFERENCE and CI_TPL_IMAGE_PUSHED'
+    subject_identity: 'same digest as image.json; convenience only, never authoritative'
+    retention: 1 week
+  - path: '.ci-artifacts/{instance}/container-build-buildkit/metadata.json'
+    producer: '{instance}:container-build-buildkit'
+    format: json
+    schema: 'BuildKit --metadata-file output, kept as the evidence the digest came from'
+    retention: 1 week
+required_secrets:
+  - name: HARBOR_USER
+    kind: ci-variable
+    scope: 'push to the candidate registry project'
+    protected_ref_required: false
+  - name: HARBOR_PASSWORD
+    kind: ci-variable
+    scope: 'push to the candidate registry project'
+    protected_ref_required: false
+runtime_image:
+  reference: 'docker.io/moby/buildkit@sha256:86c0ad9d1137c186e9d455912167df20e530bdf7f7c19de802e892bb8ca16552'
+  pinning: digest
+  tool_versions:
+    buildkit: v0.18.2
+trust:
+  privileged: false
+  network_egress:
+    - 'registry.example.com: candidate registry push'
+    - 'every registry named in a FROM line of the consumer Dockerfile'
+  runner_profile: >-
+    Docker executor running buildctl-daemonless.sh. The estate's instance
+    runners are unprivileged and registered untagged, which is what the current
+    template already builds on. A rootless or privileged BuildKit daemon is not
+    required and not requested.
+  protected_ref_required: false
+validation:
+  evidence:
+    - source-reviewed
+    - yaml-parsed
+    - gitlab-linted
+  verified_at: 2026/09/15
+  notes: >-
+    Failure semantics (section 10.1). The job fails when the image repository
+    carries a tag or digest, when a tag alias is not a usable tag, when a build
+    argument is not NAME=VALUE, when the registry credentials are absent, when
+    BuildKit exits non-zero, and when its metadata file carries no manifest
+    digest. There is no registry-query fallback and no tag fallback: the
+    previous template wrote the tag into a field named digest and exited 0.
+    With push-candidate false the job records CI_TPL_IMAGE_PUSHED=false, writes
+    no image.json, and every downstream component then fails its own identity
+    validation. Not runtime-tested: no pipeline has executed this component.

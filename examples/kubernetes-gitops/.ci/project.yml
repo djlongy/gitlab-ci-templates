@@ -1,0 +1,40 @@
+---
+# kubernetes-gitops/.ci/project.yml
+#
+# The record of what this project adopted from the shared CI repository.
+# Contract: docs/gitlab-ci-agent-standard.md section 4, schema
+# tests/contracts/project.schema.json, field guide docs/reference/project-yml.md.
+#
+# Metadata, not GitLab configuration: nothing reads this at pipeline time. It
+# exists so the next reader can see which composition is in use, under which
+# instance names, and what was decided on the way in. The project path below is
+# illustrative, as is everything else in examples/.
+schema_version: 1
+project: demo/platform-gitops
+shared_ci:
+  project: platform/gitlab-ci-templates
+  ref: REPLACE_WITH_APPROVED_SHARED_CI_REF
+workload:
+  name: kubernetes-gitops
+  adoption: composition
+compositions:
+  - file: /pipelines/kubernetes-gitops.yml
+    instances:
+      - platform
+    inputs:
+      instance: platform
+      manifest-paths: 'apps/system
+
+        apps/workloads
+
+        '
+      kubernetes-version: 1.31.0
+      schema-locations: 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json
+
+        '
+      charts: 'true'
+      chart-paths: 'charts/platform
+
+        '
+notes: Validation only. The cluster is reconciled by the GitOps controller from this repository,
+  so no job here reaches a cluster and the record names no environment.

@@ -1,0 +1,106 @@
+---
+# pipelines/terraform-deploy.contract.yml — the contract for the composition beside it.
+#
+# Section 6.3. The catalogue generator reads this plus the spec:inputs header
+# of terraform-deploy.yml; do not restate inputs here.
+name: terraform-deploy
+kind: pipeline
+status: experimental
+introduced_in: 1.0.0
+minimum_gitlab: '18.9'
+emitted_jobs:
+  - pattern: '{instance}:terraform-fmt'
+    stage: verify
+    blocking: true
+  - pattern: '{instance}:terraform-validate'
+    stage: verify
+    blocking: true
+  - pattern: '{instance}:security-filesystem-trivy'
+    stage: verify
+    blocking: true
+  - pattern: '{instance}:terraform-plan'
+    stage: plan
+    blocking: true
+  - pattern: '{instance}:terraform-apply'
+    stage: deploy
+    blocking: true
+outputs:
+  - path: .ci-artifacts/{instance}/terraform-plan/tfplan
+    producer: '{instance}:terraform-plan'
+    format: terraform-plan-binary
+    subject_identity: The plan's own sha256, recorded in plan-metadata.json and re-checked
+      by the apply job.
+    retention: the plan-expire-in input, default 7 days
+  - path: .ci-artifacts/{instance}/terraform-plan/plan-metadata.json
+    producer: '{instance}:terraform-plan'
+    format: application/json
+    schema: schema_version 1; engine, version, instance, environment, state id, working directory,
+      source commit, plan and lockfile hashes, created_at, max age
+    subject_identity: plan_sha256 plus source_commit, state_id and environment.
+    retention: the plan-expire-in input, default 7 days
+required_secrets:
+  - name: GITLAB_TF_STATE_TOKEN
+    kind: ci-variable
+    scope: Default value of the state-token-variable input. Read/write on the project's Terraform
+      state through the GitLab HTTP backend. Must be masked.
+  - name: VAULT_ID_TOKEN
+    kind: id-token
+    audience: https://vault.example.com:8200
+    role: gitlab-ci-terraform
+    scope: Minted only when the vault-auth input is true, for providers that read credentials
+      from Vault. Audience and role come from inputs, not from the job body.
+runtime_image:
+  reference: 'per component: every include forwards a digest-pinned execution image, and the
+    ones a consumer may need to change are inputs of this composition'
+  pinning: input
+trust:
+  privileged: false
+  network_egress:
+    - registry.example.com
+    - registry.terraform.io
+    - gitlab.example.com
+    - the trivy vulnerability database and check bundle sources
+    - vault.example.com
+  runner_profile: shared-docker, the estate instance runners. They are registered untagged,
+    so runner-tags selects nothing today and a tag is not a permission boundary.
+  protected_ref_required: false
+validation:
+  evidence:
+    - source-reviewed
+    - yaml-parsed
+    - gitlab-linted
+  verified_at: 2026/09/15
+  environment: gitlab.example.com 18.9.1-ee, project 18, POST /api/v4/projects/<project-id>/ci/lint
+  notes: >-
+    One include is one root, one state and one environment. The apply job names
+    its plan job explicitly and re-checks the plan's hash, age, engine version,
+    lockfile, state id, working directory and source commit before applying; it
+    never re-plans. Destroy is not a branch of this pipeline: `allow-destroy`
+    only permits an apply whose saved plan is already destructive.
+    `environment:` records a deployment; it is not a protection rule, which must
+    be configured on the GitLab environment separately. There is no
+    verify-deploy stage because no component fills it. Three inputs exist so a
+    project adopting this composition can keep gates it already has, and all
+    three are off by default. `changes-filter` with `changes-paths` adds
+    `changes:` to every job in the instance, so a repository of several roots
+    plans only the one whose paths moved. `apply-mode: automatic` makes the
+    apply run on success on the default branch instead of waiting for a person:
+    that is an owner decision, not a default, section 6.1 does not default a
+    production mutation to unconditional execution, and the consuming project
+    records the decision and its reason in .ci/project.yml. `apply-gate-jobs`
+    adds needs entries with artifacts false to the apply, for ordering between
+    instances such as prod applying only after dev; the plan producer is always
+    needed as well and is never replaced by that list. Evidence is gitlab-linted
+    only, and the lint has a limit worth stating: the API returns no `needs` per
+    job, so the two-instance ordering is asserted on the resolved configuration
+    and the lint proves only that the configuration carrying it compiles.
+    `changes:` semantics are likewise not observable in a dry run, which has no
+    diff to compare against. Status: experimental. Part of this composition HAS
+    executed on 1.0.0-rc.2: platform/terraform-dns (project 16)
+    merge-request pipeline 5736 and main pipeline 5744, and
+    platform/terraform-hypervisor-roles (22) merge-request pipeline 5735, with
+    terraform-fmt, terraform-validate, security-filesystem-trivy and, on 5744,
+    terraform-plan all green. The apply half has not: 5744 created
+    example:terraform-apply and sixbrothers:terraform-apply as manual jobs and
+    nobody started them. A composition whose reason to exist is applying a saved
+    plan is not released until an apply has consumed one.

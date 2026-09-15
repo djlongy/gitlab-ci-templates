@@ -1,0 +1,26 @@
+---
+# examples/ansible-verify/.gitlab-ci.yml
+#
+# An Ansible repository: lint, syntax and secret detection on every change, and
+# a check-mode run started by hand or on a schedule.
+#
+# `check-mode: 'true'` adds infrastructure:ansible-check in the plan stage. That job
+# opens SSH sessions to the hosts in `inventory`, which is why it runs on `web`
+# and `schedule` only and never on a merge request. Its output is partial
+# predictive coverage, not a deployment plan: a task guarded by a registered
+# result from an earlier task is not evaluated.
+#
+# `vault-password-secret` is the NAME of the CI variable holding the Ansible
+# Vault passphrase. Never the value.
+include:
+  - project: 'platform/gitlab-ci-templates'
+    ref: 'REPLACE_WITH_APPROVED_SHARED_CI_REF'
+    file: '/pipelines/ansible-verify.yml'
+    inputs:
+      instance: infrastructure
+      working-directory: 'ansible'
+      playbook: 'playbooks/platform/baseline.yml'
+      inventory: 'inventories/mgt/hosts.yml'
+      check-mode: 'true'
+      limit: 'mgt'
+      vault-password-secret: 'ANSIBLE_VAULT_PASSWORD'

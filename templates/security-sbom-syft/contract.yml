@@ -1,0 +1,70 @@
+---
+name: security-sbom-syft
+kind: component
+status: experimental
+introduced_in: 1.0.0
+minimum_gitlab: '18.9'
+# Retry policy: the `max-retries` input (0, 1 or 2, default 1) sets `retry: max`,
+# and `retry: when` is `runner_system_failure` and nothing else. A job killed by
+# its runner runs again; a failed gate never does.
+emitted_jobs:
+  - pattern: '{instance}:security-sbom-syft'
+    stage: scan
+    blocking: true
+outputs:
+  - path: .ci-artifacts/{instance}/security-sbom-syft/sbom.cdx.json
+    producer: '{instance}:security-sbom-syft'
+    format: CycloneDX JSON
+    subject_identity: The image digest recorded in subject.json beside it.
+    retention: 1 week
+  - path: .ci-artifacts/{instance}/security-sbom-syft/subject.json
+    producer: '{instance}:security-sbom-syft'
+    format: JSON
+    schema: >-
+      schema_version 1; image_reference, repository, digest, source_commit,
+      pipeline_id, job_id, sbom_file, sbom_sha256, sbom_format,
+      component_count, created_at.
+    subject_identity: repository@sha256 digest, copied from the build's image.json.
+    retention: 1 week
+  - path: .ci-artifacts/{instance}/security-sbom-syft/components.txt
+    producer: '{instance}:security-sbom-syft'
+    format: One catalogued package name per line, from syft's template output.
+    retention: 1 week
+required_secrets:
+  - name: HARBOR_USER
+    kind: ci-variable
+    scope: Read access to the candidate registry project. Optional for a public registry.
+  - name: HARBOR_PASSWORD
+    kind: ci-variable
+    scope: Read access to the candidate registry project. Optional for a public registry.
+runtime_image:
+  reference: 'docker.io/anchore/syft@sha256:c5a32143787730c72c58aee4227d9b0242ccc463aa42214b26e2b18f692c1a71'
+  pinning: digest
+  tool_versions:
+    syft: v1.20.0
+trust:
+  privileged: false
+  network_egress:
+    - registry.example.com
+  runner_profile: >-
+    Any unprivileged Docker executor. No Docker socket and no nested build.
+  protected_ref_required: false
+validation:
+  evidence:
+    - source-reviewed
+    - yaml-parsed
+    - gitlab-linted
+    - runtime-tested
+  verified_at: 2026/09/15
+  environment: gitlab.example.com 18.9.1-ee, project 18
+  notes: >-
+    gitlab-linted: the merged configuration was compiled through the CI Lint API
+    with defaults, with two instances, and with the producer removed. No job
+    ran. runtime-tested: runtime/scan/scan.sh has unit tests for the identity,
+    subject and completeness checks, and the syft invocation, its two output
+    flags and the version extraction were executed against the pinned image
+    digest on 2026/09/15. The component's own job has never been executed in CI.
+    Status: experimental, because no consumer pipeline has run this component on
+    1.0.0-rc.2. `released` in this repository means a consumer job executed
+    green, not that the component looks finished. platform/demo-app's build source
+    is tags-only, so no image existed to describe.

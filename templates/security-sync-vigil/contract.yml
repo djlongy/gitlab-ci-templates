@@ -1,0 +1,57 @@
+---
+name: security-sync-vigil
+kind: component
+status: experimental
+introduced_in: 1.0.0
+minimum_gitlab: '18.9'
+# Retry policy: the `max-retries` input (0, 1 or 2, default 1) sets `retry: max`,
+# and `retry: when` is `runner_system_failure` and nothing else. A job killed by
+# its runner runs again; a failed gate never does.
+emitted_jobs:
+  - pattern: '{instance}:security-sync-vigil'
+    stage: attest
+    blocking: true
+outputs:
+  - path: .ci-artifacts/{instance}/security-sync-vigil/vigil-sync-result.json
+    producer: '{instance}:security-sync-vigil'
+    format: JSON
+    schema: >-
+      schema_version 1; status, subject, endpoint, http_status, created_at.
+    subject_identity: repository@sha256 digest from the build's image.json.
+    retention: 1 week
+required_secrets: []
+runtime_image:
+  reference: 'docker.io/python@sha256:cd7c412d000912f29075a1b8803e43cb2f38bb67f104019df526df5ceaf30569'
+  pinning: digest
+  tool_versions:
+    python: '3.12'
+# No checkout: this job reads the named producer's artifacts and the APIs it
+# calls, so it runs with GIT_STRATEGY none and never clones the consumer
+# repository. tests/contracts/test_git_strategy.py holds both halves together.
+trust:
+  privileged: false
+  network_egress:
+    - The Vigil instance named by the vigil-url input
+  runner_profile: Any unprivileged Docker executor.
+  protected_ref_required: false
+validation:
+  evidence:
+    - source-reviewed
+    - yaml-parsed
+    - gitlab-linted
+    - runtime-tested
+  verified_at: 2026/09/15
+  environment: gitlab.example.com 18.9.1-ee, project 18
+  notes: >-
+    Failure semantics: an unreachable Vigil, a non-2xx webhook response, or an
+    image.json without a digest all fail the job. The predecessor swallowed the
+    first two and carried allow_failure true. The webhook path
+    /api/v1/webhook/image-built is Vigil's private API and carries no declared
+    version; a Vigil upgrade can break this component without any change here.
+    gitlab-linted through the CI Lint API; no job ran. runtime-tested: unit
+    tests cover the payload, the unreachable case and the rejected case against
+    a stubbed API. No request has been made to a real Vigil instance, and this
+    estate's endpoint is unresolved in .ci/estate.yml. Status: experimental,
+    because no consumer pipeline has run this component on 1.0.0-rc.2.
+    `released` in this repository means a consumer job executed green, not that
+    the component looks finished. No consumer enables vigil.

@@ -1,0 +1,24 @@
+---
+# examples/container-ko/.gitlab-ci.yml
+#
+# A Go service built by ko: no Dockerfile, no daemon, a reproducible layer over
+# a digest-pinned static base.
+#
+# This example also turns on the Compose smoke test and the Vigil readiness
+# gate. Both are opt-in, and both add a required gate: with smoke-test on, the
+# signing job waits for demo-app:container-smoke-test; with vigil on, promotion
+# waits for demo-app:security-verify-vigil.
+include:
+  - project: 'platform/gitlab-ci-templates'
+    ref: 'REPLACE_WITH_APPROVED_SHARED_CI_REF'
+    file: '/pipelines/container-ko.yml'
+    inputs:
+      instance: demo-app
+      image-repository: 'registry.example.com/dev/platform/demo-app'
+      import-path: './cmd/demo-app'
+      semgrep-rules: 'ci/semgrep-rules.yml'
+      lockfiles: 'go.sum'
+      smoke-test: 'true'
+      smoke-test-image-variable: 'GITSEED_IMAGE'
+      vigil: 'true'
+      vigil-url: 'https://vigil.example.com'

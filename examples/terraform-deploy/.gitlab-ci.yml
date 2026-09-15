@@ -1,0 +1,27 @@
+---
+# examples/terraform-deploy/.gitlab-ci.yml
+#
+# One Terraform root, one state, one environment, applied by hand.
+#
+# `state-id` is the GitLab-managed state this root owns. It is per root AND per
+# environment: two roots sharing one state id share a backend lock and will
+# block each other, and two environments sharing one state id are the same
+# infrastructure.
+#
+# `environment: prod` records the deployment against the prod environment. A
+# name alone is not a protection rule. Configure the protected environment and
+# its approvers in the project's settings; this include cannot do it.
+#
+# `allow-destroy` stays false. It does not generate a destroy plan; it only
+# permits an apply whose saved plan already destroys or replaces something. A
+# deliberate teardown is a separate reviewed flow, not a flag flipped here.
+include:
+  - project: 'platform/gitlab-ci-templates'
+    ref: 'REPLACE_WITH_APPROVED_SHARED_CI_REF'
+    file: '/pipelines/terraform-deploy.yml'
+    inputs:
+      instance: network
+      working-directory: 'infrastructure/network'
+      environment: prod
+      state-id: 'network-prod'
+      var-file: 'envs/prod.tfvars'

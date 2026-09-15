@@ -1,0 +1,82 @@
+---
+name: security-sast-semgrep
+kind: component
+status: released
+introduced_in: 1.0.0
+minimum_gitlab: '18.9'
+# Retry policy: the `max-retries` input (0, 1 or 2, default 1) sets `retry: max`,
+# and `retry: when` is `runner_system_failure` and nothing else. A job killed by
+# its runner runs again; a failed gate never does.
+emitted_jobs:
+  - pattern: '{instance}:security-sast-semgrep'
+    stage: verify
+    blocking: false
+outputs:
+  - path: .ci-artifacts/{instance}/security-sast-semgrep/semgrep.json
+    producer: '{instance}:security-sast-semgrep'
+    format: semgrep JSON
+    subject_identity: source commit CI_COMMIT_SHA under the declared working directory
+    retention: 1 week
+  - path: .ci-artifacts/{instance}/security-sast-semgrep/semgrep.sarif
+    producer: '{instance}:security-sast-semgrep'
+    format: SARIF 2.1.0
+    retention: 1 week
+  - path: .ci-artifacts/{instance}/security-sast-semgrep/severities.txt
+    producer: '{instance}:security-sast-semgrep'
+    format: one line per finding
+    retention: 1 week
+  - path: .ci-artifacts/{instance}/security-sast-semgrep/scan-result.json
+    producer: '{instance}:security-sast-semgrep'
+    format: JSON
+    schema: section 9.2 scan-result, schema_version 1
+    subject_identity: project path and commit SHA of the scanned source
+    retention: 1 week
+required_secrets: []
+runtime_image:
+  reference: 'docker.io/semgrep/semgrep@sha256:570305f199ab668295ac0921667263cc03dcc3cbd7a8099866d3699cc0f2cdcc'
+  pinning: digest
+  tool_versions:
+    semgrep: 1.79.0
+trust:
+  privileged: false
+  network_egress:
+    - registry.example.com
+    - the host serving the rules-ref, when it is a URL rather than a path in the checkout
+  runner_profile: shared-docker
+  protected_ref_required: false
+validation:
+  evidence:
+    - source-reviewed
+    - yaml-parsed
+    - gitlab-linted
+    - runtime-tested
+    - integration-tested
+  verified_at: 2026/09/16
+  revision: '1.0.0-rc.2'
+  environment: >-
+    gitlab.example.com 18.9.1-ee, project 18, POST /api/v4/projects/<project-id>/ci/lint.
+    Executed on shared ref 1.0.0-rc.2 in: platform/demo-app (56) 5734 job 47794 and
+    5745 job 47857, both green, SARIF written and imported by that project's
+    quality-sonarqube job.
+  notes: >-
+    Failure semantics. `blocking` fails the job on a finding at or above
+    severity-threshold; the default `advisory` records it and succeeds. The
+    default is advisory because the template this replaces ended both semgrep
+    invocations in `|| true`, so it gated on nothing; making it blocking here
+    would change every consumer's gating silently. An execution failure fails
+    the job in BOTH modes: semgrep 1.79.0 with --error exits 1 for findings, 0
+    when clean and 7 for an unusable rule config, and any other non-zero code is
+    treated as a crash. A missing, empty or unreadable JSON report fails the
+    job, and so does semgrep exiting 0 while the report carries findings at or
+    above the threshold. SARIF is written as a plain artifact, not as
+    `reports: sast:` (estate report mode is artifact-only; raw SARIF declared as
+    a native report is forbidden by section 10.3 and this estate is not on a
+    tier that ingests it). Rule pinning: rules-ref is required with no default.
+    A path in the consumer checkout or an immutable URL is a pinned scan
+    configuration; a registry pack such as `p/default` is fetched live, and the
+    rules_ref field of scan-result.json records exactly what was used so an
+    unpinned ruleset is visible in the evidence rather than assumed away.
+    Evidence: unit tests in tests/runtime/scan/, exit codes and the
+    --json-output/--sarif-output pair measured against the pinned image on
+    2026/09/15, CI Lint through tests/pipelines/. No pipeline has executed this
+    component.

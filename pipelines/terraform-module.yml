@@ -1,0 +1,120 @@
+---
+# pipelines/terraform-module.yml
+#
+# Verify a Terraform module and publish it to the GitLab Terraform module
+# registry on a protected release tag.
+#
+#   verify  -> terraform-fmt, terraform-validate
+#   publish -> terraform-module-publish
+#
+# Section 7.1 gives a module release `verify, test, publish`. There is no module
+# test component in this repository, so the test stage is omitted rather than
+# declared empty. Add it here when one exists; do not scaffold it now.
+#
+# This composition applies nothing. `terraform-module-publish` packages the
+# module source and uploads it; it holds no state credentials and touches no
+# infrastructure.
+#
+# Publication is immutable. A version that already exists in the registry is
+# refused rather than overwritten, so re-running a tag pipeline after a failed
+# upload needs a new version, not a retry with the same one.
+
+#### Consumer interface ####
+spec:
+  inputs:
+    instance:
+      type: string
+      description: >-
+        Module identifier. Jobs are `<instance>:terraform-fmt`,
+        `<instance>:terraform-validate` and
+        `<instance>:terraform-module-publish`.
+      regex: '^[a-z][a-z0-9-]{0,47}$'
+    working-directory:
+      type: string
+      description: Module root in the consumer checkout.
+      default: '.'
+    module-name:
+      type: string
+      description: >-
+        Module name in the registry, the `<name>` of
+        `<namespace>/<name>/<system>`.
+    module-system:
+      type: string
+      description: >-
+        Target system or provider, the `<system>` of
+        `<namespace>/<name>/<system>`, for example `hypervisor`.
+    runner-tags:
+      type: array
+      description: Approved runner selection from the estate profile.
+      default: []
+    terraform-image:
+      type: string
+      description: Approved Terraform execution image pinned by digest.
+      regex: '^.+@sha256:[0-9a-f]{64}$'
+      default: 'docker.io/hashicorp/terraform@sha256:5820b87995595425074f881500a037b0ccd41158d0d9b44d78f5f120612f2d3d'
+    publish-image:
+      type: string
+      description: Approved curl image pinned by digest, used for the upload.
+      regex: '^.+@sha256:[0-9a-f]{64}$'
+      default: 'docker.io/alpine/curl@sha256:edbbe6f64e9890474df2864d7ee92941bb03ce17b07fd9cadc1d14e9453fc031'
+---
+
+#### Pipeline ownership ####
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG'
+    - when: never
+
+stages:
+  - verify
+  - publish
+
+#### Components at the same shared-CI revision ####
+include:
+  - local: '/templates/terraform-fmt/template.yml'
+    inputs:
+      instance: $[[ inputs.instance ]]
+      stage: verify
+      working-directory: $[[ inputs.working-directory ]]
+      execution-image: $[[ inputs.terraform-image ]]
+      runner-tags: $[[ inputs.runner-tags ]]
+      run-rules:
+        - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG'
+
+  # lockfile-mode is not a consumer input. A module repository commits no
+  # .terraform.lock.hcl — terraform-module-publish excludes it from the archive
+  # — so `readonly` would fail init with "Provider dependency changes detected".
+  # That is a property of this workload, not a choice the consumer makes, so the
+  # composition sets it and the spec header above gains nothing.
+  - local: '/templates/terraform-validate/template.yml'
+    inputs:
+      instance: $[[ inputs.instance ]]
+      stage: verify
+      working-directory: $[[ inputs.working-directory ]]
+      lockfile-mode: module
+      execution-image: $[[ inputs.terraform-image ]]
+      runner-tags: $[[ inputs.runner-tags ]]
+      run-rules:
+        - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG'
+
+  # The publish job declares no `needs:`, so the verify stage gates it. A tag
+  # that fails fmt or validate publishes nothing.
+  - local: '/templates/terraform-module-publish/template.yml'
+    inputs:
+      instance: $[[ inputs.instance ]]
+      stage: publish
+      working-directory: $[[ inputs.working-directory ]]
+      module-name: $[[ inputs.module-name ]]
+      module-system: $[[ inputs.module-system ]]
+      execution-image: $[[ inputs.publish-image ]]
+      runner-tags: $[[ inputs.runner-tags ]]
+      run-rules:
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG && $CI_COMMIT_REF_PROTECTED == "true"'

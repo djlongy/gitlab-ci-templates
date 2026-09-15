@@ -1,0 +1,83 @@
+---
+name: release-trigger-jenkins
+kind: component
+status: experimental
+introduced_in: 1.0.0
+minimum_gitlab: '18.9'
+minimum_runner: '16.0'
+
+# Retry policy: the `max-retries` input (0, 1 or 2, default 1) sets `retry: max`,
+# and `retry: when` is `runner_system_failure` and nothing else. A job killed by
+# its runner runs again; a failed gate never does.
+emitted_jobs:
+  - pattern: '{instance}:release-trigger-jenkins'
+    stage: deploy
+    blocking: true
+
+outputs:
+  - path: '.ci-artifacts/{instance}/release-trigger-jenkins/trigger-result.json'
+    producer: '{instance}:release-trigger-jenkins'
+    format: json
+    schema: >-
+      schema_version 1; target, endpoint, job_path, parameterised, queue_item,
+      http_status, source_commit, pipeline_id, job_id, triggered_at
+    subject_identity: >-
+      Jenkins queue item URL returned in the Location header, plus the GitLab
+      source commit that asked for it.
+    retention: 1 week
+
+required_secrets:
+  - name: VAULT_ID_TOKEN
+    kind: id-token
+    audience: 'https://vault.example.com:8200'
+    role: gitlab-ci
+    scope: >-
+      Read access to the KV path named by vault-secret-path. The role and path
+      are inputs; the defaults are the estate values in .ci/estate.yml.
+    protected_ref_required: false
+
+runtime_image:
+  reference: 'docker.io/alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc'
+  pinning: digest
+  tool_versions:
+    alpine: '3.20'
+
+# No checkout: this job reads the named producer's artifacts and the APIs it
+# calls, so it runs with GIT_STRATEGY none and never clones the consumer
+# repository. tests/contracts/test_git_strategy.py holds both halves together.
+# job-path accepts a leading underscore: Jenkins does, and platform/infrastructure's seed
+# job is `_seed-all-dsl-jobs`. The character class refusing it made the include
+# fail pipeline creation with "provided value does not match required RegEx
+# pattern", which is an input validation error and not a Jenkins error, so the
+# consumer had nothing to fix on their side.
+trust:
+  privileged: false
+  network_egress:
+    - vault.example.com
+    - jenkins.example.com
+    - registry.example.com
+    - the Alpine package mirror, for curl and jq
+  runner_profile: shared-docker
+  protected_ref_required: false
+
+validation:
+  evidence:
+    - source-reviewed
+    - yaml-parsed
+    - gitlab-linted
+  verified_at: 2026/09/15
+  environment: >-
+    Neither Vault, nor Jenkins, nor a runner was contacted at this revision. The
+    job body has not been executed; there is no runtime-tested claim.
+  notes: >-
+    Failure semantics (section 10.1): a failed Vault login, a missing credential
+    field, a missing CSRF crumb, a non-2xx response, a POST that returns no
+    queue item, or a parameters input that is not a JSON object each fail the
+    job. The Jenkins user and API token are written to a mode-0600 curl config
+    file rather than passed in argv. The Alpine package install of curl and jq
+    is not pinned; that gap is inherited from promote/jenkins-trigger.yml and is
+    recorded rather than claimed fixed. Status: experimental, and the one
+    consumer attempt never reached a runner: platform/infrastructure could not create a
+    pipeline at all, because job-path refused the leading underscore in
+    `_seed-all-dsl-jobs`. The regex is widened in 1.0.0; the job body, which
+    fires a live Jenkins build, has still never run.

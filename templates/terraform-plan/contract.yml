@@ -1,0 +1,98 @@
+---
+# Contract for templates/terraform-plan. The other half of the contract is the
+# spec:inputs header of template.yml.
+name: terraform-plan
+kind: component
+status: released
+introduced_in: 1.0.0
+minimum_gitlab: '18.9'
+# artifacts:access needs 15.10 or newer; 18.9 is what this was exercised on.
+minimum_runner: '15.10'
+
+# Retry policy: the `max-retries` input (0, 1 or 2, default 1) sets `retry: max`,
+# and `retry: when` is `runner_system_failure` and nothing else. A job killed by
+# its runner runs again; a failed gate never does.
+emitted_jobs:
+  - pattern: '{instance}:terraform-plan'
+    stage: plan
+    blocking: true
+
+outputs:
+  - path: '.ci-artifacts/{instance}/terraform-plan/tfplan'
+    producer: '{instance}:terraform-plan'
+    format: terraform-plan-binary
+    subject_identity: >-
+      The plan's own sha256, recorded in plan-metadata.json and re-checked by
+      terraform-apply before the plan is applied.
+    retention: the plan-expire-in input, default 7 days, developer access only
+  - path: '.ci-artifacts/{instance}/terraform-plan/plan-metadata.json'
+    producer: '{instance}:terraform-plan'
+    format: application/json
+    schema: >-
+      schema_version 1: engine, engine_version, instance, environment,
+      state_id, backend_address, working_directory, source_commit, pipeline_id,
+      job_id, plan_sha256, lockfile_sha256, created_at, max_age_seconds
+    subject_identity: plan_sha256 plus source_commit, state_id and environment
+    retention: the plan-expire-in input, default 7 days, developer access only
+  - path: '.ci-artifacts/{instance}/terraform-plan/plan.txt'
+    producer: '{instance}:terraform-plan'
+    format: text/plain
+    subject_identity: >-
+      Human review material for the same plan file. Supplementary: apply
+      consumes the binary plan, never this.
+    retention: the plan-expire-in input, default 7 days, developer access only
+
+required_secrets:
+  - name: GITLAB_TF_STATE_TOKEN
+    kind: ci-variable
+    scope: >-
+      Default value of the state-token-variable input. Read/write on the
+      project's Terraform state through the GitLab HTTP backend. Must be masked.
+  - name: VAULT_ID_TOKEN
+    kind: id-token
+    audience: https://vault.example.com:8200
+    role: gitlab-ci-terraform
+    scope: >-
+      Minted only when the vault-auth input is true, for providers that read
+      credentials from Vault. Audience and role come from inputs, not from the
+      job body.
+
+runtime_image:
+  reference: 'docker.io/hashicorp/terraform@sha256:5820b87995595425074f881500a037b0ccd41158d0d9b44d78f5f120612f2d3d'
+  pinning: digest
+  tool_versions:
+    terraform: 1.11.4
+    tfguard.sh: >-
+      runtime/terraform/tfguard.sh, carried in the template as base64 and
+      decoded at job start; kept in lockstep by runtime/terraform/embed.py
+
+trust:
+  privileged: false
+  network_egress:
+    - registry.example.com
+    - gitlab.example.com
+    - registry.terraform.io
+    - vault.example.com
+  # Planning executes providers and data sources. The default rules admit only
+  # a default-branch push for that reason.
+  protected_ref_required: false
+
+validation:
+  evidence:
+    - source-reviewed
+    - yaml-parsed
+    - gitlab-linted
+    - runtime-tested
+    - integration-tested
+  verified_at: 2026/09/16
+  revision: '1.0.0-rc.2'
+  environment: >-
+    gitlab.example.com 18.9.1-ee, project 18, POST /api/v4/projects/<project-id>/ci/lint.
+    Executed on shared ref 1.0.0-rc.2 in: platform/terraform-dns (16) main
+    pipeline 5744, jobs 47852 and 47853, both instances green: the GitLab http
+    backend initialised, state refreshed, "No changes", and plan-metadata.json
+    written. No plan has yet been consumed by terraform-apply in a pipeline.
+  notes: >-
+    runtime-tested covers tfguard.sh in tests/runtime/terraform/, including a
+    run in the pinned image under busybox. gitlab-linted covers the merged
+    configuration. No plan has been executed against a real state backend.

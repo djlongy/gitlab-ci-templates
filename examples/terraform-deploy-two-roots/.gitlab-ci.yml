@@ -1,0 +1,59 @@
+---
+# examples/terraform-deploy-two-roots/.gitlab-ci.yml
+#
+# Two Terraform roots in one repository, deployed in order: development first,
+# production only if that succeeded.
+#
+# Three inputs carry that shape, and each of them is off in the plain
+# examples/terraform-deploy example:
+#
+#   changes-filter + changes-paths  each instance acts only when its own paths
+#                                   changed, so a change under roles/dev does
+#                                   not plan the production root
+#   apply-mode: automatic           the applies run on success on the default
+#                                   branch instead of waiting for a person. This
+#                                   is an owner decision, recorded with its
+#                                   reason in .ci/project.yml; manual is the
+#                                   default and the safer one
+#   apply-gate-jobs                 the production apply also needs the
+#                                   development apply, which is an ordering the
+#                                   stage graph cannot express because both
+#                                   applies are in the same stage
+#
+# The production apply still needs its own plan, with artifacts, and that need is
+# never replaced by the gate list.
+#
+# `ref` must be a protected release tag or a full commit SHA. .ci/estate.yml
+# records shared_ci.approved_ref as unresolved because no release tag exists
+# yet; put the approved one here, never a branch name.
+include:
+  - project: 'platform/gitlab-ci-templates'
+    ref: 'REPLACE_WITH_APPROVED_SHARED_CI_REF'
+    file: '/pipelines/terraform-deploy.yml'
+    inputs:
+      instance: roles-dev
+      working-directory: 'roles'
+      environment: dev
+      state-id: 'roles-dev'
+      var-file: 'envs/dev.tfvars'
+      changes-filter: 'on'
+      changes-paths:
+        - 'roles/**/*'
+      apply-mode: automatic
+
+  - project: 'platform/gitlab-ci-templates'
+    ref: 'REPLACE_WITH_APPROVED_SHARED_CI_REF'
+    file: '/pipelines/terraform-deploy.yml'
+    inputs:
+      instance: roles-prod
+      working-directory: 'roles'
+      environment: prod
+      state-id: 'roles-prod'
+      var-file: 'envs/prod.tfvars'
+      changes-filter: 'on'
+      changes-paths:
+        - 'roles/**/*'
+      apply-mode: automatic
+      apply-gate-jobs:
+        - job: 'roles-dev:terraform-apply'
+          artifacts: false

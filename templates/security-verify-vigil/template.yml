@@ -1,0 +1,472 @@
+---
+# Evaluate Vigil's supply-chain readiness verdict for one built image.
+#
+# This is the estate's release gate, and a gate that passes when the evidence
+# system is unreachable is not a gate. The predecessor printed "Image not found
+# in Vigil after ${VIGIL_MAX_WAIT}s - skipping gate" and exited 0, and parsed
+# the verdict with `grep -o`, so a response missing the readiness field also
+# passed (audit 6.2). Section 17: required gates must not be "hidden by
+# successful error paths".
+#
+# The lookup is by digest, taken from the build's image.json. The predecessor
+# derived one with `sed 's/.*@//'`, which returns a tag unchanged and then
+# queries a nonsense digest.
+
+#### Public interface ####
+spec:
+  inputs:
+    instance:
+      type: string
+      description: Unique workload instance used in the job name.
+      regex: '^[a-z][a-z0-9-]{0,47}$'
+    stage:
+      type: string
+      description: Stage supplied by the owning composition.
+      default: attest
+    execution-image:
+      type: string
+      description: Approved Python execution image pinned by digest.
+      default: 'docker.io/python@sha256:cd7c412d000912f29075a1b8803e43cb2f38bb67f104019df526df5ceaf30569'
+      regex: '^.+@sha256:[0-9a-f]{64}$'
+    runner-tags:
+      type: array
+      description: Runner selection from the estate profile.
+      default: []
+    max-retries:
+      type: number
+      description: >-
+        How many times the runner may retry this job. The condition is
+        runner_system_failure only, so this retries infrastructure and never a
+        failed gate.
+      default: 1
+      options: [0, 1, 2]
+    run-rules:
+      type: array
+      description: Job eligibility set by the composition.
+      default:
+        - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+          when: never
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG'
+    build-job:
+      type: string
+      description: Exact name of the job whose image.json identifies the subject.
+    build-component:
+      type: string
+      description: Component name the build job writes its artifacts under.
+      default: container-build-buildkit
+    sync-job:
+      type: string
+      description: >-
+        Exact name of the security-sync-vigil job. A gate, not an artifact
+        producer: the verdict is read from Vigil, but the sync must have
+        succeeded for there to be one.
+    gate-jobs:
+      type: array
+      description: >-
+        Additional jobs that must succeed first, as needs entries with
+        artifacts false. The two jobs above are always included.
+      default: []
+    vigil-url:
+      type: string
+      description: >-
+        Vigil base URL. No default: .ci/estate.yml records no Vigil endpoint,
+        and a component must not invent an estate fact.
+    require-readiness:
+      type: string
+      description: >-
+        Lowest readiness verdict that passes. green is the default; amber
+        accepts a warning state and is an explicit relaxation.
+      default: green
+      options: [green, amber, yellow]
+    max-wait:
+      type: number
+      description: >-
+        Seconds to wait for Vigil to hold a record for this digest. Running out
+        fails the gate; "not found" is not "no findings".
+      default: 300
+    poll-interval:
+      type: number
+      description: Seconds between readiness lookups.
+      default: 15
+---
+"$[[ inputs.instance ]]:security-verify-vigil":
+  stage: $[[ inputs.stage ]]
+  image:
+    name: $[[ inputs.execution-image ]]
+    entrypoint: ['']
+  tags: $[[ inputs.runner-tags ]]
+  variables:
+    # The readiness verdict is read from Vigil and the subject from build-job's
+    # artifact, so the checkout is never opened.
+    GIT_STRATEGY: none
+    CI_TPL_RUNTIME_DIR: /tmp/ci-runtime
+    CI_TPL_ARTIFACT_DIR: '.ci-artifacts/$[[ inputs.instance ]]/security-verify-vigil'
+    CI_TPL_IDENTITY_FILE: '.ci-artifacts/$[[ inputs.instance ]]/$[[ inputs.build-component ]]/image.json'
+    CI_TPL_VIGIL_URL: $[[ inputs.vigil-url ]]
+    CI_TPL_REQUIRE_READINESS: $[[ inputs.require-readiness ]]
+    CI_TPL_MAX_WAIT: '$[[ inputs.max-wait ]]'
+    CI_TPL_POLL_INTERVAL: '$[[ inputs.poll-interval ]]'
+  needs:
+    - job: $[[ inputs.build-job ]]
+      artifacts: true
+    - job: $[[ inputs.sync-job ]]
+      artifacts: false
+    - $[[ inputs.gate-jobs ]]
+  before_script:
+    - |
+      # BEGIN embed dir $CI_TPL_RUNTIME_DIR runtime/httpjson.py runtime/vigil/vigil.py
+      mkdir -p "$CI_TPL_RUNTIME_DIR" "$CI_TPL_RUNTIME_DIR/vigil" || exit 1
+      cat > "$CI_TPL_RUNTIME_DIR/httpjson.py" <<'CI_TPL_EMBED_EOF' || exit 1
+      """Minimal JSON-over-HTTPS client shared by the runtime helpers.
+
+      The predecessor templates parsed API responses with `grep -o '"key":"[^"]*"'`,
+      which returns an empty string for a field the server never sent. An absent
+      `readiness` field then compared unequal to `"red"` and the release gate passed on
+      an empty response (audit 6.2). Everything here uses a real parser and treats a
+      response it cannot parse as a failure.
+
+      Only the standard library: runtime/<domain>/install.sh writes these helpers
+      into a job's runtime directory, and nothing is installed there.
+
+      Nothing in this module logs a header value or a request body. Credentials reach
+      it as arguments and stay there.
+      """
+
+      from __future__ import annotations
+
+      import json
+      import urllib.error
+      import urllib.request
+      from typing import Any
+
+
+      class HttpError(RuntimeError):
+          """The request could not be completed, which is never a passing result."""
+
+
+      class Response:
+          def __init__(self, status: int, body: bytes):
+              self.status = status
+              self.body = body
+
+          @property
+          def text(self) -> str:
+              return self.body.decode("utf-8", errors="replace")
+
+          def json(self) -> Any:
+              """Parsed body, or HttpError.
+
+              A body that is not JSON is a failure and not an empty result: the caller
+              asked an API a question and did not get an answer it can read.
+              """
+              try:
+                  return json.loads(self.body)
+              except (ValueError, UnicodeDecodeError) as error:
+                  raise HttpError(f"response body is not JSON: {error}") from error
+
+          def ok(self) -> bool:
+              return 200 <= self.status < 300
+
+
+      def request(
+          method: str,
+          url: str,
+          *,
+          headers: dict[str, str] | None = None,
+          body: bytes | None = None,
+          timeout: int = 30,
+      ) -> Response:
+          """Perform one HTTPS request and return its status and body.
+
+          An HTTP error status is returned, not raised: callers decide which codes are
+          expected. Only a transport-level failure raises, because that is a question
+          that never reached the server.
+          """
+          if not url.startswith("https://"):
+              # TLS is not optional, and neither is a maintained trust bundle
+              # (section 10.2). A plaintext endpoint is a configuration error.
+              raise HttpError(f"refusing a non-HTTPS request to {url}")
+
+          req = urllib.request.Request(url, data=body, method=method, headers=headers or {})
+          try:
+              with urllib.request.urlopen(req, timeout=timeout) as response:
+                  return Response(response.status, response.read())
+          except urllib.error.HTTPError as error:
+              return Response(error.code, error.read())
+          except urllib.error.URLError as error:
+              raise HttpError(f"{method} {url} could not be completed: {error.reason}") from error
+          except TimeoutError as error:
+              raise HttpError(f"{method} {url} timed out after {timeout}s") from error
+
+
+      def get_json(url: str, **kwargs: Any) -> Any:
+          response = request("GET", url, **kwargs)
+          if not response.ok():
+              raise HttpError(f"GET {url} returned HTTP {response.status}: {response.text[:300]}")
+          return response.json()
+      CI_TPL_EMBED_EOF
+      cat > "$CI_TPL_RUNTIME_DIR/vigil/vigil.py" <<'CI_TPL_EMBED_EOF' || exit 1
+      """Vigil supply-chain sync and release-readiness gate.
+
+      Two subcommands, one per component:
+
+          vigil.py sync   --url U --identity image.json --output vigil-sync-result.json
+          vigil.py verify --url U --identity image.json --output gate-result.json
+
+      Both refuse to pass when the evidence system cannot answer. The template this
+      replaces did the opposite: `security/vigil-notify.yml` swallowed an unreachable
+      Vigil with `|| { echo WARN; exit 0; }` and carried `allow_failure: true`, and
+      `security/vigil-check.yml` printed "skipping gate" and exited 0 when the image
+      never appeared. Section 17 is explicit that a required gate must not be "hidden
+      by successful error paths", so an outage here fails the pipeline.
+
+      The subject always comes from the builder's image.json, never from a dotenv
+      value or a tag. `verify` looks the image up by its digest, and a record that
+      does not carry a readiness verdict is a failure rather than a default pass.
+      """
+
+      from __future__ import annotations
+
+      import argparse
+      import json
+      import sys
+      import time
+      from pathlib import Path
+
+      sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+      from httpjson import HttpError, get_json, request  # noqa: E402
+
+      READINESS_ORDER = ("red", "amber", "yellow", "green")
+
+
+      class GateFailure(RuntimeError):
+          """The gate evaluated and the answer was no."""
+
+
+      def read_identity(path: Path) -> dict:
+          """Load and check a builder's image identity record (section 9.1)."""
+          if not path.is_file():
+              raise GateFailure(f"image identity record not found: {path}")
+          try:
+              identity = json.loads(path.read_text())
+          except ValueError as error:
+              raise GateFailure(f"{path} is not valid JSON: {error}") from error
+
+          reference = identity.get("reference", "")
+          digest = identity.get("digest", "")
+          repository = identity.get("repository", "")
+
+          if not isinstance(digest, str) or not digest.startswith("sha256:") or len(digest) != 71:
+              raise GateFailure(f"{path} carries no sha256 digest; refusing to query by tag")
+          if reference != f"{repository}@{digest}":
+              raise GateFailure(f"{path} is inconsistent: reference is not repository@digest")
+
+          return identity
+
+
+      def write_result(path: Path, payload: dict) -> None:
+          path.parent.mkdir(parents=True, exist_ok=True)
+          path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+
+      def now() -> str:
+          return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+      def sync(args: argparse.Namespace) -> int:
+          identity = read_identity(Path(args.identity))
+          payload = json.dumps(
+              {
+                  "image": identity["repository"],
+                  "digest": identity["digest"],
+                  "reference": identity["reference"],
+                  "source_commit": identity.get("source_commit", ""),
+                  "source": "gitlab-ci",
+                  "pipeline_id": str(identity.get("pipeline_id", "")),
+              }
+          ).encode()
+
+          response = request(
+              "POST",
+              f"{args.url.rstrip('/')}/api/v1/webhook/image-built",
+              headers={"Content-Type": "application/json"},
+              body=payload,
+              timeout=args.timeout,
+          )
+
+          if not response.ok():
+              raise GateFailure(
+                  f"Vigil rejected the sync with HTTP {response.status}: {response.text[:300]}"
+              )
+
+          write_result(
+              Path(args.output),
+              {
+                  "schema_version": 1,
+                  "status": "synced",
+                  "subject": identity["reference"],
+                  "endpoint": args.url,
+                  "http_status": response.status,
+                  "created_at": now(),
+              },
+          )
+          print(f"Vigil sync accepted for {identity['reference']}")
+          return 0
+
+
+      def lookup_readiness(url: str, digest: str, timeout: int) -> dict:
+          return get_json(
+              f"{url.rstrip('/')}/api/v1/images/lookup/readiness?digest={digest}",
+              timeout=timeout,
+          )
+
+
+      def poll_readiness(args: argparse.Namespace, digest: str) -> dict:
+          """Wait for Vigil to hold a record for this digest.
+
+          A transport failure is retried, because Harbor's scan and Vigil's sync take
+          time. Running out of time is a failure: "not found" is not "no findings".
+          """
+          deadline = time.monotonic() + args.max_wait
+          last_error = "no attempt completed"
+          while True:
+              try:
+                  return lookup_readiness(args.url, digest, args.request_timeout)
+              except HttpError as error:
+                  last_error = str(error)
+              if time.monotonic() >= deadline:
+                  raise GateFailure(
+                      f"Vigil returned no readiness record for {digest} within "
+                      f"{args.max_wait}s. Last error: {last_error}"
+                  )
+              print(f"waiting for Vigil to record {digest} ...")
+              time.sleep(args.poll_interval)
+
+
+      def verify(args: argparse.Namespace) -> int:
+          identity = read_identity(Path(args.identity))
+          digest = identity["digest"]
+
+          record = poll_readiness(args, digest)
+          if not isinstance(record, dict):
+              raise GateFailure("Vigil returned a readiness record that is not an object")
+
+          readiness = record.get("readiness")
+          if not isinstance(readiness, str) or readiness.lower() not in READINESS_ORDER:
+              raise GateFailure(
+                  "Vigil returned no usable readiness verdict "
+                  f"(got {readiness!r}); an unreadable verdict is not a pass"
+              )
+          readiness = readiness.lower()
+
+          recorded_digest = record.get("digest")
+          if isinstance(recorded_digest, str) and recorded_digest and recorded_digest != digest:
+              raise GateFailure(
+                  f"Vigil answered about {recorded_digest}, not the image under test ({digest})"
+              )
+
+          required = args.require.lower()
+          passed = READINESS_ORDER.index(readiness) >= READINESS_ORDER.index(required)
+
+          write_result(
+              Path(args.output),
+              {
+                  "schema_version": 1,
+                  "evaluator": "vigil",
+                  "endpoint": args.url,
+                  "subject": identity["reference"],
+                  "readiness": readiness,
+                  "required_readiness": required,
+                  "deployable": record.get("deployable"),
+                  "reason": record.get("reason"),
+                  "signed": record.get("signed"),
+                  "scan_complete": record.get("scan_complete"),
+                  "result": "pass" if passed else "fail",
+                  "created_at": now(),
+              },
+          )
+
+          if not passed:
+              raise GateFailure(
+                  f"readiness is '{readiness}', policy requires at least '{required}'. "
+                  f"Reason: {record.get('reason') or 'not stated by Vigil'}"
+              )
+
+          print(f"readiness '{readiness}' meets the '{required}' policy for {identity['reference']}")
+          return 0
+
+
+      def build_parser() -> argparse.ArgumentParser:
+          parser = argparse.ArgumentParser(description=__doc__)
+          sub = parser.add_subparsers(dest="command", required=True)
+
+          sync_parser = sub.add_parser("sync", help="ask Vigil to ingest a freshly built image")
+          sync_parser.add_argument("--url", required=True)
+          sync_parser.add_argument("--identity", required=True)
+          sync_parser.add_argument("--output", required=True)
+          sync_parser.add_argument("--timeout", type=int, default=120)
+          sync_parser.set_defaults(handler=sync)
+
+          verify_parser = sub.add_parser("verify", help="evaluate Vigil's release readiness verdict")
+          verify_parser.add_argument("--url", required=True)
+          verify_parser.add_argument("--identity", required=True)
+          verify_parser.add_argument("--output", required=True)
+          verify_parser.add_argument("--require", default="green", choices=["green", "amber", "yellow"])
+          verify_parser.add_argument("--max-wait", type=int, default=300)
+          verify_parser.add_argument("--poll-interval", type=int, default=15)
+          verify_parser.add_argument("--request-timeout", type=int, default=30)
+          verify_parser.set_defaults(handler=verify)
+
+          return parser
+
+
+      def main(argv: list[str] | None = None) -> int:
+          args = build_parser().parse_args(argv)
+          try:
+              return args.handler(args)
+          except (GateFailure, HttpError) as error:
+              print(f"ERROR: {error}", file=sys.stderr)
+              return 1
+
+
+      if __name__ == "__main__":
+          raise SystemExit(main())
+      CI_TPL_EMBED_EOF
+      # END embed
+  script:
+    - |
+      mkdir -p "$CI_TPL_ARTIFACT_DIR" || exit 1
+      python3 "$CI_TPL_RUNTIME_DIR/vigil/vigil.py" verify \
+        --url "$CI_TPL_VIGIL_URL" \
+        --identity "$CI_TPL_IDENTITY_FILE" \
+        --require "$CI_TPL_REQUIRE_READINESS" \
+        --max-wait "$CI_TPL_MAX_WAIT" \
+        --poll-interval "$CI_TPL_POLL_INTERVAL" \
+        --output "$CI_TPL_ARTIFACT_DIR/gate-result.json" || exit 1
+  artifacts:
+    name: '$[[ inputs.instance ]]-security-verify-vigil-$CI_JOB_ID'
+    paths:
+      - '.ci-artifacts/$[[ inputs.instance ]]/security-verify-vigil/'
+    when: always
+    # .ci/estate.yml retention.evidence.
+    expire_in: 1 week
+  rules: $[[ inputs.run-rules ]]
+  allow_failure: false
+  interruptible: false
+  # Infrastructure only. Section 10.1 forbids weakening an outcome, and any
+  # condition other than runner_system_failure would retry a failed gate;
+  # tests/contracts/test_retry_policy.py fails the build on one.
+  retry:
+    max: $[[ inputs.max-retries ]]
+    when: [runner_system_failure]
+  # Insulation from the consumer's `default:` block (section 13.1). A component
+  # job runs in the image the component pins and the shell the component ships;
+  # a consumer's global image, before_script, after_script, cache, services,
+  # artifacts or hooks reaching it is a component running something nobody
+  # reviewed. Runner selection and timeouts are the consumer's to set, so those
+  # stay inherited. `retry` and `id_tokens` stay too: this component sets both
+  # itself, and a consumer-level definition is a deliberate estate choice.
+  inherit:
+    default: [tags, timeout, interruptible, retry, id_tokens]

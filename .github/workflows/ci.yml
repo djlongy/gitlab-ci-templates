@@ -1,0 +1,53 @@
+---
+# Validation for the GitHub copy of this repository.
+#
+# It runs the same checks as .gitlab-ci.yml minus the two that need a GitLab
+# server: the merged-configuration lint through the CI Lint API, and the release
+# job. Everything under tests/pipelines/ that lints therefore SKIPS here, which
+# is why the pytest step below prints its skip count rather than hiding it — a
+# green run with everything skipped would prove nothing about merged
+# configuration.
+
+name: ci
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install --disable-pip-version-check -q pyyaml jsonschema pytest yamllint
+
+      - name: yamllint
+        run: >-
+          yamllint -d "{extends: default, rules: {line-length: disable, truthy:
+          disable}}" .gitlab-ci.yml .github .ci tests runtime templates pipelines
+          examples
+
+      - name: Catalogue is generated from the contracts, not hand-edited
+        run: python3 runtime/catalog/generate.py --check
+
+      - name: Templates carry the runtime in runtime/, unmodified
+        run: python3 runtime/embed/generate.py --check
+
+      - name: Contract, estate and exception schemas
+        run: python3 -m pytest -q tests/contracts/
+
+      - name: Test suite
+        # GIT_CONFIG_GLOBAL is set per command, not as a job variable: the
+        # checkout's own git reads it too and rejects /dev/null with
+        # "bad config line 1".
+        run: GIT_CONFIG_GLOBAL=/dev/null python3 -m pytest -q -rs tests/

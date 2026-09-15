@@ -1,0 +1,140 @@
+---
+# pipelines/container-ko.contract.yml — the contract for the composition beside it.
+#
+# Section 6.3. The catalogue generator reads this plus the spec:inputs header
+# of container-ko.yml; do not restate inputs here.
+name: container-ko
+kind: pipeline
+status: experimental
+introduced_in: 1.0.0
+minimum_gitlab: '18.9'
+# Release tags: `release-tag-pattern` (default semver with an optional
+# pre-release suffix) decides which tag pushes create a pipeline at all. It is
+# applied once, in `workflow:`, because GitLab protected-tag patterns are globs
+# and cannot express a version number, so protecting `*` would otherwise make
+# every tag a release.
+emitted_jobs:
+  - pattern: '{instance}:security-secrets-gitleaks'
+    stage: verify
+    blocking: true
+  - pattern: '{instance}:security-sast-semgrep'
+    stage: verify
+    blocking: true
+  - pattern: '{instance}:security-filesystem-trivy'
+    stage: verify
+    blocking: true
+  - pattern: '{instance}:quality-dependency-lockfiles'
+    stage: verify
+    blocking: true
+  - pattern: '{instance}:container-build-ko'
+    stage: build
+    blocking: true
+  - pattern: '{instance}:container-smoke-test'
+    stage: test
+    blocking: true
+  - pattern: '{instance}:security-sbom-syft'
+    stage: scan
+    blocking: true
+  - pattern: '{instance}:security-image-trivy'
+    stage: scan
+    blocking: true
+  - pattern: '{instance}:security-sbom-upload-dtrack'
+    stage: scan
+    blocking: true
+  - pattern: '{instance}:container-sign-attest-cosign'
+    stage: attest
+    blocking: true
+  - pattern: '{instance}:security-sync-vigil'
+    stage: attest
+    blocking: true
+  - pattern: '{instance}:security-verify-vigil'
+    stage: attest
+    blocking: true
+  - pattern: '{instance}:container-promote-harbor'
+    stage: publish
+    blocking: true
+outputs:
+  - path: .ci-artifacts/{instance}/container-build-ko/image.json
+    producer: '{instance}:container-build-ko'
+    format: json
+    schema: image identity schema 1, section 9.1
+    subject_identity: repository@sha256 digest of the candidate image. Every later job in
+      this pipeline reads this file, never a tag.
+    retention: 1 week
+  - path: .ci-artifacts/{instance}/security-sbom-syft/sbom.cdx.json
+    producer: '{instance}:security-sbom-syft'
+    format: CycloneDX JSON
+    schema: section 9.2; subject.json beside it names the image the SBOM describes
+    subject_identity: The digest in subject.json, copied from image.json.
+    retention: 1 week
+  - path: .ci-artifacts/{instance}/security-image-trivy/scan-result.json
+    producer: '{instance}:security-image-trivy'
+    format: JSON
+    schema: section 9.2 scan-result, schema_version 1
+    subject_identity: repository@sha256 digest.
+    retention: 1 week
+  - path: .ci-artifacts/{instance}/container-sign-attest-cosign/attestation-result.json
+    producer: '{instance}:container-sign-attest-cosign'
+    format: JSON
+    schema: schema_version 1; what was signed, with which key, and which predicates were attached
+    subject_identity: repository@sha256 digest.
+    retention: 1 week
+  - path: .ci-artifacts/{instance}/container-promote-harbor/promotion-result.json
+    producer: '{instance}:container-promote-harbor'
+    format: JSON
+    schema: schema_version 1; the destination digest read back after the copy
+    subject_identity: repository@sha256 digest, verified in the destination project.
+    retention: 1 week
+required_secrets:
+  - name: HARBOR_USER
+    kind: ci-variable
+    scope: push to the candidate registry project
+    protected_ref_required: false
+  - name: HARBOR_PASSWORD
+    kind: ci-variable
+    scope: push to the candidate registry project
+    protected_ref_required: false
+  - name: DTRACK_API_KEY
+    kind: ci-variable
+    scope: BOM_UPLOAD and VIEW_PORTFOLIO on the target project. Sent as the X-Api-Key header,
+      never in a URL, and read from the environment by name inside the helper so it never
+      reaches an input or an argument list.
+  - name: VAULT_ID_TOKEN
+    kind: id-token
+    audience: https://vault.example.com:8200
+    role: gitlab-ci
+    scope: Exchanged at the jwt auth mount for a token permitted to sign with the Transit
+      key named by cosign-key. Audience, mount and role are inputs.
+    protected_ref_required: false
+runtime_image:
+  reference: 'per component: every include forwards a digest-pinned execution image, and the
+    ones a consumer may need to change are inputs of this composition'
+  pinning: input
+trust:
+  privileged: true
+  network_egress:
+    - registry.example.com
+    - the host serving the rules-ref, when it is a URL rather than a path in the checkout
+    - the trivy vulnerability database and check bundle sources
+    - 'proxy.golang.org and sum.golang.org: pinned ko install and module verification'
+    - 'cgr.dev: default base image'
+    - 'registry.example.com: candidate registry push'
+    - 'registry.example.com: pull the images under test'
+    - Trivy vulnerability database source (ghcr.io by default)
+    - The Dependency-Track instance named by the api-url input
+    - vault.example.com
+    - github.com (the pinned cosign release asset)
+    - The Vigil instance named by the vigil-url input
+  runner_profile: shared-docker, the estate instance runners. They are registered untagged,
+    so runner-tags selects nothing today and a tag is not a permission boundary.
+  protected_ref_required: false
+validation:
+  evidence:
+    - source-reviewed
+    - yaml-parsed
+    - gitlab-linted
+  verified_at: 2026/09/15
+  environment: gitlab.example.com 18.9.1-ee, project 18, POST /api/v4/projects/<project-id>/ci/lint
+  notes: 'Same chain and the same gates as container-buildkit, built by ko instead of BuildKit:
+    no Dockerfile, no daemon, and the base image pinned by digest as an input. `build-sources` chooses which pushes produce a candidate: `default-branch-and-tags`, the default and the behaviour before this input existed, or `tags-only`, which confines the build, smoke test, SBOM, image scan, signature, attestations and promotion to a protected tag push while the four verify jobs still run on merge requests and default-branch pushes. Evidence is
+    gitlab-linted only.'

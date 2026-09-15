@@ -1,0 +1,60 @@
+---
+# Reviewed exceptions to the standard.
+#
+# Contract: docs/gitlab-ci-agent-standard.md section 3. This file is a RECORD,
+# not an enforcement mechanism. Nothing reads it at pipeline time. An entry here
+# documents that a deviation was reviewed and accepted; it does not make the
+# deviation happen, and removing an entry does not undo one.
+#
+# This repository ships the file with ONE illustrative entry, so the schema and
+# the tests have something to check and a reader can see the required shape.
+# Delete it when you fork and record your own; an empty `exceptions:` list is
+# not valid, because a record nobody has written to reads the same as a record
+# nobody keeps.
+#
+# Schema: tests/contracts/exceptions.schema.json, enforced by
+# tests/contracts/test_exceptions.py. All fields required:
+#
+#   - id:          EXC-NNNN, four digits, allocated in order. The pattern is
+#                  ^[A-Z]+-[0-9]+$, the same one .ci/project.yml records must
+#                  satisfy in their `exceptions:` list
+#                  (tests/contracts/project.schema.json). Ids are never reused,
+#                  and a retired exception is deleted rather than renumbered.
+#     scope:       what the exception covers — a path, a template, a consumer
+#                  project, or the whole repository
+#     rule:        the rule being excepted, quoted from the standard with its
+#                  section, e.g. "2 Consumer configuration: Small include plus
+#                  declared inputs; no repeated central shell logic"
+#     reason:      why the deviation is accepted, in one or two sentences
+#     owner:       the person accountable for closing it
+#     granted_at:  yyyy/mm/dd
+#     expires_at:  yyyy/mm/dd — an exception without an expiry is a decision, and
+#                  belongs in the standard or an ADR instead
+#     compensating_controls:
+#                  list of what limits the risk while the exception stands, or
+#                  the single item "none"
+
+schema_version: 1
+
+exceptions:
+  # ILLUSTRATIVE. Replace with your own; this project does not exist.
+  #
+  # The shape worth copying is the reasoning, not the wording: a pipeline whose
+  # only capability is single-repo, so no shared component covers it and D-scope
+  # (a component exists for a capability two or more repositories share) says
+  # none should be built. It keeps its bespoke job rather than being bent onto a
+  # composition that does not fit.
+  - id: EXC-0001
+    scope: consumer project platform/example-single-repo-check
+    rule: "2 Consumer configuration: Small include plus declared inputs; no repeated central shell logic"
+    reason: >-
+      The only job runs the repository's own validation script, which exists so CI and a
+      developer run identical code. Wrapping it in a shared component would create a second
+      implementation of a single-repo check.
+    owner: platform-team
+    granted_at: 2026/09/15
+    expires_at: 2027/09/15
+    compensating_controls:
+      - The job is non-mutating and runs on merge requests and the default branch.
+      - The pipeline adopted the standard's stage vocabulary, so a later component drops in
+        without a second change.

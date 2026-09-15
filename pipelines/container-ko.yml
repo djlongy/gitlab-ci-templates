@@ -1,0 +1,767 @@
+---
+# pipelines/container-ko.yml
+#
+# The container release pipeline for a Go project built by ko: no Dockerfile,
+# no daemon, a reproducible layer over a digest-pinned static base.
+# One root composition: it owns `workflow:` and `stages:`, includes the
+# components at its own revision and forwards every input explicitly, because
+# inputs do not flow through nested includes (section 6.2).
+#
+# Stage order is the section 7.1 container release sequence:
+#
+#   verify  -> secret detection, SAST, filesystem scan, lockfile reproducibility
+#   build   -> one builder, ko, exporting an immutable image.json
+#   test    -> optional Compose smoke test against that exact digest
+#   scan    -> one authoritative SBOM producer (syft) and the image scan (trivy)
+#   attest  -> cosign signature and attestations, optional Vigil readiness gate
+#   publish -> Harbor dev -> prod promotion of the digest that passed
+#
+# One builder and one authoritative SBOM producer, per section 6.2. For a
+# Dockerfile build use pipelines/container-buildkit.yml, for a JVM build
+# pipelines/container-jib.yml; do not include two of these.
+#
+# Source eligibility belongs to this composition, not to the consumer, so
+# `run-rules` is not exposed as an input. What a consumer selects instead is
+# `build-sources`, which picks the candidate rule set. Four rule sets are used:
+#
+#   verify     merge request, default branch, tag   always
+#   candidate  default branch, tag                  build-sources:
+#                                                     default-branch-and-tags
+#   candidate  protected tag                        build-sources: tags-only
+#   release    protected tag, manual                promotion only
+#
+# `run-rules` is a fixed array, so one include entry cannot carry both candidate
+# rule sets. Each candidate component is included twice instead, once per source
+# set, under mutually exclusive include `rules:`; exactly one entry is ever
+# active, and the pair is identical apart from those rules. That is the device
+# the smoke-test and Vigil gate lists already use for the same reason.
+#
+# The candidate set deliberately excludes merge requests. A merge request
+# pipeline that ran the scanners but not the build would ask trivy and syft to
+# consume an artifact no job produced, and pipeline creation would fail.
+#
+# Blocking by default. `sast-policy-mode` is the one gate a project may relax
+# while it onboards, and doing so is an explicit choice, spelled out in
+# examples/container-buildkit-onboarding/, never a default here.
+
+#### Consumer interface ####
+spec:
+  inputs:
+    instance:
+      type: string
+      description: >-
+        Workload identifier. Every job in this pipeline is named
+        `<instance>:<component-name>`, and every artifact lands under
+        `.ci-artifacts/<instance>/`.
+      regex: '^[a-z][a-z0-9-]{0,47}$'
+    image-repository:
+      type: string
+      description: >-
+        Candidate repository the image is built into, without a tag, for
+        example registry.example.com/dev/platform/demo-app.
+    working-directory:
+      type: string
+      description: Directory the build runs from, relative to the checkout.
+      default: '.'
+    import-path:
+      type: string
+      description: Go import path or package to build, relative to working-directory.
+      default: '.'
+    base-image:
+      type: string
+      description: >-
+        Runtime base image the Go binary is layered onto, pinned by digest.
+      regex: '^.+@sha256:[0-9a-f]{64}$'
+      default: 'cgr.dev/chainguard/static@sha256:bf639cba19ba56329e6907ac26a7afcdde57a80b6aa66d5100da6883196e6b82'
+    ko-version:
+      type: string
+      description: ko release the build installs, verified by checksum.
+      default: 'v0.19.1'
+    platforms:
+      type: string
+      description: Comma-separated target platforms.
+      default: 'linux/amd64'
+    tags:
+      type: array
+      description: Tags applied to the candidate image alongside its digest.
+      default: ['$CI_COMMIT_SHORT_SHA']
+    release-tag-pattern:
+      type: string
+      description: >-
+        Which tags are release tags, as a regular expression applied to
+        $CI_COMMIT_TAG. GitLab's protected-tag patterns are globs and cannot
+        express a version number, so a project that protects `*` would otherwise
+        build, push and promote on every tag it creates -- a documentation
+        marker, a vendor import, anything. The default is semver with an
+        optional pre-release suffix. A tag that does not match creates no
+        pipeline at all, rather than one whose jobs are all gated off. No `/`:
+        the value becomes a regular expression literal.
+      regex: '^[^/]+$'
+      default: '^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$'
+    build-sources:
+      type: string
+      description: >-
+        Which pushes produce a release candidate. `default-branch-and-tags`
+        builds, scans, signs and attests on a default-branch push as well as on
+        a tag. `tags-only` confines the whole candidate chain to a protected tag
+        push: the verify jobs still run on merge requests and default-branch
+        pushes, and between tags nothing is built, pushed to a registry, signed
+        or promoted.
+      options: ['default-branch-and-tags', 'tags-only']
+      default: 'default-branch-and-tags'
+    semgrep-rules:
+      type: string
+      description: >-
+        Rule source for the SAST scan, passed to `semgrep --config`. Required,
+        with no default, so the ruleset is a deliberate choice: a path in the
+        consumer checkout is pinned, a registry pack is fetched live.
+    lockfiles:
+      type: string
+      description: >-
+        Comma-separated list of every lockfile that must exist and be pinned,
+        each relative to working-directory. Required: inferring the set from the
+        checkout root reports a monorepo as having no dependencies at all. A
+        project that genuinely has none -- a stdlib-only Go module, whose go.sum
+        is empty -- declares the literal `none`, which cannot be combined with a
+        path. An empty value stays an error: not filling this in and having
+        nothing to fill in are different answers.
+    sast-policy-mode:
+      type: string
+      description: >-
+        `blocking` fails the pipeline on a SAST finding at or above the
+        threshold. `advisory` records findings and still fails on a scanner that
+        could not run. Blocking is the release default; see
+        examples/container-buildkit-onboarding/ before changing it.
+      options: ['blocking', 'advisory']
+      default: 'blocking'
+    scan-severity:
+      type: string
+      description: Lowest severity that fails a filesystem or image scan.
+      options: ['critical', 'high', 'medium', 'low']
+      default: 'high'
+    smoke-test:
+      type: string
+      description: >-
+        Run a Compose smoke test against the built digest before it is scanned,
+        signed and promoted. When enabled it becomes a required gate on the
+        signing job.
+      options: ['true', 'false']
+      default: 'false'
+    smoke-test-image-variable:
+      type: string
+      description: >-
+        Environment variable the Compose file reads for the image under test.
+        Only used when smoke-test is true.
+      regex: '^[A-Z][A-Z0-9_]*$'
+      default: 'APP_IMAGE'
+    smoke-test-compose-file:
+      type: string
+      description: Compose file the smoke test runs, relative to working-directory.
+      default: 'docker-compose.test.yml'
+    smoke-test-make-target:
+      type: string
+      description: Make target the smoke test invokes.
+      default: 'test-smoke'
+    dependency-track:
+      type: string
+      description: >-
+        Upload the authoritative SBOM to Dependency-Track and wait for the
+        analysis to complete. Needs dependency-track-api-url.
+      options: ['true', 'false']
+      default: 'false'
+    dependency-track-api-url:
+      type: string
+      description: >-
+        Dependency-Track API base URL. Only read when dependency-track is true.
+      default: ''
+    vigil:
+      type: string
+      description: >-
+        Publish the release record to Vigil and require a readiness verdict
+        before the image is promoted. Needs vigil-url.
+      options: ['true', 'false']
+      default: 'false'
+    vigil-url:
+      type: string
+      description: Vigil base URL. Only read when vigil is true.
+      default: ''
+    destination-project:
+      type: string
+      description: Harbor project the release is promoted into.
+      default: 'prod'
+    destination-tags:
+      type: string
+      description: Tags applied to the promoted digest in the release project.
+      default: '$CI_COMMIT_TAG'
+    environment:
+      type: string
+      description: >-
+        GitLab environment recorded by the promotion. One of the estate's
+        names in .ci/estate.yml.
+      options: ['mgt', 'dev', 'prod']
+      default: 'prod'
+    runner-tags:
+      type: array
+      description: Approved runner selection from the estate profile.
+      default: []
+    build-image:
+      type: string
+      description: >-
+        Approved Go toolchain image pinned by digest. ko runs inside it.
+      regex: '^.+@sha256:[0-9a-f]{64}$'
+      default: 'docker.io/golang@sha256:383395b794dffa5b53012a212365d40c8e37109a626ca30d6151c8348d380b5f'
+    trivy-image:
+      type: string
+      description: Approved Trivy image pinned by digest, used by both scans.
+      regex: '^.+@sha256:[0-9a-f]{64}$'
+      default: 'docker.io/aquasec/trivy@sha256:bcc376de8d77cfe086a917230e818dc9f8528e3c852f7b1aff648949b6258d1c'
+    syft-image:
+      type: string
+      description: Approved Syft image pinned by digest.
+      regex: '^.+@sha256:[0-9a-f]{64}$'
+      default: 'docker.io/anchore/syft@sha256:c5a32143787730c72c58aee4227d9b0242ccc463aa42214b26e2b18f692c1a71'
+    semgrep-image:
+      type: string
+      description: Approved Semgrep image pinned by digest.
+      regex: '^.+@sha256:[0-9a-f]{64}$'
+      default: 'docker.io/semgrep/semgrep@sha256:570305f199ab668295ac0921667263cc03dcc3cbd7a8099866d3699cc0f2cdcc'
+    gitleaks-image:
+      type: string
+      description: Approved gitleaks image pinned by digest.
+      regex: '^.+@sha256:[0-9a-f]{64}$'
+      default: 'docker.io/zricethezav/gitleaks@sha256:0e99e8821643ea5b235718642b93bb32486af9c8162c8b8731f7cbdc951a7f46'
+    alpine-image:
+      type: string
+      description: Approved Alpine image pinned by digest, used by the lockfile check.
+      regex: '^.+@sha256:[0-9a-f]{64}$'
+      default: 'docker.io/alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc'
+    python-image:
+      type: string
+      description: >-
+        Approved Python image pinned by digest. Carries the cosign, promotion,
+        Dependency-Track and Vigil runtimes.
+      regex: '^.+@sha256:[0-9a-f]{64}$'
+      default: 'docker.io/python@sha256:cd7c412d000912f29075a1b8803e43cb2f38bb67f104019df526df5ceaf30569'
+    docker-image:
+      type: string
+      description: >-
+        Approved Docker CLI and dind image pinned by digest. Only used when
+        smoke-test is true.
+      regex: '^.+@sha256:[0-9a-f]{64}$'
+      default: 'docker.io/docker@sha256:aa3df78ecf320f5fafdce71c659f1629e96e9de0968305fe1de670e0ca9176ce'
+---
+
+#### Pipeline ownership ####
+# One pipeline per change. The second rule is what stops a branch pipeline
+# running beside the merge request pipeline for the same commits.
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    # The one place a release tag is defined. Gating the pipeline rather than
+    # each job means there is one condition to read and none to drift.
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG =~ /$[[ inputs.release-tag-pattern ]]/'
+    - when: never
+
+stages:
+  - verify
+  - build
+  - test
+  - scan
+  - attest
+  - publish
+
+#### Components at the same shared-CI revision ####
+include:
+  #### verify ####
+  - local: '/templates/security-secrets-gitleaks/template.yml'
+    inputs:
+      instance: $[[ inputs.instance ]]
+      stage: verify
+      working-directory: $[[ inputs.working-directory ]]
+      execution-image: $[[ inputs.gitleaks-image ]]
+      runner-tags: $[[ inputs.runner-tags ]]
+      policy-mode: blocking
+      run-rules:
+        - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG'
+
+  - local: '/templates/security-sast-semgrep/template.yml'
+    inputs:
+      instance: $[[ inputs.instance ]]
+      stage: verify
+      working-directory: $[[ inputs.working-directory ]]
+      execution-image: $[[ inputs.semgrep-image ]]
+      runner-tags: $[[ inputs.runner-tags ]]
+      rules-ref: $[[ inputs.semgrep-rules ]]
+      severity-threshold: $[[ inputs.scan-severity ]]
+      policy-mode: $[[ inputs.sast-policy-mode ]]
+      run-rules:
+        - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG'
+
+  - local: '/templates/security-filesystem-trivy/template.yml'
+    inputs:
+      instance: $[[ inputs.instance ]]
+      stage: verify
+      working-directory: $[[ inputs.working-directory ]]
+      execution-image: $[[ inputs.trivy-image ]]
+      runner-tags: $[[ inputs.runner-tags ]]
+      severity-threshold: $[[ inputs.scan-severity ]]
+      scanners: 'vuln,secret,misconfig'
+      ignore-unfixed: false
+      policy-mode: blocking
+      run-rules:
+        - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG'
+
+  - local: '/templates/quality-dependency-lockfiles/template.yml'
+    inputs:
+      instance: $[[ inputs.instance ]]
+      stage: verify
+      working-directory: $[[ inputs.working-directory ]]
+      execution-image: $[[ inputs.alpine-image ]]
+      runner-tags: $[[ inputs.runner-tags ]]
+      lockfiles: $[[ inputs.lockfiles ]]
+      run-rules:
+        - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG'
+
+  #### build ####
+  # The builder has no `needs:`, so it waits for the whole verify stage. That
+  # stage barrier is what puts secret detection ahead of the build (section
+  # 11.1) without wiring four edges by hand.
+  - local: '/templates/container-build-ko/template.yml'
+    rules:
+      - if: '"$[[ inputs.build-sources ]]" == "default-branch-and-tags"'
+    inputs:
+      instance: $[[ inputs.instance ]]
+      stage: build
+      execution-image: $[[ inputs.build-image ]]
+      runner-tags: $[[ inputs.runner-tags ]]
+      working-directory: $[[ inputs.working-directory ]]
+      import-path: $[[ inputs.import-path ]]
+      image-repository: $[[ inputs.image-repository ]]
+      tags: $[[ inputs.tags ]]
+      base-image: $[[ inputs.base-image ]]
+      ko-version: $[[ inputs.ko-version ]]
+      platforms: $[[ inputs.platforms ]]
+      push-candidate: true
+      run-rules:
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG'
+
+  - local: '/templates/container-build-ko/template.yml'
+    rules:
+      - if: '"$[[ inputs.build-sources ]]" == "tags-only"'
+    inputs:
+      instance: $[[ inputs.instance ]]
+      stage: build
+      execution-image: $[[ inputs.build-image ]]
+      runner-tags: $[[ inputs.runner-tags ]]
+      working-directory: $[[ inputs.working-directory ]]
+      import-path: $[[ inputs.import-path ]]
+      image-repository: $[[ inputs.image-repository ]]
+      tags: $[[ inputs.tags ]]
+      base-image: $[[ inputs.base-image ]]
+      ko-version: $[[ inputs.ko-version ]]
+      platforms: $[[ inputs.platforms ]]
+      push-candidate: true
+      run-rules:
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG && $CI_COMMIT_REF_PROTECTED == "true"'
+
+  #### test ####
+  - local: '/templates/container-smoke-test/template.yml'
+    rules:
+      - if: '"$[[ inputs.smoke-test ]]" == "true" && "$[[ inputs.build-sources ]]" == "default-branch-and-tags"'
+    inputs:
+      instance: $[[ inputs.instance ]]
+      stage: test
+      execution-image: $[[ inputs.docker-image ]]
+      dind-image: $[[ inputs.docker-image ]]
+      runner-tags: $[[ inputs.runner-tags ]]
+      working-directory: $[[ inputs.working-directory ]]
+      build-job: '$[[ inputs.instance ]]:container-build-ko'
+      service-image-jobs: []
+      image-identities:
+        - '$[[ inputs.smoke-test-image-variable ]]=.ci-artifacts/$[[ inputs.instance ]]/container-build-ko/image.json'
+      compose-file: $[[ inputs.smoke-test-compose-file ]]
+      make-target: $[[ inputs.smoke-test-make-target ]]
+      run-rules:
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG'
+
+  - local: '/templates/container-smoke-test/template.yml'
+    rules:
+      - if: '"$[[ inputs.smoke-test ]]" == "true" && "$[[ inputs.build-sources ]]" == "tags-only"'
+    inputs:
+      instance: $[[ inputs.instance ]]
+      stage: test
+      execution-image: $[[ inputs.docker-image ]]
+      dind-image: $[[ inputs.docker-image ]]
+      runner-tags: $[[ inputs.runner-tags ]]
+      working-directory: $[[ inputs.working-directory ]]
+      build-job: '$[[ inputs.instance ]]:container-build-ko'
+      service-image-jobs: []
+      image-identities:
+        - '$[[ inputs.smoke-test-image-variable ]]=.ci-artifacts/$[[ inputs.instance ]]/container-build-ko/image.json'
+      compose-file: $[[ inputs.smoke-test-compose-file ]]
+      make-target: $[[ inputs.smoke-test-make-target ]]
+      run-rules:
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG && $CI_COMMIT_REF_PROTECTED == "true"'
+
+  #### scan ####
+  # Syft is the one authoritative SBOM producer. Trivy scans the image and does
+  # not write a second sbom.cdx.json.
+  - local: '/templates/security-sbom-syft/template.yml'
+    rules:
+      - if: '"$[[ inputs.build-sources ]]" == "default-branch-and-tags"'
+    inputs:
+      instance: $[[ inputs.instance ]]
+      stage: scan
+      execution-image: $[[ inputs.syft-image ]]
+      runner-tags: $[[ inputs.runner-tags ]]
+      build-job: '$[[ inputs.instance ]]:container-build-ko'
+      build-component: container-build-ko
+      gate-jobs: []
+      run-rules:
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG'
+
+  - local: '/templates/security-sbom-syft/template.yml'
+    rules:
+      - if: '"$[[ inputs.build-sources ]]" == "tags-only"'
+    inputs:
+      instance: $[[ inputs.instance ]]
+      stage: scan
+      execution-image: $[[ inputs.syft-image ]]
+      runner-tags: $[[ inputs.runner-tags ]]
+      build-job: '$[[ inputs.instance ]]:container-build-ko'
+      build-component: container-build-ko
+      gate-jobs: []
+      run-rules:
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG && $CI_COMMIT_REF_PROTECTED == "true"'
+
+  - local: '/templates/security-image-trivy/template.yml'
+    rules:
+      - if: '"$[[ inputs.build-sources ]]" == "default-branch-and-tags"'
+    inputs:
+      instance: $[[ inputs.instance ]]
+      stage: scan
+      execution-image: $[[ inputs.trivy-image ]]
+      runner-tags: $[[ inputs.runner-tags ]]
+      build-job: '$[[ inputs.instance ]]:container-build-ko'
+      build-component: container-build-ko
+      gate-jobs: []
+      policy-mode: blocking
+      severity-threshold: $[[ inputs.scan-severity ]]
+      ignore-unfixed: 'false'
+      scanners: vuln
+      run-rules:
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG'
+
+  - local: '/templates/security-image-trivy/template.yml'
+    rules:
+      - if: '"$[[ inputs.build-sources ]]" == "tags-only"'
+    inputs:
+      instance: $[[ inputs.instance ]]
+      stage: scan
+      execution-image: $[[ inputs.trivy-image ]]
+      runner-tags: $[[ inputs.runner-tags ]]
+      build-job: '$[[ inputs.instance ]]:container-build-ko'
+      build-component: container-build-ko
+      gate-jobs: []
+      policy-mode: blocking
+      severity-threshold: $[[ inputs.scan-severity ]]
+      ignore-unfixed: 'false'
+      scanners: vuln
+      run-rules:
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG && $CI_COMMIT_REF_PROTECTED == "true"'
+
+  - local: '/templates/security-sbom-upload-dtrack/template.yml'
+    rules:
+      - if: '"$[[ inputs.dependency-track ]]" == "true" && "$[[ inputs.build-sources ]]" == "default-branch-and-tags"'
+    inputs:
+      instance: $[[ inputs.instance ]]
+      stage: scan
+      execution-image: $[[ inputs.python-image ]]
+      runner-tags: $[[ inputs.runner-tags ]]
+      sbom-job: '$[[ inputs.instance ]]:security-sbom-syft'
+      gate-jobs: []
+      api-url: $[[ inputs.dependency-track-api-url ]]
+      project-name: '$CI_PROJECT_NAME'
+      project-version: '$CI_COMMIT_SHA'
+      wait-for-analysis: 'true'
+      analysis-timeout: 600
+      run-rules:
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG'
+
+  - local: '/templates/security-sbom-upload-dtrack/template.yml'
+    rules:
+      - if: '"$[[ inputs.dependency-track ]]" == "true" && "$[[ inputs.build-sources ]]" == "tags-only"'
+    inputs:
+      instance: $[[ inputs.instance ]]
+      stage: scan
+      execution-image: $[[ inputs.python-image ]]
+      runner-tags: $[[ inputs.runner-tags ]]
+      sbom-job: '$[[ inputs.instance ]]:security-sbom-syft'
+      gate-jobs: []
+      api-url: $[[ inputs.dependency-track-api-url ]]
+      project-name: '$CI_PROJECT_NAME'
+      project-version: '$CI_COMMIT_SHA'
+      wait-for-analysis: 'true'
+      analysis-timeout: 600
+      run-rules:
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG && $CI_COMMIT_REF_PROTECTED == "true"'
+
+  #### attest ####
+  # Two include entries for one component, selected by the smoke-test input.
+  # A `gate-jobs` list is a fixed array, so the only way to add the smoke test
+  # to the signing gate when it exists — and to leave it out when it does not,
+  # which would fail pipeline creation — is to choose between two lists here.
+  - local: '/templates/container-sign-attest-cosign/template.yml'
+    rules:
+      - if: '"$[[ inputs.smoke-test ]]" == "false" && "$[[ inputs.build-sources ]]" == "default-branch-and-tags"'
+    inputs:
+      instance: $[[ inputs.instance ]]
+      stage: attest
+      execution-image: $[[ inputs.python-image ]]
+      runner-tags: $[[ inputs.runner-tags ]]
+      build-job: '$[[ inputs.instance ]]:container-build-ko'
+      build-component: container-build-ko
+      sbom-job: '$[[ inputs.instance ]]:security-sbom-syft'
+      scan-job: '$[[ inputs.instance ]]:security-image-trivy'
+      scan-component: security-image-trivy
+      gate-jobs:
+        - job: '$[[ inputs.instance ]]:security-secrets-gitleaks'
+          artifacts: false
+        - job: '$[[ inputs.instance ]]:security-sast-semgrep'
+          artifacts: false
+        - job: '$[[ inputs.instance ]]:security-filesystem-trivy'
+          artifacts: false
+        - job: '$[[ inputs.instance ]]:quality-dependency-lockfiles'
+          artifacts: false
+      run-rules:
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG'
+
+  - local: '/templates/container-sign-attest-cosign/template.yml'
+    rules:
+      - if: '"$[[ inputs.smoke-test ]]" == "false" && "$[[ inputs.build-sources ]]" == "tags-only"'
+    inputs:
+      instance: $[[ inputs.instance ]]
+      stage: attest
+      execution-image: $[[ inputs.python-image ]]
+      runner-tags: $[[ inputs.runner-tags ]]
+      build-job: '$[[ inputs.instance ]]:container-build-ko'
+      build-component: container-build-ko
+      sbom-job: '$[[ inputs.instance ]]:security-sbom-syft'
+      scan-job: '$[[ inputs.instance ]]:security-image-trivy'
+      scan-component: security-image-trivy
+      gate-jobs:
+        - job: '$[[ inputs.instance ]]:security-secrets-gitleaks'
+          artifacts: false
+        - job: '$[[ inputs.instance ]]:security-sast-semgrep'
+          artifacts: false
+        - job: '$[[ inputs.instance ]]:security-filesystem-trivy'
+          artifacts: false
+        - job: '$[[ inputs.instance ]]:quality-dependency-lockfiles'
+          artifacts: false
+      run-rules:
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG && $CI_COMMIT_REF_PROTECTED == "true"'
+
+  - local: '/templates/container-sign-attest-cosign/template.yml'
+    rules:
+      - if: '"$[[ inputs.smoke-test ]]" == "true" && "$[[ inputs.build-sources ]]" == "default-branch-and-tags"'
+    inputs:
+      instance: $[[ inputs.instance ]]
+      stage: attest
+      execution-image: $[[ inputs.python-image ]]
+      runner-tags: $[[ inputs.runner-tags ]]
+      build-job: '$[[ inputs.instance ]]:container-build-ko'
+      build-component: container-build-ko
+      sbom-job: '$[[ inputs.instance ]]:security-sbom-syft'
+      scan-job: '$[[ inputs.instance ]]:security-image-trivy'
+      scan-component: security-image-trivy
+      gate-jobs:
+        - job: '$[[ inputs.instance ]]:security-secrets-gitleaks'
+          artifacts: false
+        - job: '$[[ inputs.instance ]]:security-sast-semgrep'
+          artifacts: false
+        - job: '$[[ inputs.instance ]]:security-filesystem-trivy'
+          artifacts: false
+        - job: '$[[ inputs.instance ]]:quality-dependency-lockfiles'
+          artifacts: false
+        - job: '$[[ inputs.instance ]]:container-smoke-test'
+          artifacts: false
+      run-rules:
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG'
+
+  - local: '/templates/container-sign-attest-cosign/template.yml'
+    rules:
+      - if: '"$[[ inputs.smoke-test ]]" == "true" && "$[[ inputs.build-sources ]]" == "tags-only"'
+    inputs:
+      instance: $[[ inputs.instance ]]
+      stage: attest
+      execution-image: $[[ inputs.python-image ]]
+      runner-tags: $[[ inputs.runner-tags ]]
+      build-job: '$[[ inputs.instance ]]:container-build-ko'
+      build-component: container-build-ko
+      sbom-job: '$[[ inputs.instance ]]:security-sbom-syft'
+      scan-job: '$[[ inputs.instance ]]:security-image-trivy'
+      scan-component: security-image-trivy
+      gate-jobs:
+        - job: '$[[ inputs.instance ]]:security-secrets-gitleaks'
+          artifacts: false
+        - job: '$[[ inputs.instance ]]:security-sast-semgrep'
+          artifacts: false
+        - job: '$[[ inputs.instance ]]:security-filesystem-trivy'
+          artifacts: false
+        - job: '$[[ inputs.instance ]]:quality-dependency-lockfiles'
+          artifacts: false
+        - job: '$[[ inputs.instance ]]:container-smoke-test'
+          artifacts: false
+      run-rules:
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG && $CI_COMMIT_REF_PROTECTED == "true"'
+
+  - local: '/templates/security-sync-vigil/template.yml'
+    rules:
+      - if: '"$[[ inputs.vigil ]]" == "true" && "$[[ inputs.build-sources ]]" == "default-branch-and-tags"'
+    inputs:
+      instance: $[[ inputs.instance ]]
+      stage: attest
+      execution-image: $[[ inputs.python-image ]]
+      runner-tags: $[[ inputs.runner-tags ]]
+      build-job: '$[[ inputs.instance ]]:container-build-ko'
+      build-component: container-build-ko
+      sign-job: '$[[ inputs.instance ]]:container-sign-attest-cosign'
+      gate-jobs: []
+      vigil-url: $[[ inputs.vigil-url ]]
+      request-timeout: 120
+      run-rules:
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG'
+
+  - local: '/templates/security-sync-vigil/template.yml'
+    rules:
+      - if: '"$[[ inputs.vigil ]]" == "true" && "$[[ inputs.build-sources ]]" == "tags-only"'
+    inputs:
+      instance: $[[ inputs.instance ]]
+      stage: attest
+      execution-image: $[[ inputs.python-image ]]
+      runner-tags: $[[ inputs.runner-tags ]]
+      build-job: '$[[ inputs.instance ]]:container-build-ko'
+      build-component: container-build-ko
+      sign-job: '$[[ inputs.instance ]]:container-sign-attest-cosign'
+      gate-jobs: []
+      vigil-url: $[[ inputs.vigil-url ]]
+      request-timeout: 120
+      run-rules:
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG && $CI_COMMIT_REF_PROTECTED == "true"'
+
+  - local: '/templates/security-verify-vigil/template.yml'
+    rules:
+      - if: '"$[[ inputs.vigil ]]" == "true" && "$[[ inputs.build-sources ]]" == "default-branch-and-tags"'
+    inputs:
+      instance: $[[ inputs.instance ]]
+      stage: attest
+      execution-image: $[[ inputs.python-image ]]
+      runner-tags: $[[ inputs.runner-tags ]]
+      build-job: '$[[ inputs.instance ]]:container-build-ko'
+      build-component: container-build-ko
+      sync-job: '$[[ inputs.instance ]]:security-sync-vigil'
+      gate-jobs: []
+      vigil-url: $[[ inputs.vigil-url ]]
+      require-readiness: green
+      max-wait: 300
+      poll-interval: 15
+      run-rules:
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG'
+
+  - local: '/templates/security-verify-vigil/template.yml'
+    rules:
+      - if: '"$[[ inputs.vigil ]]" == "true" && "$[[ inputs.build-sources ]]" == "tags-only"'
+    inputs:
+      instance: $[[ inputs.instance ]]
+      stage: attest
+      execution-image: $[[ inputs.python-image ]]
+      runner-tags: $[[ inputs.runner-tags ]]
+      build-job: '$[[ inputs.instance ]]:container-build-ko'
+      build-component: container-build-ko
+      sync-job: '$[[ inputs.instance ]]:security-sync-vigil'
+      gate-jobs: []
+      vigil-url: $[[ inputs.vigil-url ]]
+      require-readiness: green
+      max-wait: 300
+      poll-interval: 15
+      run-rules:
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG && $CI_COMMIT_REF_PROTECTED == "true"'
+
+  #### publish ####
+  # Promotion carries the scan and the signature in its own `needs:`, so the
+  # release gates are in its transitive chain rather than merely in an earlier
+  # stage (section 8.8). The Vigil branch adds the readiness verdict; without
+  # it, enabling Vigil would produce a verdict nothing waits for.
+  - local: '/templates/container-promote-harbor/template.yml'
+    rules:
+      - if: '"$[[ inputs.vigil ]]" == "false"'
+    inputs:
+      instance: $[[ inputs.instance ]]
+      stage: publish
+      execution-image: $[[ inputs.python-image ]]
+      runner-tags: $[[ inputs.runner-tags ]]
+      build-job: '$[[ inputs.instance ]]:container-build-ko'
+      build-component: container-build-ko
+      gate-jobs:
+        - job: '$[[ inputs.instance ]]:security-image-trivy'
+          artifacts: false
+        - job: '$[[ inputs.instance ]]:container-sign-attest-cosign'
+          artifacts: false
+      destination-project: $[[ inputs.destination-project ]]
+      destination-tags: $[[ inputs.destination-tags ]]
+      require-signatures: 'true'
+      environment: $[[ inputs.environment ]]
+      run-rules:
+        # The same protected-tag gate the other publish jobs in this repository
+        # use, spelled the same way, so the three can be compared by eye.
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG && $CI_COMMIT_REF_PROTECTED == "true"'
+          when: manual
+        - when: never
+
+  - local: '/templates/container-promote-harbor/template.yml'
+    rules:
+      - if: '"$[[ inputs.vigil ]]" == "true"'
+    inputs:
+      instance: $[[ inputs.instance ]]
+      stage: publish
+      execution-image: $[[ inputs.python-image ]]
+      runner-tags: $[[ inputs.runner-tags ]]
+      build-job: '$[[ inputs.instance ]]:container-build-ko'
+      build-component: container-build-ko
+      gate-jobs:
+        - job: '$[[ inputs.instance ]]:security-image-trivy'
+          artifacts: false
+        - job: '$[[ inputs.instance ]]:container-sign-attest-cosign'
+          artifacts: false
+        - job: '$[[ inputs.instance ]]:security-verify-vigil'
+          artifacts: false
+      destination-project: $[[ inputs.destination-project ]]
+      destination-tags: $[[ inputs.destination-tags ]]
+      require-signatures: 'true'
+      environment: $[[ inputs.environment ]]
+      run-rules:
+        # The same protected-tag gate the other publish jobs in this repository
+        # use, spelled the same way, so the three can be compared by eye.
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG && $CI_COMMIT_REF_PROTECTED == "true"'
+          when: manual
+        - when: never

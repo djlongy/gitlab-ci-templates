@@ -1,0 +1,27 @@
+---
+# examples/kubernetes-gitops/.gitlab-ci.yml
+#
+# A desired-state repository that ArgoCD or Flux reconciles.
+#
+# CI validates; the controller applies. There is no deploy job here and adding
+# one would give the same objects two owners.
+#
+# `schema-locations` is usually needed: the controller's own custom resources
+# are not in the bundled schema set, and leaving them unvalidated is the failure
+# this pipeline exists to catch. Point it at a schema store rather than turning
+# `ignore-missing-schemas` on.
+include:
+  - project: 'platform/gitlab-ci-templates'
+    ref: 'REPLACE_WITH_APPROVED_SHARED_CI_REF'
+    file: '/pipelines/kubernetes-gitops.yml'
+    inputs:
+      instance: platform
+      manifest-paths: |
+        apps/system
+        apps/workloads
+      kubernetes-version: '1.31.0'
+      schema-locations: |
+        https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json
+      charts: 'true'
+      chart-paths: |
+        charts/platform

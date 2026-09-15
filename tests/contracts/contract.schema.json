@@ -1,0 +1,170 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://gitlab.example.com/platform/gitlab-ci-templates/tests/contracts/contract.schema.json",
+  "title": "Component contract",
+  "description": "Schema for templates/<name>/contract.yml, the machine-readable half of the contract a public component must declare (docs/gitlab-ci-agent-standard.md section 6.1). The other half is the spec:inputs header of template.yml, which the catalogue generator reads directly; do not restate inputs here.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "name",
+    "kind",
+    "status",
+    "introduced_in",
+    "minimum_gitlab",
+    "emitted_jobs",
+    "outputs",
+    "required_secrets",
+    "runtime_image",
+    "trust",
+    "validation"
+  ],
+  "$defs": {
+    "evidence": {
+      "description": "Section 14.1 evidence labels. Cumulative, not interchangeable: gitlab-linted does not imply the pipeline ran.",
+      "enum": [
+        "source-reviewed",
+        "yaml-parsed",
+        "gitlab-linted",
+        "runtime-tested",
+        "integration-tested",
+        "report-ingestion-tested"
+      ]
+    }
+  },
+  "properties": {
+    "name": {
+      "description": "Component name, kebab-case <domain>-<capability>[-<tool>]. Must equal the directory name.",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)+$"
+    },
+    "kind": {"enum": ["component", "pipeline"]},
+    "status": {
+      "description": "Only `released` is a normal consumer choice.",
+      "enum": ["proposed", "experimental", "released", "deprecated"]
+    },
+    "introduced_in": {
+      "description": "Release that first shipped this interface.",
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+"
+    },
+    "deprecated": {
+      "description": "Required once status is deprecated.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["replacement", "removed_in"],
+      "properties": {
+        "replacement": {"type": "string"},
+        "removed_in": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+"}
+      }
+    },
+    "minimum_gitlab": {
+      "description": "Lowest GitLab version the component was exercised against.",
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+"
+    },
+    "minimum_runner": {"type": "string"},
+    "emitted_jobs": {
+      "description": "Every job name this component creates, as a pattern with the instance placeholder left in. Normally {instance}; a composition whose components take their instance from a differently named input writes that input's name instead, as repository-secret-audit does with {secrets-instance} and {terraform-instance}. Consumers depend on these; hidden jobs are private and must not be listed.",
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["pattern", "stage"],
+        "properties": {
+          "pattern": {"type": "string", "pattern": "^\\{[a-z][a-z0-9-]*\\}:[a-z][a-z0-9-]*(:[a-z][a-z0-9-]*)?$"},
+          "stage": {
+            "enum": [
+              "verify", "build", "test", "scan", "plan",
+              "attest", "publish", "deploy", "verify-deploy"
+            ]
+          },
+          "blocking": {
+            "description": "Whether a finding or failure stops the pipeline. Record the EFFECTIVE behaviour: a script that swallows its tool's exit code does not gate, whatever allow_failure says.",
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "outputs": {
+      "description": "Exact files this component produces. An empty list means it produces none.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "producer", "format"],
+        "properties": {
+          "path": {"type": "string", "minLength": 1},
+          "producer": {"type": "string", "minLength": 1},
+          "format": {"type": "string", "minLength": 1},
+          "schema": {"type": "string"},
+          "subject_identity": {
+            "description": "How the artifact names what it describes, e.g. image digest. Immutable identities only.",
+            "type": "string"
+          },
+          "retention": {"type": "string"}
+        }
+      }
+    },
+    "required_secrets": {
+      "description": "Secret and OIDC variable NAMES the component needs. Names only; a value here is a leak.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "kind"],
+        "properties": {
+          "name": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]*$"},
+          "kind": {"enum": ["ci-variable", "id-token", "file-variable"]},
+          "audience": {"type": "string"},
+          "role": {"type": "string"},
+          "scope": {"type": "string"},
+          "protected_ref_required": {"type": "boolean"}
+        }
+      }
+    },
+    "runtime_image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reference", "pinning"],
+      "properties": {
+        "reference": {"type": "string", "minLength": 1},
+        "pinning": {
+          "description": "`digest` is the standard. `tag` records that this component does not meet it yet; section 1 forbids calling a tag a digest.",
+          "enum": ["digest", "tag", "input"]
+        },
+        "tool_versions": {"type": "object", "additionalProperties": {"type": "string"}}
+      }
+    },
+    "trust": {
+      "description": "What the component needs from the runner and the network.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["privileged", "network_egress"],
+      "properties": {
+        "privileged": {"type": "boolean"},
+        "network_egress": {"type": "array", "items": {"type": "string"}},
+        "runner_profile": {"type": "string"},
+        "protected_ref_required": {"type": "boolean"}
+      }
+    },
+    "validation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["evidence", "verified_at"],
+      "properties": {
+        "evidence": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/evidence"}},
+        "verified_at": {"type": "string", "pattern": "^[0-9]{4}/[0-9]{2}/[0-9]{2}$"},
+        "revision": {"type": "string"},
+        "environment": {"type": "string"},
+        "notes": {"type": "string"}
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"status": {"const": "deprecated"}}, "required": ["status"]},
+      "then": {"required": ["deprecated"]}
+    }
+  ]
+}

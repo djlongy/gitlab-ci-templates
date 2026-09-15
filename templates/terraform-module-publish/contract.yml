@@ -1,0 +1,63 @@
+---
+# Contract for templates/terraform-module-publish. The other half of the
+# contract is the spec:inputs header of template.yml.
+name: terraform-module-publish
+kind: component
+status: experimental
+introduced_in: 1.0.0
+minimum_gitlab: '18.9'
+
+# Retry policy: the `max-retries` input (0, 1 or 2, default 1) sets `retry: max`,
+# and `retry: when` is `runner_system_failure` and nothing else. A job killed by
+# its runner runs again; a failed gate never does.
+emitted_jobs:
+  - pattern: '{instance}:terraform-module-publish'
+    stage: publish
+    blocking: true
+
+# The published package is the output. It is not also a job artifact.
+outputs: []
+
+required_secrets:
+  - name: CI_JOB_TOKEN
+    kind: ci-variable
+    scope: >-
+      Supplied by GitLab. Used for the packages API read that proves the version
+      is new, the upload, and the read that proves the upload produced a
+      package. No project secret is needed.
+
+runtime_image:
+  reference: 'docker.io/alpine/curl@sha256:edbbe6f64e9890474df2864d7ee92941bb03ce17b07fd9cadc1d14e9453fc031'
+  pinning: digest
+  tool_versions:
+    curl: 8.12.1
+    busybox: 1.37.0
+    tfguard.sh: >-
+      runtime/terraform/tfguard.sh, carried in the template as base64 and
+      decoded at job start; kept in lockstep by runtime/terraform/embed.py
+
+trust:
+  privileged: false
+  network_egress:
+    - registry.example.com
+    - gitlab.example.com
+  # The release tag is the authorisation, so the default rules require the tag
+  # to be protected.
+  protected_ref_required: true
+
+validation:
+  evidence:
+    - source-reviewed
+    - yaml-parsed
+    - gitlab-linted
+    - runtime-tested
+  verified_at: 2026/09/15
+  environment: gitlab.example.com 18.9.1-ee, alpine/curl 8.12.1
+  notes: >-
+    runtime-tested covers version normalisation, the packaging exclusions and
+    every registry-assertion failure path in tests/runtime/terraform/. No module
+    has been published to the registry from this component. Status:
+    experimental. The gated half is unrun: platform/terraform-modules ran the
+    verify half of pipelines/terraform-module.yml on 5720 and 5724, and the
+    publish job is tag-gated, so no tag pipeline has ever been created from that
+    composition.

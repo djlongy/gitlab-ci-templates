@@ -1,0 +1,169 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://gitlab.example.com/platform/gitlab-ci-templates/tests/contracts/project.schema.json",
+  "title": "Consumer project record",
+  "description": "Schema for a consuming project's .ci/project.yml, per docs/gitlab-ci-agent-standard.md section 4. The record says which shared composition a project adopted, under which instance names, what it kept bespoke and what it retired. It is metadata, not GitLab configuration: nothing reads it at pipeline time, and every value it names must also be resolved into the committed .gitlab-ci.yml. See docs/reference/project-yml.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "project", "shared_ci", "workload", "compositions"],
+  "$defs": {
+    "text": {"type": "string", "minLength": 1},
+    "reason": {
+      "description": "Why, in a sentence a reviewer who was not there can act on. Not a label.",
+      "type": "string",
+      "minLength": 12
+    },
+    "instance": {
+      "description": "Component instance, the first half of every job name it creates.",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,47}$"
+    },
+    "inputValue": {
+      "description": "A scalar, a list of scalars, or a list of flat mappings — the last being the needs-entry shape a gate-jobs input takes.",
+      "anyOf": [
+        {"type": ["string", "number", "boolean"]},
+        {
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {"type": ["string", "number", "boolean"]},
+              {
+                "type": "object",
+                "additionalProperties": {"type": ["string", "number", "boolean"]}
+              }
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "properties": {
+    "schema_version": {"const": 1},
+    "project": {
+      "description": "The consuming project's own GitLab path, group included.",
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]*(/[a-z0-9][a-z0-9._-]*)+$"
+    },
+    "shared_ci": {
+      "description": "Which shared-CI project and revision the committed pipeline pins. The ref must be the value in the .gitlab-ci.yml, not an intention.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["project", "ref"],
+      "properties": {
+        "project": {"$ref": "#/$defs/text"},
+        "ref": {
+          "description": "Full commit SHA, protected release tag, or REPLACE_WITH_APPROVED_SHARED_CI_REF in an example. A branch name is not a ref this standard accepts (section 14.2).",
+          "type": "string",
+          "pattern": "^([0-9a-f]{40}|v?[0-9]+\\.[0-9]+\\.[0-9]+[A-Za-z0-9.+-]*|REPLACE_WITH_APPROVED_SHARED_CI_REF)$"
+        }
+      }
+    },
+    "workload": {
+      "description": "What this project is, in the vocabulary of pipelines/<workload>.yml.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "adoption"],
+      "properties": {
+        "name": {
+          "description": "A composition name when one fits, otherwise the shape of the work: python-tests, docs-site, artifact-mirror, machine-image.",
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{0,63}$"
+        },
+        "adoption": {
+          "description": "composition: the project includes a shared composition. bespoke: the project keeps its own pipeline because no composition fits. held: adoption is blocked on a decision, which the reason names.",
+          "enum": ["composition", "bespoke", "held"]
+        },
+        "reason": {"$ref": "#/$defs/reason"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"adoption": {"enum": ["bespoke", "held"]}}, "required": ["adoption"]},
+          "then": {
+            "required": ["reason"],
+            "description": "Anything other than a plain adoption is a decision, and a decision without its reason cannot be reviewed."
+          }
+        }
+      ]
+    },
+    "compositions": {
+      "description": "Every shared composition this project includes, in include order. Empty for a bespoke or held workload.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["file", "instances"],
+        "properties": {
+          "file": {
+            "description": "The composition path as the include writes it, for example /pipelines/container-buildkit.yml.",
+            "type": "string",
+            "pattern": "^/pipelines/[a-z][a-z0-9-]*\\.yml$"
+          },
+          "instances": {
+            "description": "Every component instance this include names, in the order its inputs declare them. One for most compositions; repository-secret-audit names two in one include.",
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {"$ref": "#/$defs/instance"}
+          },
+          "inputs": {
+            "description": "The inputs the include sets explicitly, copied as written. Defaults are not restated: what is recorded is what the project chose.",
+            "type": "object",
+            "additionalProperties": {"$ref": "#/$defs/inputValue"}
+          }
+        }
+      }
+    },
+    "bespoke_jobs": {
+      "description": "Jobs the project still defines itself beside the composition, each with the reason no component covers it.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "stage", "reason"],
+        "properties": {
+          "name": {"$ref": "#/$defs/text"},
+          "stage": {"$ref": "#/$defs/text"},
+          "reason": {"$ref": "#/$defs/reason"}
+        }
+      }
+    },
+    "retired_jobs": {
+      "description": "Jobs the adoption removed. A job that disappeared without a line here is a job nobody decided to lose.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "reason"],
+        "properties": {
+          "name": {"$ref": "#/$defs/text"},
+          "reason": {"$ref": "#/$defs/reason"}
+        }
+      }
+    },
+    "environments": {
+      "description": "Deployment targets this project acts on, where it has any. state_id is the Terraform state name, target the cluster, registry project or host the environment resolves to.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name"],
+        "properties": {
+          "name": {"$ref": "#/$defs/text"},
+          "target": {"$ref": "#/$defs/text"},
+          "state_id": {"$ref": "#/$defs/text"},
+          "deployment_mode": {"enum": ["gitops", "direct"]},
+          "url": {"type": "string", "format": "uri"}
+        }
+      }
+    },
+    "exceptions": {
+      "description": "Identifiers of recorded exceptions this project relies on, resolved in .ci/exceptions.yml. Ids only: the exception itself, its owner and its expiry live there.",
+      "type": "array",
+      "items": {"type": "string", "pattern": "^[A-Z]+-[0-9]+$"}
+    },
+    "notes": {
+      "description": "Anything a reviewer needs that no field above holds. Prose, not a second schema.",
+      "type": "string"
+    }
+  }
+}

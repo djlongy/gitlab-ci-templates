@@ -1,0 +1,255 @@
+# templates/container-list-rke2/template.yml
+
+#### Public interface ####
+spec:
+  inputs:
+    instance:
+      type: string
+      description: Unique workload instance used in the job name.
+      regex: '^[a-z][a-z0-9-]{0,47}$'
+    stage:
+      type: string
+      description: Stage supplied by the owning composition.
+      default: verify
+    config-file:
+      type: string
+      description: >-
+        Release manifest in the consumer checkout. Plain YAML with a scalar
+        `version`, a scalar `arch` and a `lists` sequence; `#` comments allowed.
+        Empty, the default, resolves no release and writes an empty list, which
+        is how a consumer that keeps its own reference file uses the mirror
+        without pinning an RKE2 release.
+      default: ''
+      regex: '^([A-Za-z0-9._][A-Za-z0-9._/-]*)?$'
+    release-base-url:
+      type: string
+      description: >-
+        Release download root. The job fetches
+        `<base>/<version>/rke2-images-<list>.<arch>.txt` for every list.
+      default: https://github.com/rancher/rke2/releases/download
+    execution-image:
+      type: string
+      description: Approved execution image pinned by digest. Needs apk, curl and python3.
+      default: docker.io/alpine@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
+      regex: '^.+@sha256:[0-9a-f]{64}$'
+    egress-proxy:
+      type: string
+      description: HTTP CONNECT proxy for outbound traffic. Empty means direct egress.
+      default: ''
+    no-proxy:
+      type: string
+      description: NO_PROXY value applied alongside egress-proxy.
+      default: ''
+    runner-tags:
+      type: array
+      description: Runner selection from the estate profile.
+      default: []
+    max-retries:
+      type: number
+      description: >-
+        How many times the runner may retry this job. The condition is
+        runner_system_failure only, so this retries infrastructure and never a
+        failed gate.
+      default: 1
+      options: [0, 1, 2]
+    run-rules:
+      type: array
+      description: Job eligibility set by the composition.
+      default:
+        - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+        - if: '$CI_PIPELINE_SOURCE == "schedule"'
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+---
+#### Executable capability ####
+"$[[ inputs.instance ]]:container-list-rke2":
+  stage: $[[ inputs.stage ]]
+  image:
+    name: $[[ inputs.execution-image ]]
+    entrypoint: ['']
+  tags: $[[ inputs.runner-tags ]]
+  variables:
+    CI_TPL_CONFIG_FILE: $[[ inputs.config-file ]]
+    CI_TPL_BASE_URL: $[[ inputs.release-base-url ]]
+    CI_TPL_EGRESS_PROXY: $[[ inputs.egress-proxy ]]
+    CI_TPL_NO_PROXY: $[[ inputs.no-proxy ]]
+    CI_TPL_OUT_DIR: .ci-artifacts/$[[ inputs.instance ]]/container-list-rke2
+    CI_TPL_RUNTIME: '/tmp/ci-tpl-release-list.py'
+  dependencies: []
+  before_script:
+    - |
+      # BEGIN embed inline runtime/mirror/egress.sh
+      #!/bin/sh
+      # Outbound proxy selection for the container mirror components.
+      #
+      # Straight-line rather than a function library: this is the first before_script
+      # entry of all three components and has to take effect before the package
+      # manager makes its first request. GitLab runs before_script and script in one
+      # shell, so the exports reach the job's own commands.
+      #
+      # Both spellings of every variable are exported. curl reads the lower case
+      # names, skopeo and the AWS CLI read the upper case ones, and setting only one
+      # of each pair is a proxy half the job ignores.
+      set -eu
+
+      if [ -n "${CI_TPL_EGRESS_PROXY:-}" ]; then
+        HTTP_PROXY=$CI_TPL_EGRESS_PROXY
+        HTTPS_PROXY=$CI_TPL_EGRESS_PROXY
+        http_proxy=$CI_TPL_EGRESS_PROXY
+        https_proxy=$CI_TPL_EGRESS_PROXY
+        NO_PROXY=${CI_TPL_NO_PROXY:-}
+        no_proxy=${CI_TPL_NO_PROXY:-}
+        export HTTP_PROXY HTTPS_PROXY http_proxy https_proxy NO_PROXY no_proxy
+        echo "egress: via proxy $CI_TPL_EGRESS_PROXY"
+      else
+        echo "egress: direct"
+      fi
+      # END embed
+    - |
+      set -eu
+      # curl tunnels https through an HTTP proxy; the busybox wget this image
+      # ships does not, so nothing may be fetched before this line.
+      apk add --no-cache curl python3 ca-certificates >/dev/null
+    - |
+      # BEGIN embed file $CI_TPL_RUNTIME runtime/mirror/release_list.py
+      cat > "$CI_TPL_RUNTIME" <<'CI_TPL_EMBED_EOF' || exit 1
+      #!/usr/bin/env python3
+      """Read an RKE2 release manifest and print what the list job must fetch.
+
+      The manifest is plain YAML the consumer keeps in its own checkout, small enough
+      to parse without a YAML library: the execution image carries python3 but no
+      PyYAML, and installing one to read three keys would be a dependency nobody
+      audits. What is accepted is therefore a documented subset, not YAML:
+
+          version: v1.31.5+rke2r1     scalar, required
+          arch: amd64                 scalar, required
+          lists:                      sequence of scalars, required, non-empty
+            - core
+            - canal
+
+      `#` starts a comment anywhere on a line and blank lines are ignored. A key this
+      parser does not know is ignored rather than rejected, so a consumer may keep
+      notes beside the three fields this reads.
+
+      Output is one line, `<version> <arch> <list> <list>...`, which the calling
+      shell splits with `read`. A malformed manifest exits 1 with a message naming
+      what is missing: the job must not resolve a partial release and report success.
+      """
+
+      from __future__ import annotations
+
+      import argparse
+      import sys
+
+
+      def parse(text: str) -> tuple[str, str, list[str]]:
+          """The version, architecture and list names a manifest declares."""
+          fields: dict[str, str] = {}
+          lists: list[str] = []
+          for raw in text.splitlines():
+              line = raw.split("#", 1)[0].strip()
+              if not line:
+                  continue
+              if line == "-" or line.startswith("- "):
+                  # A bare `-` reaches here too, so the empty-entry check below sees
+                  # it. Left to the key branch it would read as a malformed key and
+                  # the message would name the wrong problem.
+                  lists.append(line[1:].strip())
+                  continue
+              key, separator, value = line.partition(":")
+              if not separator:
+                  raise ValueError(f"line is neither a key nor a list entry: {raw.strip()!r}")
+              if value.strip():
+                  fields[key.strip()] = value.strip()
+
+          missing = [name for name in ("version", "arch") if not fields.get(name)]
+          if not lists:
+              missing.append("lists")
+          if missing:
+              raise ValueError("manifest declares no " + ", ".join(missing))
+          if any(not name for name in lists):
+              raise ValueError("manifest has an empty entry under lists")
+          return fields["version"], fields["arch"], lists
+
+
+      def main(argv: list[str]) -> int:
+          parser = argparse.ArgumentParser(prog=argv[0], description=__doc__.strip().splitlines()[0])
+          parser.add_argument("manifest", help="the release manifest in the consumer checkout")
+          args = parser.parse_args(argv[1:])
+          try:
+              with open(args.manifest, encoding="utf-8") as handle:
+                  version, arch, lists = parse(handle.read())
+          except (OSError, ValueError) as error:
+              print(f"ERROR: cannot read release manifest {args.manifest}: {error}", file=sys.stderr)
+              return 1
+          print(version, arch, " ".join(lists))
+          return 0
+
+
+      if __name__ == "__main__":
+          sys.exit(main(sys.argv))
+      CI_TPL_EMBED_EOF
+      # END embed
+  script:
+    - |
+      set -eu
+      out=$CI_PROJECT_DIR/$CI_TPL_OUT_DIR
+      mkdir -p "$out"
+      if [ -z "$CI_TPL_CONFIG_FILE" ]; then
+        # An empty config-file resolves no release. The artifact is still
+        # written, empty, because the mirror reads it as one of its list files
+        # and a missing file is an error there.
+        : > "$out/images.txt"
+        echo "no release manifest, 0 ref(s) -> $CI_TPL_OUT_DIR/images.txt"
+      else
+        project_root=$(cd "$CI_PROJECT_DIR" && pwd -P)
+        cfg=$CI_PROJECT_DIR/$CI_TPL_CONFIG_FILE
+        if [ ! -f "$cfg" ]; then
+          echo "ERROR: config-file $CI_TPL_CONFIG_FILE not found" >&2
+          exit 1
+        fi
+        case "$(cd "$(dirname "$cfg")" && pwd -P)" in
+          "$project_root"|"$project_root"/*) ;;
+          *) echo 'ERROR: config-file escapes the checkout' >&2; exit 1 ;;
+        esac
+        work=$(mktemp -d)
+        python3 "$CI_TPL_RUNTIME" "$cfg" > "$work/parsed"
+        read -r version arch lists < "$work/parsed"
+        # The release tag carries a '+'. It is legal in a URL path but several
+        # proxies rewrite it to a space, so encode it.
+        encoded=$(printf '%s' "$version" | sed 's/+/%2B/g')
+        : > "$work/raw"
+        for list in $lists; do
+          curl -fsSL --retry 3 "$CI_TPL_BASE_URL/$encoded/rke2-images-$list.$arch.txt" >> "$work/raw"
+        done
+        grep -v '^[[:space:]]*$' "$work/raw" | sort -u > "$out/images.txt"
+        if [ ! -s "$out/images.txt" ]; then
+          echo "ERROR: $version ($arch) resolved to no reference" >&2
+          exit 1
+        fi
+        echo "$version ($arch), lists: $lists"
+        echo "$(wc -l < "$out/images.txt" | tr -d ' ') ref(s) -> $CI_TPL_OUT_DIR/images.txt"
+      fi
+  artifacts:
+    name: '$[[ inputs.instance ]]-container-list-rke2-$CI_COMMIT_SHORT_SHA'
+    paths:
+      - .ci-artifacts/$[[ inputs.instance ]]/container-list-rke2/
+    when: on_success
+    expire_in: 30 days
+  rules: $[[ inputs.run-rules ]]
+  allow_failure: false
+  interruptible: true
+  # Infrastructure only. Section 10.1 forbids weakening an outcome, and any
+  # condition other than runner_system_failure would retry a failed gate;
+  # tests/contracts/test_retry_policy.py fails the build on one.
+  retry:
+    max: $[[ inputs.max-retries ]]
+    when: [runner_system_failure]
+  # Insulation from the consumer's `default:` block (section 13.1). A component
+  # job runs in the image the component pins and the shell the component ships;
+  # a consumer's global image, before_script, after_script, cache, services,
+  # artifacts or hooks reaching it is a component running something nobody
+  # reviewed. Runner selection and timeouts are the consumer's to set, so those
+  # stay inherited. `retry` and `id_tokens` stay too: this component sets both
+  # itself, and a consumer-level definition is a deliberate estate choice.
+  inherit:
+    default: [tags, timeout, interruptible, retry, id_tokens]

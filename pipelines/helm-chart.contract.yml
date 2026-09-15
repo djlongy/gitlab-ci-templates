@@ -1,0 +1,67 @@
+---
+# pipelines/helm-chart.contract.yml — the contract for the composition beside it.
+#
+# Section 6.3. The catalogue generator reads this plus the spec:inputs header
+# of helm-chart.yml; do not restate inputs here.
+name: helm-chart
+kind: pipeline
+status: experimental
+introduced_in: 1.0.0
+minimum_gitlab: '18.9'
+emitted_jobs:
+  - pattern: '{instance}:helm-validate'
+    stage: verify
+    blocking: true
+  - pattern: '{instance}:security-secrets-gitleaks'
+    stage: verify
+    blocking: true
+  - pattern: '{instance}:helm-package-publish'
+    stage: publish
+    blocking: true
+outputs:
+  - path: .ci-artifacts/{instance}/helm-package-publish/chart.json
+    producer: '{instance}:helm-package-publish'
+    format: json
+    schema: schema_version 1; repository, name, version, registry digest, reference, archive
+      and its sha256
+    subject_identity: The chart at the registry digest helm reported after the push. A consumer
+      resolves this, never the version tag.
+    retention: 1 week
+required_secrets:
+  - name: HARBOR_USER
+    kind: ci-variable
+    scope: Push access to the chart-repository OCI namespace.
+    protected_ref_required: true
+  - name: HARBOR_PASSWORD
+    kind: ci-variable
+    scope: Push access to the chart-repository OCI namespace.
+    protected_ref_required: true
+runtime_image:
+  reference: 'per component: every include forwards a digest-pinned execution image, and the
+    ones a consumer may need to change are inputs of this composition'
+  pinning: input
+trust:
+  privileged: false
+  network_egress:
+    - registry.example.com
+    - github.com
+    - objects.githubusercontent.com
+    - raw.githubusercontent.com
+  runner_profile: shared-docker, the estate instance runners. They are registered untagged,
+    so runner-tags selects nothing today and a tag is not a permission boundary.
+  protected_ref_required: true
+validation:
+  evidence:
+    - source-reviewed
+    - yaml-parsed
+    - gitlab-linted
+  verified_at: 2026/09/15
+  environment: gitlab.example.com 18.9.1-ee, project 18, POST /api/v4/projects/<project-id>/ci/lint
+  notes: 'Validation renders every chart named in chart-paths and checks the result against
+    the target Kubernetes API version; helm lint alone would not. Exactly one of those charts,
+    chart-path, is packaged and published, and the publish job has no `needs:`, so the whole
+    verify stage gates it. Publication runs on the default branch, which is what the consumer
+    this replaces did, and on a PROTECTED tag rather than any tag. `helm template` renders
+    without a cluster, so `lookup` is empty and hook-driven resources are absent: the rendered
+    output is review evidence, not a claim about cluster state. Evidence is gitlab-linted
+    only.'

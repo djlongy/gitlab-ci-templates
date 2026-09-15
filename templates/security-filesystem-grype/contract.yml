@@ -1,0 +1,81 @@
+---
+name: security-filesystem-grype
+kind: component
+status: experimental
+introduced_in: 1.0.0
+minimum_gitlab: '18.9'
+# Retry policy: the `max-retries` input (0, 1 or 2, default 1) sets `retry: max`,
+# and `retry: when` is `runner_system_failure` and nothing else. A job killed by
+# its runner runs again; a failed gate never does.
+emitted_jobs:
+  - pattern: '{instance}:security-filesystem-grype'
+    stage: verify
+    blocking: true
+outputs:
+  - path: .ci-artifacts/{instance}/security-filesystem-grype/grype-fs.json
+    producer: '{instance}:security-filesystem-grype'
+    format: grype JSON
+    subject_identity: source commit CI_COMMIT_SHA under the declared working directory
+    retention: 1 week
+  - path: .ci-artifacts/{instance}/security-filesystem-grype/grype-fs.sarif
+    producer: '{instance}:security-filesystem-grype'
+    format: SARIF 2.1.0
+    retention: 1 week
+  - path: .ci-artifacts/{instance}/security-filesystem-grype/severities.txt
+    producer: '{instance}:security-filesystem-grype'
+    format: one line per match, rendered by grype's own template
+    retention: 1 week
+  - path: .ci-artifacts/{instance}/security-filesystem-grype/scan-result.json
+    producer: '{instance}:security-filesystem-grype'
+    format: JSON
+    schema: section 9.2 scan-result, schema_version 1
+    subject_identity: project path and commit SHA of the scanned source
+    retention: 1 week
+required_secrets: []
+runtime_image:
+  reference: 'docker.io/anchore/grype@sha256:a3166cb9ec689737c4c7099c78dbd3728ca22db73d5a99c9a0b582e42d5b0926'
+  pinning: digest
+  tool_versions:
+    grype: 0.118.0-debug
+trust:
+  privileged: false
+  network_egress:
+    - registry.example.com
+    - grype.anchore.io for the vulnerability database
+  runner_profile: shared-docker
+  protected_ref_required: false
+validation:
+  evidence:
+    - source-reviewed
+    - yaml-parsed
+    - gitlab-linted
+    - runtime-tested
+  verified_at: 2026/09/15
+  environment: 'gitlab.example.com 18.9.1-ee, project 18'
+  notes: >-
+    Scope. Dependency vulnerability scanning of a source tree, the Anchore
+    counterpart to security-filesystem-trivy. It finds neither secrets nor IaC
+    misconfiguration, so it is not a drop-in replacement for the trivy component
+    despite the shared input names.
+    Failure semantics. `blocking` (the default, matching current estate
+    behaviour) fails the job on a finding at or above severity-threshold;
+    advisory records it and succeeds. An execution failure fails the job in BOTH
+    modes. grype 0.118.0 was measured rather than read: with --fail-on it exits
+    2 for findings at or above the threshold and 1 for an execution error, the
+    opposite of what its documentation implies, and the wrapper's table carries
+    the measured values. The database is gated twice: `grype db update` must
+    succeed and `grype db status` must report `valid`, and the build timestamp
+    is recorded as the database snapshot in the evidence. A missing or empty
+    report fails the job, as does grype exiting 0 while the report carries
+    findings at or above the threshold. One scan renders JSON, SARIF, the
+    severity list and the gate status, so the published evidence is the scan
+    that was gated. ignore-unfixed defaults to true, which is what this template
+    does today (--only-fixed); security-filesystem-trivy defaults it to false
+    for the same preserve-current-behaviour reason. SARIF is a plain artifact,
+    not `reports: sast:` (section 10.3, estate report mode artifact-only). The
+    -debug image variant is required: the default anchore/grype image is built
+    FROM scratch and has no shell for a job script to run in.
+    Evidence: unit tests in tests/runtime/scan/, exit codes and the
+    multi-output/template rendering measured against the pinned image on
+    2026/09/15, CI Lint through tests/pipelines/. No pipeline has executed this
+    component.

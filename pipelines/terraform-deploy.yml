@@ -1,0 +1,449 @@
+---
+# pipelines/terraform-deploy.yml
+#
+# Verify, plan, then apply that exact plan to one environment and one state.
+#
+#   verify -> terraform-fmt, terraform-validate, security-filesystem-trivy
+#   plan   -> terraform-plan, on the default branch, producing tfplan and
+#             plan-metadata.json for this commit, root, state and environment
+#   deploy -> terraform-apply, manual, consuming that plan and no other
+#
+# There is no verify-deploy stage. Section 7.1 defines one and this repository
+# has no component that fills it, so the stage is omitted rather than declared
+# empty or filled with a placeholder.
+#
+# One include is one root, one state and one environment. For several roots,
+# include this file once per root with a distinct `instance`,
+# `working-directory` and `state-id`. Do not share a state id between two
+# instances: the apply job's resource group is derived from the instance, so two
+# instances pointed at one state would serialise nothing.
+#
+# Destroy is not a branch of this pipeline. `allow-destroy` only permits an
+# apply whose saved plan already contains destructive changes to proceed; it
+# does not generate one. Section 11.2 asks for a separate reviewed destroy flow,
+# which this composition does not provide.
+#
+# A merge request runs the verify stage only. A speculative plan executes
+# provider code and data sources against real credentials, so it is not offered
+# here by default (section 11.2, point 3).
+#
+# Three things a consuming project may need to keep from a pipeline it already
+# has, none of them on by default:
+#
+#   changes-filter + changes-paths  run this instance's jobs only when the paths
+#                                   it owns changed, which is how a repository
+#                                   of several Terraform roots avoids planning
+#                                   all of them on every push
+#   apply-mode                      whether the apply waits for a person
+#   apply-gate-jobs                 ordering between instances, such as prod
+#                                   applying only after dev applied
+#
+# The filter is two inputs rather than one because an array input cannot select
+# which of two include variants is active. Measured on gitlab.example.com
+# 18.9.1-ee, 2026/09/15: an empty array interpolates into a rule string and
+# compares equal to "[]", but a non-empty one is rejected as `invalid expression
+# syntax`, so emptiness cannot be the switch. The alternative, always emitting
+# `changes:` and letting an empty list mean "no filter", is the opposite of what
+# GitLab does with it: an empty path list matches nothing. Hence a separate
+# scalar, off by default, and a changes-paths default that matches any change.
+
+#### Consumer interface ####
+spec:
+  inputs:
+    instance:
+      type: string
+      description: >-
+        Terraform root identifier. Jobs are `<instance>:terraform-fmt`,
+        `<instance>:terraform-validate`, `<instance>:security-filesystem-trivy`,
+        `<instance>:terraform-plan` and `<instance>:terraform-apply`.
+      regex: '^[a-z][a-z0-9-]{0,47}$'
+    working-directory:
+      type: string
+      description: Terraform root in the consumer checkout.
+      default: '.'
+    environment:
+      type: string
+      description: >-
+        Target environment, from the estate profile's names in .ci/estate.yml.
+        Recorded on the apply job. A GitLab environment name alone is not a
+        protection rule: configure the protected environment separately.
+      options: ['mgt', 'dev', 'prod']
+    state-id:
+      type: string
+      description: >-
+        GitLab-managed Terraform state name for this root and environment. The
+        backend lock is held on this name, so two roots must never share one.
+      regex: '^[A-Za-z0-9._-]{1,120}$'
+    changes-filter:
+      type: string
+      description: >-
+        `on` adds `changes:` to every job in this instance, so the pipeline acts
+        only when the paths in changes-paths were touched. `off`, the default,
+        is the behaviour before this input existed: the jobs run on every
+        pipeline the source rules admit.
+      options: ['off', 'on']
+      default: 'off'
+    changes-paths:
+      type: array
+      description: >-
+        Paths this instance owns, as `changes:` patterns relative to the
+        repository root. Read only when changes-filter is on. The default
+        matches any change, so turning the filter on without naming paths
+        behaves like no filter rather than deleting the pipeline; an empty list
+        would match nothing, which is why it is not the default.
+      default: ['**/*']
+    apply-mode:
+      type: string
+      description: >-
+        `manual` requires a person to start the apply. `automatic` runs it on
+        success on the default branch. Manual is the default because section 6.1
+        does not default a production mutation to unconditional execution;
+        `automatic` is an owner decision, and belongs in the consuming project's
+        .ci/project.yml with the reason.
+      options: ['manual', 'automatic']
+      default: 'manual'
+    apply-gate-jobs:
+      type: array
+      description: >-
+        Jobs that must succeed before this apply, as `{job: <name>, artifacts:
+        false}` entries. For ordering between instances that the stage graph
+        cannot express, such as a production root applying only after the
+        development root of the same change applied. The plan producer is always
+        needed as well and is never replaced by this list.
+      default: []
+    state-username:
+      type: string
+      description: Username for the HTTP state backend.
+      default: 'gitlab-ci-token'
+    state-token-variable:
+      type: string
+      description: >-
+        Name of the CI variable holding the state backend token. The name,
+        never the value.
+      regex: '^[A-Z][A-Z0-9_]*$'
+      default: 'GITLAB_TF_STATE_TOKEN'
+    var-file:
+      type: string
+      description: >-
+        Non-secret variables file for the plan, relative to working-directory.
+        Empty means none.
+      default: ''
+    allow-destroy:
+      type: boolean
+      description: >-
+        Permit an apply whose saved plan destroys or replaces resources. Off by
+        default, so a plan that turned out destructive stops at the apply guard
+        instead of running.
+      default: false
+    max-plan-age-hours:
+      type: number
+      description: >-
+        How old a saved plan may be at apply time. A plan older than this is
+        refused and a new one must be reviewed.
+      default: 24
+    plan-expire-in:
+      type: string
+      description: Artifact retention for the plan and its metadata.
+      default: '7 days'
+    lock-timeout:
+      type: string
+      description: How long terraform waits for the backend state lock.
+      default: '3m'
+    vault-auth:
+      type: boolean
+      description: >-
+        Authenticate to Vault with the job's id_token before plan and apply.
+        Off by default: this estate's Terraform jobs authenticate to the state
+        backend with the state token and need nothing else.
+      default: false
+    vault-role:
+      type: string
+      description: Vault JWT role used when vault-auth is true.
+      default: 'gitlab-ci-terraform'
+    scan-severity:
+      type: string
+      description: Lowest severity that fails the configuration scan.
+      options: ['critical', 'high', 'medium', 'low']
+      default: 'high'
+    scan-policy-mode:
+      type: string
+      description: >-
+        `blocking` fails on a finding at or above the threshold. `advisory`
+        records findings and still fails when the scanner could not run at all.
+      options: ['blocking', 'advisory']
+      default: 'blocking'
+    runner-tags:
+      type: array
+      description: Approved runner selection from the estate profile.
+      default: []
+    terraform-image:
+      type: string
+      description: Approved Terraform execution image pinned by digest.
+      regex: '^.+@sha256:[0-9a-f]{64}$'
+      default: 'docker.io/hashicorp/terraform@sha256:5820b87995595425074f881500a037b0ccd41158d0d9b44d78f5f120612f2d3d'
+    trivy-image:
+      type: string
+      description: Approved Trivy image pinned by digest.
+      regex: '^.+@sha256:[0-9a-f]{64}$'
+      default: 'docker.io/aquasec/trivy@sha256:bcc376de8d77cfe086a917230e818dc9f8528e3c852f7b1aff648949b6258d1c'
+---
+
+#### Pipeline ownership ####
+# No tag rule: a release tag does not deploy infrastructure in this estate.
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - when: never
+
+stages:
+  - verify
+  - plan
+  - deploy
+
+#### Components at the same shared-CI revision ####
+include:
+  #### verify ####
+  - local: '/templates/terraform-fmt/template.yml'
+    rules:
+      - if: '"$[[ inputs.changes-filter ]]" == "off"'
+    inputs:
+      instance: $[[ inputs.instance ]]
+      stage: verify
+      working-directory: $[[ inputs.working-directory ]]
+      execution-image: $[[ inputs.terraform-image ]]
+      runner-tags: $[[ inputs.runner-tags ]]
+      run-rules:
+        - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+
+  - local: '/templates/terraform-fmt/template.yml'
+    rules:
+      - if: '"$[[ inputs.changes-filter ]]" == "on"'
+    inputs:
+      instance: $[[ inputs.instance ]]
+      stage: verify
+      working-directory: $[[ inputs.working-directory ]]
+      execution-image: $[[ inputs.terraform-image ]]
+      runner-tags: $[[ inputs.runner-tags ]]
+      run-rules:
+        - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+          changes: $[[ inputs.changes-paths ]]
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+          changes: $[[ inputs.changes-paths ]]
+
+  - local: '/templates/terraform-validate/template.yml'
+    rules:
+      - if: '"$[[ inputs.changes-filter ]]" == "off"'
+    inputs:
+      instance: $[[ inputs.instance ]]
+      stage: verify
+      working-directory: $[[ inputs.working-directory ]]
+      execution-image: $[[ inputs.terraform-image ]]
+      runner-tags: $[[ inputs.runner-tags ]]
+      run-rules:
+        - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+
+  - local: '/templates/terraform-validate/template.yml'
+    rules:
+      - if: '"$[[ inputs.changes-filter ]]" == "on"'
+    inputs:
+      instance: $[[ inputs.instance ]]
+      stage: verify
+      working-directory: $[[ inputs.working-directory ]]
+      execution-image: $[[ inputs.terraform-image ]]
+      runner-tags: $[[ inputs.runner-tags ]]
+      run-rules:
+        - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+          changes: $[[ inputs.changes-paths ]]
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+          changes: $[[ inputs.changes-paths ]]
+
+  - local: '/templates/security-filesystem-trivy/template.yml'
+    rules:
+      - if: '"$[[ inputs.changes-filter ]]" == "off"'
+    inputs:
+      instance: $[[ inputs.instance ]]
+      stage: verify
+      working-directory: $[[ inputs.working-directory ]]
+      execution-image: $[[ inputs.trivy-image ]]
+      runner-tags: $[[ inputs.runner-tags ]]
+      severity-threshold: $[[ inputs.scan-severity ]]
+      scanners: 'vuln,secret,misconfig'
+      ignore-unfixed: false
+      policy-mode: $[[ inputs.scan-policy-mode ]]
+      run-rules:
+        - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+
+  - local: '/templates/security-filesystem-trivy/template.yml'
+    rules:
+      - if: '"$[[ inputs.changes-filter ]]" == "on"'
+    inputs:
+      instance: $[[ inputs.instance ]]
+      stage: verify
+      working-directory: $[[ inputs.working-directory ]]
+      execution-image: $[[ inputs.trivy-image ]]
+      runner-tags: $[[ inputs.runner-tags ]]
+      severity-threshold: $[[ inputs.scan-severity ]]
+      scanners: 'vuln,secret,misconfig'
+      ignore-unfixed: false
+      policy-mode: $[[ inputs.scan-policy-mode ]]
+      run-rules:
+        - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+          changes: $[[ inputs.changes-paths ]]
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+          changes: $[[ inputs.changes-paths ]]
+
+  #### plan ####
+  # The plan job declares no `needs:`, so the whole verify stage is a barrier in
+  # front of it, and therefore in front of the apply that consumes it.
+  - local: '/templates/terraform-plan/template.yml'
+    rules:
+      - if: '"$[[ inputs.changes-filter ]]" == "off"'
+    inputs:
+      instance: $[[ inputs.instance ]]
+      stage: plan
+      working-directory: $[[ inputs.working-directory ]]
+      environment: $[[ inputs.environment ]]
+      state-id: $[[ inputs.state-id ]]
+      state-username: $[[ inputs.state-username ]]
+      state-token-variable: $[[ inputs.state-token-variable ]]
+      execution-image: $[[ inputs.terraform-image ]]
+      runner-tags: $[[ inputs.runner-tags ]]
+      var-file: $[[ inputs.var-file ]]
+      lock-timeout: $[[ inputs.lock-timeout ]]
+      plan-expire-in: $[[ inputs.plan-expire-in ]]
+      max-plan-age-hours: $[[ inputs.max-plan-age-hours ]]
+      vault-auth: $[[ inputs.vault-auth ]]
+      vault-role: $[[ inputs.vault-role ]]
+      run-rules:
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+
+  - local: '/templates/terraform-plan/template.yml'
+    rules:
+      - if: '"$[[ inputs.changes-filter ]]" == "on"'
+    inputs:
+      instance: $[[ inputs.instance ]]
+      stage: plan
+      working-directory: $[[ inputs.working-directory ]]
+      environment: $[[ inputs.environment ]]
+      state-id: $[[ inputs.state-id ]]
+      state-username: $[[ inputs.state-username ]]
+      state-token-variable: $[[ inputs.state-token-variable ]]
+      execution-image: $[[ inputs.terraform-image ]]
+      runner-tags: $[[ inputs.runner-tags ]]
+      var-file: $[[ inputs.var-file ]]
+      lock-timeout: $[[ inputs.lock-timeout ]]
+      plan-expire-in: $[[ inputs.plan-expire-in ]]
+      max-plan-age-hours: $[[ inputs.max-plan-age-hours ]]
+      vault-auth: $[[ inputs.vault-auth ]]
+      vault-role: $[[ inputs.vault-role ]]
+      run-rules:
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+          changes: $[[ inputs.changes-paths ]]
+
+  #### deploy ####
+  # `plan-job` names the exact producer. The apply re-checks the plan's hash,
+  # age, engine version, lockfile, state id and source commit before it runs;
+  # naming the job is what makes those checks about the right plan.
+  - local: '/templates/terraform-apply/template.yml'
+    rules:
+      - if: '"$[[ inputs.changes-filter ]]" == "off" && "$[[ inputs.apply-mode ]]" == "manual"'
+    inputs:
+      instance: $[[ inputs.instance ]]
+      stage: deploy
+      plan-job: '$[[ inputs.instance ]]:terraform-plan'
+      working-directory: $[[ inputs.working-directory ]]
+      environment: $[[ inputs.environment ]]
+      state-id: $[[ inputs.state-id ]]
+      state-username: $[[ inputs.state-username ]]
+      state-token-variable: $[[ inputs.state-token-variable ]]
+      allow-destroy: $[[ inputs.allow-destroy ]]
+      execution-image: $[[ inputs.terraform-image ]]
+      runner-tags: $[[ inputs.runner-tags ]]
+      gate-jobs: $[[ inputs.apply-gate-jobs ]]
+      lock-timeout: $[[ inputs.lock-timeout ]]
+      max-plan-age-hours: $[[ inputs.max-plan-age-hours ]]
+      vault-auth: $[[ inputs.vault-auth ]]
+      vault-role: $[[ inputs.vault-role ]]
+      run-rules:
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+          when: manual
+
+  - local: '/templates/terraform-apply/template.yml'
+    rules:
+      - if: '"$[[ inputs.changes-filter ]]" == "on" && "$[[ inputs.apply-mode ]]" == "manual"'
+    inputs:
+      instance: $[[ inputs.instance ]]
+      stage: deploy
+      plan-job: '$[[ inputs.instance ]]:terraform-plan'
+      working-directory: $[[ inputs.working-directory ]]
+      environment: $[[ inputs.environment ]]
+      state-id: $[[ inputs.state-id ]]
+      state-username: $[[ inputs.state-username ]]
+      state-token-variable: $[[ inputs.state-token-variable ]]
+      allow-destroy: $[[ inputs.allow-destroy ]]
+      execution-image: $[[ inputs.terraform-image ]]
+      runner-tags: $[[ inputs.runner-tags ]]
+      gate-jobs: $[[ inputs.apply-gate-jobs ]]
+      lock-timeout: $[[ inputs.lock-timeout ]]
+      max-plan-age-hours: $[[ inputs.max-plan-age-hours ]]
+      vault-auth: $[[ inputs.vault-auth ]]
+      vault-role: $[[ inputs.vault-role ]]
+      run-rules:
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+          when: manual
+          changes: $[[ inputs.changes-paths ]]
+
+  - local: '/templates/terraform-apply/template.yml'
+    rules:
+      - if: '"$[[ inputs.changes-filter ]]" == "off" && "$[[ inputs.apply-mode ]]" == "automatic"'
+    inputs:
+      instance: $[[ inputs.instance ]]
+      stage: deploy
+      plan-job: '$[[ inputs.instance ]]:terraform-plan'
+      working-directory: $[[ inputs.working-directory ]]
+      environment: $[[ inputs.environment ]]
+      state-id: $[[ inputs.state-id ]]
+      state-username: $[[ inputs.state-username ]]
+      state-token-variable: $[[ inputs.state-token-variable ]]
+      allow-destroy: $[[ inputs.allow-destroy ]]
+      execution-image: $[[ inputs.terraform-image ]]
+      runner-tags: $[[ inputs.runner-tags ]]
+      gate-jobs: $[[ inputs.apply-gate-jobs ]]
+      lock-timeout: $[[ inputs.lock-timeout ]]
+      max-plan-age-hours: $[[ inputs.max-plan-age-hours ]]
+      vault-auth: $[[ inputs.vault-auth ]]
+      vault-role: $[[ inputs.vault-role ]]
+      run-rules:
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+          when: on_success
+
+  - local: '/templates/terraform-apply/template.yml'
+    rules:
+      - if: '"$[[ inputs.changes-filter ]]" == "on" && "$[[ inputs.apply-mode ]]" == "automatic"'
+    inputs:
+      instance: $[[ inputs.instance ]]
+      stage: deploy
+      plan-job: '$[[ inputs.instance ]]:terraform-plan'
+      working-directory: $[[ inputs.working-directory ]]
+      environment: $[[ inputs.environment ]]
+      state-id: $[[ inputs.state-id ]]
+      state-username: $[[ inputs.state-username ]]
+      state-token-variable: $[[ inputs.state-token-variable ]]
+      allow-destroy: $[[ inputs.allow-destroy ]]
+      execution-image: $[[ inputs.terraform-image ]]
+      runner-tags: $[[ inputs.runner-tags ]]
+      gate-jobs: $[[ inputs.apply-gate-jobs ]]
+      lock-timeout: $[[ inputs.lock-timeout ]]
+      max-plan-age-hours: $[[ inputs.max-plan-age-hours ]]
+      vault-auth: $[[ inputs.vault-auth ]]
+      vault-role: $[[ inputs.vault-role ]]
+      run-rules:
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+          when: on_success
+          changes: $[[ inputs.changes-paths ]]
