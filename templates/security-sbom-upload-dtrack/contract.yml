@@ -1,0 +1,70 @@
+---
+name: security-sbom-upload-dtrack
+kind: component
+status: experimental
+introduced_in: 1.0.0
+minimum_gitlab: '18.9'
+# Retry policy: the `max-retries` input (0, 1 or 2, default 1) sets `retry: max`,
+# and `retry: when` is `runner_system_failure` and nothing else. A job killed by
+# its runner runs again; a failed gate never does.
+emitted_jobs:
+  - pattern: '{instance}:security-sbom-upload-dtrack'
+    stage: scan
+    blocking: true
+outputs:
+  - path: .ci-artifacts/{instance}/security-sbom-upload-dtrack/dtrack-upload-result.json
+    producer: '{instance}:security-sbom-upload-dtrack'
+    format: JSON
+    schema: >-
+      schema_version 1; status (analysed or accepted), subject, endpoint,
+      project_name, project_version, bom_token, sbom_sha256,
+      analysis_completed, created_at.
+    subject_identity: >-
+      The image reference from the SBOM's subject.json, so the evidence names
+      the image rather than whichever artifact landed last.
+    retention: 1 week
+required_secrets:
+  - name: DTRACK_API_KEY
+    kind: ci-variable
+    scope: >-
+      BOM_UPLOAD and VIEW_PORTFOLIO on the target project. Sent as the X-Api-Key
+      header, never in a URL, and read from the environment by name inside the
+      helper so it never reaches an input or an argument list.
+runtime_image:
+  reference: 'docker.io/python@sha256:cd7c412d000912f29075a1b8803e43cb2f38bb67f104019df526df5ceaf30569'
+  pinning: digest
+  tool_versions:
+    python: '3.12'
+# No checkout: this job reads the named producer's artifacts and the APIs it
+# calls, so it runs with GIT_STRATEGY none and never clones the consumer
+# repository. tests/contracts/test_git_strategy.py holds both halves together.
+trust:
+  privileged: false
+  network_egress:
+    - The Dependency-Track instance named by the api-url input
+  runner_profile: Any unprivileged Docker executor.
+  protected_ref_required: false
+validation:
+  evidence:
+    - source-reviewed
+    - yaml-parsed
+    - gitlab-linted
+    - runtime-tested
+  verified_at: 2026/09/15
+  environment: gitlab.example.com 18.9.1-ee, project 18
+  notes: >-
+    Failure semantics: a rejected upload, a response without a processing token,
+    an unreadable processing state, or an analysis still running when
+    analysis-timeout expires all fail the job. An accepted upload with
+    wait-for-analysis false is recorded as "accepted", not as an analysis.
+    Policy-violation evaluation is NOT implemented: this component establishes
+    that the SBOM was ingested and analysed, not that the project passes
+    Dependency-Track policy. gitlab-linted through the CI Lint API; no job ran.
+    runtime-tested: unit tests cover the upload, the poll loop, the timeout, the
+    missing-key path and the header handling against a stubbed API. No request
+    has been made to a real Dependency-Track instance, and this estate's
+    endpoint is unresolved in .ci/estate.yml. Status: experimental, because no
+    consumer pipeline has run this component on 1.0.0-rc.2. `released` in this
+    repository means a consumer job executed green, not that the component looks
+    finished. .ci/estate.yml still records no Dependency-Track endpoint, so no
+    consumer instantiates it.

@@ -1,0 +1,48 @@
+---
+# container-mirror/.ci/project.yml
+#
+# The record of what this project adopted from the shared CI repository.
+# Contract: docs/gitlab-ci-agent-standard.md section 4, schema
+# tests/contracts/project.schema.json, field guide docs/reference/project-yml.md.
+#
+# Metadata, not GitLab configuration: nothing reads this at pipeline time. It
+# exists so the next reader can see which composition is in use, under which
+# instance names, and what was decided on the way in. The project path below is
+# illustrative, as is everything else in examples/.
+schema_version: 1
+project: demo/image-mirror
+shared_ci:
+  project: platform/gitlab-ci-templates
+  ref: REPLACE_WITH_APPROVED_SHARED_CI_REF
+workload:
+  name: container-mirror
+  adoption: composition
+compositions:
+  - file: /pipelines/container-mirror.yml
+    instances:
+      - mirror
+    inputs:
+      instance: mirror
+      changes-paths:
+        - 'images.txt'
+        - '.gitlab-ci.yml'
+      extra-list-files: images.txt
+      registry: registry.example.com
+      repository-prefix: mirror
+      arch: linux-amd64
+      s3-endpoint: 'https://s3.example.com'
+      s3-bucket: transfer
+      s3-prefix: export
+      have-key: have/blobs.txt
+notes: >-
+  Credentials are project CI/CD variables, all masked: REGISTRY_USER and
+  REGISTRY_PASSWORD for the registry, AWS_ACCESS_KEY_ID and
+  AWS_SECRET_ACCESS_KEY for the object store. Setting the composition's
+  vault-addr input swaps all four for a Vault JWT login and makes vault-role,
+  vault-kv-path and vault-s3-kv-path required.
+  changes-paths names .gitlab-ci.yml deliberately. Narrowed to the data files
+  alone, a bump of the shared-CI ref would run nothing, so the change that
+  proves the bump would never happen.
+  config-file is left at its default, so no RKE2 release is resolved and the
+  mirror works from images.txt alone. A consumer pinning a release names its
+  manifest there.

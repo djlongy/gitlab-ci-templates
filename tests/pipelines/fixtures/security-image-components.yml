@@ -1,0 +1,100 @@
+---
+# Lint fixtures for the security-image lane's components.
+#
+# Each entry supplies the inputs a component leaves required, the stub jobs its
+# needs point at, and the job names the merged configuration must create. The
+# suite in test_security_image_components.py turns these into three lint cases
+# per component: defaults, two instances, and the producer removed.
+#
+# `producers` are stubbed rather than real: this proves the component's own
+# graph and job names, not the other lanes' components, which do not exist on
+# this branch.
+
+schema_version: 1
+
+components:
+  security-sbom-syft:
+    stages: [build, scan]
+    producers:
+      container-build-buildkit: build
+    inputs:
+      build-job: '{instance}:container-build-buildkit'
+    required_producer: '{instance}:container-build-buildkit'
+
+  security-image-trivy:
+    stages: [build, scan]
+    producers:
+      container-build-buildkit: build
+    inputs:
+      build-job: '{instance}:container-build-buildkit'
+    required_producer: '{instance}:container-build-buildkit'
+
+  security-image-grype:
+    stages: [build, scan]
+    producers:
+      container-build-buildkit: build
+      security-sbom-syft: scan
+    inputs:
+      build-job: '{instance}:container-build-buildkit'
+      sbom-job: '{instance}:security-sbom-syft'
+    required_producer: '{instance}:security-sbom-syft'
+
+  security-sbom-upload-dtrack:
+    stages: [build, scan]
+    producers:
+      security-sbom-syft: scan
+    inputs:
+      sbom-job: '{instance}:security-sbom-syft'
+      api-url: https://dependency-track.example
+    required_producer: '{instance}:security-sbom-syft'
+
+  container-sign-attest-cosign:
+    stages: [build, scan, attest]
+    producers:
+      container-build-buildkit: build
+      security-sbom-syft: scan
+      security-image-trivy: scan
+    inputs:
+      build-job: '{instance}:container-build-buildkit'
+      sbom-job: '{instance}:security-sbom-syft'
+      scan-job: '{instance}:security-image-trivy'
+    required_producer: '{instance}:security-sbom-syft'
+
+  security-sync-vigil:
+    stages: [build, attest]
+    producers:
+      container-build-buildkit: build
+      container-sign-attest-cosign: attest
+    inputs:
+      build-job: '{instance}:container-build-buildkit'
+      sign-job: '{instance}:container-sign-attest-cosign'
+      vigil-url: https://vigil.example
+    required_producer: '{instance}:container-sign-attest-cosign'
+
+  security-verify-vigil:
+    stages: [build, attest]
+    producers:
+      container-build-buildkit: build
+      security-sync-vigil: attest
+    inputs:
+      build-job: '{instance}:container-build-buildkit'
+      sync-job: '{instance}:security-sync-vigil'
+      vigil-url: https://vigil.example
+    required_producer: '{instance}:security-sync-vigil'
+
+  container-promote-harbor:
+    stages: [build, publish]
+    producers:
+      container-build-buildkit: build
+      security-verify-vigil: build
+    inputs:
+      build-job: '{instance}:container-build-buildkit'
+      gate-jobs:
+        - job: '{instance}:security-verify-vigil'
+          artifacts: false
+      # The shipped default requires a protected tag, which a lint on the
+      # default branch cannot satisfy. test_promotion_defaults_to_a_protected_tag
+      # checks the shipped rules instead.
+      run-rules:
+        - if: '$CI_COMMIT_BRANCH'
+    required_producer: '{instance}:container-build-buildkit'

@@ -1,0 +1,52 @@
+---
+# Contract for templates/terraform-fmt. The other half of the contract is the
+# spec:inputs header of template.yml, which the catalogue generator reads.
+name: terraform-fmt
+kind: component
+status: released
+introduced_in: 1.0.0
+minimum_gitlab: '18.9'
+
+# Retry policy: the `max-retries` input (0, 1 or 2, default 1) sets `retry: max`,
+# and `retry: when` is `runner_system_failure` and nothing else. A job killed by
+# its runner runs again; a failed gate never does.
+emitted_jobs:
+  - pattern: '{instance}:terraform-fmt'
+    stage: verify
+    blocking: true
+
+# Reports only. `terraform fmt -check` never writes.
+outputs: []
+
+required_secrets: []
+
+runtime_image:
+  reference: 'docker.io/hashicorp/terraform@sha256:5820b87995595425074f881500a037b0ccd41158d0d9b44d78f5f120612f2d3d'
+  pinning: digest
+  tool_versions:
+    terraform: 1.11.4
+
+trust:
+  privileged: false
+  # init is not run, so no provider registry or state backend is contacted.
+  network_egress:
+    - registry.example.com
+  protected_ref_required: false
+
+validation:
+  evidence:
+    - source-reviewed
+    - yaml-parsed
+    - gitlab-linted
+    - integration-tested
+  verified_at: 2026/09/16
+  revision: '1.0.0-rc.2'
+  environment: >-
+    gitlab.example.com 18.9.1-ee, project 18, POST /api/v4/projects/<project-id>/ci/lint.
+    Executed on shared ref 1.0.0-rc.2 in: platform/terraform-modules (15) 5720
+    (merge request) and 5724 (main), 8 of 8 jobs across four instances;
+    platform/terraform-dns (16) 5736 and 5744; platform/terraform-hypervisor-roles
+    (22) 5735.
+  notes: >-
+    Linted through the CI Lint API from tests/pipelines/test_terraform_components.py.
+    Nothing here has been executed in a pipeline.

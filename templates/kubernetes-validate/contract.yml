@@ -1,0 +1,72 @@
+---
+name: kubernetes-validate
+kind: component
+status: released
+introduced_in: 1.0.0
+minimum_gitlab: '18.9'
+
+# Retry policy: the `max-retries` input (0, 1 or 2, default 1) sets `retry: max`,
+# and `retry: when` is `runner_system_failure` and nothing else. A job killed by
+# its runner runs again; a failed gate never does.
+emitted_jobs:
+  - pattern: '{instance}:kubernetes-validate'
+    stage: verify
+    blocking: true
+
+outputs:
+  - path: .ci-artifacts/{instance}/kubernetes-validate/{path}.rendered.yaml
+    producer: '{instance}:kubernetes-validate'
+    format: yaml
+    subject_identity: >-
+      The manifest path the render came from, in the file name. Review evidence
+      for what was validated, not a release identity.
+    retention: 1 week
+
+required_secrets: []
+
+runtime_image:
+  reference: 'docker.io/alpine@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d'
+  pinning: digest
+  tool_versions:
+    alpine: '3.21'
+    kubeconform: 0.6.7
+    kustomize: 5.5.0
+    architecture: linux/amd64
+
+trust:
+  privileged: false
+  network_egress:
+    # The execution image.
+    - registry.example.com
+    # The pinned kubeconform and kustomize releases and their checksum files.
+    - github.com
+    - objects.githubusercontent.com
+    # kubeconform's built-in schema catalogue. This is a MOVING remote: the
+    # schemas come from the master branch of yannh/kubernetes-json-schema, so
+    # the scan configuration is not fully pinned in the sense of section 12.
+    # Mirror the catalogue and pass schema-locations to close that gap.
+    - raw.githubusercontent.com
+  runner_profile: shared-docker
+  protected_ref_required: false
+
+validation:
+  evidence:
+    - source-reviewed
+    - yaml-parsed
+    - gitlab-linted
+    - runtime-tested
+    - integration-tested
+  verified_at: 2026/09/16
+  revision: '1.0.0-rc.2'
+  environment: >-
+    gitlab.example.com 18.9.1-ee, project 18, POST /api/v4/projects/<project-id>/ci/lint.
+    Executed on shared ref 1.0.0-rc.2 in: platform/cluster-gitops (29) 5719 and 5722,
+    19 of 19 manifests; platform/platform-gitops (12) 5721 and 5725.
+  notes: >-
+    Runtime-tested as the copy embedded in template.yml. Six cases were
+    exercised: a directory of plain manifests; a kustomize overlay; a single
+    schema-invalid file; a path that does not exist; a directory holding no
+    manifests; and two paths in one run. kustomize is installed unconditionally
+    rather than only when a kustomization is present, so its pin stays a literal
+    argument in the template that no CI variable can redirect. No pipeline has
+    been run: the merged configuration is linted only.

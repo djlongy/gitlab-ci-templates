@@ -1,0 +1,1275 @@
+---
+# templates/docs-wiki-sync/template.yml
+#
+# Two-way mirror between a repository's documentation folder and that project's
+# GitLab wiki. The repository is the source of truth: a wiki edit becomes a
+# repository commit authored by whoever made it, then the folder is regenerated
+# into the wiki as the CI author.
+#
+# Replaces docs/wiki-sync.yml. Three things changed and none of them is cosmetic:
+#
+#   1. The runtime no longer arrives by `git clone --branch main` at job time.
+#      It is vendored into the job variables below by runtime/pack/vendor.py, so
+#      the code that runs is the code at the revision the consumer pinned its
+#      `include:` to (section 11.6).
+#   2. pyyaml is installed from a hash-pinned requirements file, not `pip install
+#      pyyaml` (section 12).
+#   3. There is no top-level `variables:` block. The old one merged into every
+#      consumer's global variables and silently overwrote their DOCS_DIR
+#      (section 6.1).
+#
+# The `.not_for_wiki_sync` rules fragment is deliberately not carried over. It
+# suppressed EVERY job in a consumer's pipeline on `trigger` and `schedule`
+# sources, which cost that consumer its scheduled pipelines (section 11.6:
+# "do not suppress every scheduled job merely because a repository also has wiki
+# sync"). A consumer that needs its other jobs to skip wiki-triggered pipelines
+# declares that in its own rules.
+
+#### Public interface ####
+spec:
+  inputs:
+    instance:
+      type: string
+      description: Unique workload instance used in the job name.
+      regex: '^[a-z][a-z0-9-]{0,47}$'
+    stage:
+      type: string
+      description: >-
+        Stage supplied by the owning composition. Section 7.1 places wiki sync
+        in verify.
+      default: verify
+    working-directory:
+      type: string
+      description: >-
+        Documentation folder, relative to the consumer checkout. This is the
+        source of truth the wiki is regenerated from.
+      default: docs
+    mkdocs-config:
+      type: string
+      description: >-
+        mkdocs.yml to read exclude_docs / not_in_nav from. Empty means the
+        repository root mkdocs.yml when one exists, and no filtering otherwise.
+      default: ''
+    execution-image:
+      type: string
+      description: >-
+        Approved Python execution image pinned by digest. Needs python3, pip,
+        git, tar, base64 and sha256sum.
+      regex: '^.+@sha256:[0-9a-f]{64}$'
+      default: 'docker.io/python@sha256:cd7c412d000912f29075a1b8803e43cb2f38bb67f104019df526df5ceaf30569'
+    runner-tags:
+      type: array
+      description: Runner selection from the estate profile.
+      default: []
+    max-retries:
+      type: number
+      description: >-
+        How many times the runner may retry this job. The condition is
+        runner_system_failure only, so this retries infrastructure and never a
+        failed gate.
+      default: 1
+      options: [0, 1, 2]
+    run-rules:
+      type: array
+      description: >-
+        Job eligibility set by the composition. The default states the three
+        pipeline sources a wiki sync is intended for, rather than inferring them
+        from a branch check: a push to the default branch, the wiki-page-event
+        webhook that calls the trigger API, and the schedule that is the safety
+        net. WIKI_TOKEN is required in every case because the job cannot clone
+        or push the wiki without it.
+      default:
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $WIKI_TOKEN'
+        - if: '$CI_PIPELINE_SOURCE == "trigger" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $WIKI_TOKEN'
+        - if: '$CI_PIPELINE_SOURCE == "schedule" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $WIKI_TOKEN'
+---
+
+#### Executable capability ####
+"$[[ inputs.instance ]]:docs-wiki-sync":
+  stage: $[[ inputs.stage ]]
+  image:
+    name: $[[ inputs.execution-image ]]
+    entrypoint: ['']
+  tags: $[[ inputs.runner-tags ]]
+  variables:
+    # wiki-pull.py measures "since the last CI sync" from a marker commit, so the
+    # job needs history rather than a shallow checkout.
+    GIT_DEPTH: 0
+    CI_TPL_WORKING_DIRECTORY: $[[ inputs.working-directory ]]
+    # The wiki clone lives outside the checkout so the consumer needs no
+    # .gitignore entry and wiki-sync.py cannot mistake it for documentation.
+    CI_TPL_WIKI_CLONE: /tmp/wiki-clone
+    CI_TPL_RUNTIME_DIR: /tmp/ci-tpl-runtime/docs-wiki-sync
+    MKDOCS_CONFIG: $[[ inputs.mkdocs-config ]]
+  dependencies: []
+  before_script:
+    - |
+      set -eu
+      project_root=$(cd "$CI_PROJECT_DIR" && pwd -P)
+      cd "$CI_PROJECT_DIR/$CI_TPL_WORKING_DIRECTORY"
+      case "$(pwd -P)" in
+        "$project_root"|"$project_root"/*) ;;
+        *) echo 'ERROR: working-directory escapes the checkout'; exit 1 ;;
+      esac
+      cd "$project_root"
+    - |
+      set -eu
+      # BEGIN embed dir $CI_TPL_RUNTIME_DIR runtime/wiki/wiki-deploy.sh runtime/wiki/wiki-pull.py runtime/wiki/wiki-import.py runtime/wiki/wiki-sync.py runtime/wiki/docfilter.py runtime/wiki/requirements.txt
+      mkdir -p "$CI_TPL_RUNTIME_DIR" || exit 1
+      cat > "$CI_TPL_RUNTIME_DIR/wiki-deploy.sh" <<'CI_TPL_EMBED_EOF' || exit 1
+      #!/usr/bin/env bash
+      # Two-way sync between docs/ in this repo and the project's GitLab wiki.
+      #
+      #   usage: runtime/wiki/wiki-deploy.sh DOCS_DIR WIKI_DIR        e.g. runtime/wiki/wiki-deploy.sh docs wiki
+      #
+      # One cycle:
+      #   1. clone the wiki into WIKI_DIR (recreated every run; keep it gitignored)
+      #   2. wiki -> repo: wiki-pull.py turns every wiki commit since the last CI sync into a repo
+      #      commit by the person who edited the wiki (three-way merge, newer edit wins)
+      #   3. push those commits to the docs branch with ci.skip (so the pipeline does not loop),
+      #      rebasing onto the branch tip first if someone pushed meanwhile
+      #   4. repo -> wiki: wiki-sync.py regenerates the wiki from docs/, committed as the CI author
+      #   5. push the wiki
+      # If step 5 is rejected because a person edited the wiki while the cycle ran, the whole cycle
+      # runs again (bounded), so that edit is pulled too and nothing is overwritten or lost. Step 4
+      # never runs before step 3 succeeded, so a wiki edit always lands in the repo first.
+      #
+      # Identity: this script never uses the caller's ssh keys or the checkout's origin. Everything
+      # goes over https with a token, as a pipeline service account would, and git is told never to
+      # prompt (GIT_TERMINAL_PROMPT=0). GitLab CI sets the CI_* variables; locally copy
+      # .env.example to .env, fill it in, `source .env` (both are gitignored).
+      #   WIKI_TOKEN          project (or personal) access token: scope write_repository, role
+      #                       Maintainer if the docs branch is protected. Clones and pushes the wiki
+      #                       and pushes the repo.
+      #   CI_JOB_TOKEN        set by CI; pushes the repo when WIKI_TOKEN is not set
+      #   CI_SERVER_FQDN      gitlab host (or GITLAB_HOST)
+      #   CI_PROJECT_PATH     group/project (or GITLAB_PROJECT_PATH)
+      #   CI_DEFAULT_BRANCH   branch the pulled wiki edits are pushed to (default: main)
+      #   CI_AUTHOR_NAME      author of the CI sync commits (default: "<project> ci"), CI_AUTHOR_EMAIL
+      #   MKDOCS_CONFIG       mkdocs.yml to read exclude_docs / not_in_nav from (default: mkdocs.yml)
+      #   WIKI_URL            override the wiki clone URL (tests use a file:// repo)
+      #   REPO_PUSH_URL       override where pulled edits are pushed (tests use a file:// repo)
+      #   DRY_RUN=1           clone and report; commit and push nothing
+      set -euo pipefail
+
+      log() { printf '%s\n' "$*"; }
+      die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+
+      # ---- settings ----------------------------------------------------------------------------
+      configure() {
+        docs=${1:?usage: wiki-deploy.sh DOCS_DIR WIKI_DIR}
+        wiki_dir=${2:?usage: wiki-deploy.sh DOCS_DIR WIKI_DIR}
+        scripts=$(cd "$(dirname "$0")" && pwd)
+        docs=$(cd "$docs" && pwd)
+        # Resolve the repo from the folder above docs/, so a stray docs/.git cannot answer instead.
+        repo=$(git -C "$(dirname "$docs")" rev-parse --show-toplevel)
+        guard_nested_repo
+        host=${CI_SERVER_FQDN:-${GITLAB_HOST:-}}
+        project=${CI_PROJECT_PATH:-${GITLAB_PROJECT_PATH:-}}
+        branch=${CI_DEFAULT_BRANCH:-main}
+        ci_name=${CI_AUTHOR_NAME:-"${project##*/} ci"}
+        ci_email=${CI_AUTHOR_EMAIL:-"ci@${host%%:*}"}
+        config=${MKDOCS_CONFIG:-$repo/mkdocs.yml}
+        dry=${DRY_RUN:-0}
+        attempts=${SYNC_ATTEMPTS:-3}
+
+        wiki_url=${WIKI_URL:-}
+        push_url=${REPO_PUSH_URL:-}
+        if [ -z "$wiki_url" ] || [ -z "$push_url" ]; then
+          [ -n "$host" ] && [ -n "$project" ] || die "set CI_SERVER_FQDN/GITLAB_HOST and CI_PROJECT_PATH/GITLAB_PROJECT_PATH (or WIKI_URL and REPO_PUSH_URL)"
+        fi
+        if [ -z "$wiki_url" ]; then
+          [ -n "${WIKI_TOKEN:-}" ] || die "WIKI_TOKEN is required to clone https://$host/$project.wiki.git"
+          wiki_url="https://oauth2@$host/$project.wiki.git"
+        fi
+        if [ -z "$push_url" ]; then
+          if [ -n "${WIKI_TOKEN:-}" ]; then
+            push_url="https://oauth2@$host/$project.git"
+          elif [ -n "${CI_JOB_TOKEN:-}" ]; then
+            push_url="https://gitlab-ci-token@$host/$project.git"
+          else
+            die "no token to push $project with: set WIKI_TOKEN (or run in CI, or REPO_PUSH_URL)"
+          fi
+        fi
+      }
+
+      # A stray docs/.git (seen on reused runner build dirs) would make every git command act on
+      # that nested repo instead of this one. In CI it is junk from an earlier job: drop it.
+      guard_nested_repo() {
+        [ -e "$docs/.git" ] || return 0
+        echo "warning: $docs/.git exists (last commit: $(git -C "$docs" log -1 --format='%h %an %s' 2>/dev/null || echo '?'))" >&2
+        [ -n "${CI:-}" ] || die "remove $docs/.git first; docs/ must be a plain folder of this repo"
+        rm -rf "$docs/.git"
+        echo "warning: removed the nested repository (CI build dir)" >&2
+      }
+
+      # ---- credentials ---------------------------------------------------------------------------
+      # One credential store file, readable only by this process, removed on exit. git picks the
+      # entry by host and username, and the username is in each URL above, so the wiki token and the
+      # job token never get confused. Nothing secret appears on a command line or in .git/config.
+      credentials() {
+        export GIT_TERMINAL_PROMPT=0
+        export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null   # runner images carry stray config
+        umask 077
+        cred=$(mktemp)
+        trap 'rm -f "$cred"' EXIT
+        if [ -n "$host" ]; then
+          [ -n "${WIKI_TOKEN:-}" ]   && printf 'https://oauth2:%s@%s\n' "$WIKI_TOKEN" "$host" >> "$cred"
+          [ -n "${CI_JOB_TOKEN:-}" ] && printf 'https://gitlab-ci-token:%s@%s\n' "$CI_JOB_TOKEN" "$host" >> "$cred"
+        fi
+        return 0
+      }
+      gitc() { git -c "credential.helper=store --file=$cred" "$@"; }
+
+      # ---- the steps -----------------------------------------------------------------------------
+      clone_wiki() {
+        rm -rf "$wiki_dir"
+        gitc clone -q "$wiki_url" "$wiki_dir"
+        wiki=$(cd "$wiki_dir" && pwd)
+        wiki_branch=$(git -C "$wiki" symbolic-ref --short HEAD 2>/dev/null || echo main)
+        local commits; commits=$(git -C "$wiki" rev-list --count HEAD 2>/dev/null || echo 0)
+        log "wiki:   $wiki_url ($wiki_branch, $commits commits)"
+        log "docs:   $docs on $(git -C "$repo" rev-parse --short HEAD)"
+      }
+
+      pull_wiki_edits() {
+        git -C "$repo" config user.name  >/dev/null 2>&1 || git -C "$repo" config user.name  "$ci_name"
+        git -C "$repo" config user.email >/dev/null 2>&1 || git -C "$repo" config user.email "$ci_email"
+        before=$(git -C "$repo" rev-parse HEAD)
+        local args=(--ci-author "$ci_name" --ci-email "$ci_email" --repo "$repo")
+        [ -f "$config" ] && args+=(--config "$config")
+        [ "$dry" = 1 ] && args+=(--dry-run)
+        # `|| return 1` is not decoration. cycle() is called from an `if`, so `set -e`
+        # is off for everything below it and a function returns the status of its LAST
+        # command. Without this, wiki-pull.py could die and `after=$(git rev-parse)`
+        # would still succeed, the pull would be skipped and the job would go green:
+        # platform/wiki-tpl-flat job 47477 did exactly that, with wiki-pull.py raising
+        # FileNotFoundError for the wiki-import.py the embed marker had left out.
+        python3 "$scripts/wiki-pull.py" "$docs" "$wiki" ${args[@]+"${args[@]}"} || return 1
+        after=$(git -C "$repo" rev-parse HEAD)
+      }
+
+      push_repo() {
+        [ "$after" != "$before" ] || return 0
+        log "pushing $(git -C "$repo" rev-list --count "$before..$after") wiki commit(s) to $branch"
+        # ci.skip: the pushed commits are already reflected in the wiki by the sync that follows.
+        if ! gitc -C "$repo" push -q -o ci.skip "$push_url" "HEAD:$branch" 2>/dev/null; then
+          log "$branch moved while pulling; rebasing the wiki commits onto its tip"
+          gitc -C "$repo" fetch -q "$push_url" "$branch" || die "cannot fetch $branch from $push_url"
+          git -C "$repo" rebase -q FETCH_HEAD || { git -C "$repo" rebase --abort; die "wiki commits conflict with new commits on $branch; resolve in the repo and re-run"; }
+          gitc -C "$repo" push -o ci.skip "$push_url" "HEAD:$branch" || die "push to $branch rejected twice; the wiki is left untouched"
+        fi
+      }
+
+      sync_wiki() {
+        local args=()
+        [ -f "$config" ] && args+=(--config "$config")
+        # Same reason as pull_wiki_edits: a failed regeneration must not be followed
+        # by `git add -A` and a commit of whatever half-written tree it left.
+        python3 "$scripts/wiki-sync.py" "$docs" "$wiki" ${args[@]+"${args[@]}"} || return 1
+        git -C "$wiki" config user.name  "$ci_name"
+        git -C "$wiki" config user.email "$ci_email"
+        git -C "$wiki" add -A
+        # Current means: the tree already matches docs/ AND the tip is a CI sync commit. A human
+        # commit at the tip (an edit already pulled, or a wipe) still needs the marker commit that
+        # wiki-pull.py measures "since the last sync" from.
+        local tip_author; tip_author=$(git -C "$wiki" log -1 --format='%an <%ae>' 2>/dev/null || true)
+        if git -C "$wiki" diff --cached --quiet && [ "$tip_author" = "$ci_name <$ci_email>" ]; then
+          log "wiki already current"
+          return 0
+        fi
+        if [ "$dry" = 1 ]; then
+          log "dry-run: wiki would change:"
+          git -C "$wiki" diff --cached --stat | tail -20
+          return 0
+        fi
+        # --allow-empty: after a pull the wiki may already hold the content, but the CI commit is
+        # the marker wiki-pull.py measures "since the last sync" from, so it is written regardless.
+        git -C "$wiki" commit -q --allow-empty -m "Sync docs from $(git -C "$repo" rev-parse --short HEAD)"
+        wiki_changed=1
+      }
+
+      push_wiki() {
+        [ "${wiki_changed:-0}" = 1 ] || return 0
+        if gitc -C "$wiki" push -q origin "HEAD:$wiki_branch" 2>/dev/null; then
+          log "wiki updated from $(git -C "$repo" rev-parse --short HEAD)"
+        else
+          log "wiki push rejected: the wiki changed while this cycle ran"
+          return 1
+        fi
+      }
+
+      # Called from an `if`, where `set -e` is off, so every step's status is checked by hand:
+      # a failed repo push must stop the cycle before the wiki is rewritten.
+      cycle() {
+        wiki_changed=0
+        clone_wiki || return 1
+        pull_wiki_edits || return 1
+        if [ "$dry" != 1 ]; then push_repo || return 1; fi
+        sync_wiki || return 1
+        if [ "$dry" != 1 ]; then push_wiki || return 1; fi
+      }
+
+      main() {
+        configure "$@"
+        credentials
+        local n
+        for n in $(seq 1 "$attempts"); do
+          if cycle; then return 0; fi
+          log "retrying the whole cycle ($n of $attempts) so the new wiki edit is pulled first"
+        done
+        die "wiki still changing after $attempts attempts; nothing was overwritten, re-run later"
+      }
+
+      main "$@"
+      CI_TPL_EMBED_EOF
+      chmod +x "$CI_TPL_RUNTIME_DIR/wiki-deploy.sh" || exit 1
+      cat > "$CI_TPL_RUNTIME_DIR/wiki-pull.py" <<'CI_TPL_EMBED_EOF' || exit 1
+      #!/usr/bin/env python3
+      """Bring wiki edits back into docs/ (the wiki -> repo half of the bidirectional sync).
+
+      usage: wiki-pull.py DOCS_DIR WIKI_CLONE [--ci-author NAME] [--dry-run]
+                          [--include P]... [--exclude P]... [--config mkdocs.yml]
+
+      wiki-sync.py mirrors docs/ into the wiki and commits as the CI author. Every wiki commit after
+      the last CI commit was made by a person in the wiki UI. This script walks those commits, turns
+      each changed page back into its docs/ form (the wiki-import.py rules: home.md -> index.md,
+      <section>.md beside a <section>/ folder -> <section>/index.md, links back to relative .md) and
+      merges it into docs/ three ways with `git merge-file`:
+
+          base   = the page as CI last wrote it (the wiki tree at the last CI commit)
+          ours   = the page in docs/ now (may carry repo edits made since that sync)
+          theirs = the page in the wiki now
+
+      A clean merge keeps both sides. On conflict the newer edit wins: the wiki commit's author date
+      against the repo's last author date for that file. A page deleted in the wiki is deleted from
+      docs/ unless the repo edited it after the sync (then the repo copy stays and the next
+      wiki-sync restores the wiki page).
+
+      Each wiki commit becomes one repo commit carrying that wiki commit's author name, email and
+      date, so attribution follows the person who edited the wiki. Nothing is pushed here; the caller
+      (wiki-deploy.sh) pushes. Prints what it did; exit 0 (also when there is nothing to do), 1 on error.
+
+      A wiki with no commits, or with no pages left after the human commits (everything deleted in
+      the UI, or an empty branch force-pushed), is a reset: nothing is pulled and nothing is deleted
+      from docs/; the caller reseeds the wiki from docs/. Deleting one page still propagates.
+      """
+      import argparse
+      import importlib.util
+      import json
+      import os
+      import re
+      import subprocess
+      import sys
+      import tempfile
+      from datetime import datetime
+      from pathlib import Path
+
+      sys.path.insert(0, str(Path(__file__).resolve().parent))
+      import docfilter  # noqa: E402
+
+
+      def load(name):
+          spec = importlib.util.spec_from_file_location(name.replace("-", "_"), Path(__file__).resolve().parent / f"{name}.py")
+          mod = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(mod)
+          return mod
+
+
+      wiki_import = load("wiki-import")
+
+      CI_AUTHOR = "docs-site ci"
+      CI_EMAIL = ""   # empty: match on the name alone
+      DOCS_MAP = ".gitlab/docs-map.json"   # written by wiki-sync.py: wiki page -> docs file
+      EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+      EPOCH = "1970-01-01T00:00:00+00:00"
+      INDEX = "index.md"
+
+
+      def git(repo, *args, env=None):
+          # List form, no shell: every argument reaches git as one argv element, so a path or a
+          # commit subject with shell characters cannot become a command. Inputs are repo paths
+          # and git's own output; none come from the network.
+          result = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, env=env, shell=False)
+          if result.returncode:
+              raise SystemExit(f"git {' '.join(args)} failed in {repo}:\n{result.stderr}")
+          return result.stdout
+
+
+      def has_commits(repo):
+          return subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", "-q", "HEAD"], capture_output=True).returncode == 0
+
+
+      def page_count(wiki):
+          """Markdown pages in the wiki checkout, ignoring _sidebar.md and hidden paths."""
+          return sum(1 for p in wiki.rglob("*.md") if not p.name.startswith("_") and not any(x.startswith(".") for x in p.relative_to(wiki).parts))
+
+
+      def show(repo, rev, path):
+          """File bytes at rev, or None if it does not exist there."""
+          result = subprocess.run(["git", "-C", str(repo), "show", f"{rev}:{path}"], capture_output=True)
+          return result.stdout if result.returncode == 0 else None
+
+
+      def when(iso):
+          return datetime.fromisoformat(iso.replace("Z", "+00:00"))
+
+
+      def last_ci_commit(wiki, ci_author, ci_email=CI_EMAIL):
+          """(hash, committer date) of the newest CI commit in the wiki; the empty tree if there is none.
+
+          A person can pick the CI's display name in GitLab, so the email is matched too when known.
+          """
+          if not has_commits(wiki):
+              return EMPTY_TREE, EPOCH
+          # --author matches "Name <email>" as a regex; anchor both ends so "ci" cannot match "cindy".
+          pattern = f"^{re.escape(ci_author)} <{re.escape(ci_email)}>$" if ci_email else f"^{re.escape(ci_author)} <"
+          out = git(wiki, "log", "-1", "--format=%H%x00%cI", f"--author={pattern}", "--perl-regexp").strip()
+          return tuple(out.split("\x00")) if out else (EMPTY_TREE, EPOCH)
+
+
+      def human_commits(wiki, base):
+          """(hash, name, email, author date, subject) for every wiki commit after base, oldest first."""
+          rng = "HEAD" if base == EMPTY_TREE else f"{base}..HEAD"
+          out = git(wiki, "log", "--reverse", "--format=%H%x00%an%x00%ae%x00%aI%x00%s", rng)
+          return [tuple(line.split("\x00")) for line in out.splitlines() if line]
+
+
+      def changed_files(wiki, commit):
+          """(status, path, old_path) per file in one wiki commit. A rename git can pair by content
+          (-M25%) comes through as ("R", new, old); everything else has old_path None."""
+          # core.quotePath=false: otherwise a non-ASCII page name comes back octal-escaped in quotes
+          out = git(wiki, "-c", "core.quotePath=false", "show", "--name-status", "--format=", "-M25%", commit)
+          rows = []
+          for line in out.splitlines():
+              if not line:
+                  continue
+              parts = line.split("\t")
+              if parts[0].startswith("R"):
+                  rows.append(("R", parts[2], parts[1]))
+              else:
+                  rows.append((parts[0], parts[1], None))
+          return rows
+
+
+      def docs_map_at(wiki, rev):
+          """The wiki page -> docs file record as CI last wrote it; empty when absent or unreadable."""
+          raw = show(wiki, rev, DOCS_MAP)
+          if raw is None:
+              return {}
+          try:
+              return dict(json.loads(raw.decode()).get("pages", {}))
+          except (ValueError, AttributeError):
+              return {}
+
+
+      def merge_file(base, ours, theirs, label):
+          """Three-way merge; returns (text, clean)."""
+          with tempfile.TemporaryDirectory() as tmp:
+              paths = []
+              for name, text in (("ours", ours), ("base", base or ""), ("theirs", theirs)):
+                  p = Path(tmp) / name
+                  p.write_text(text)
+                  paths.append(str(p))
+              result = subprocess.run(["git", "merge-file", "-p", "-L", "repo", "-L", "last-sync", "-L", label, *paths],
+                                      capture_output=True, text=True)
+              return result.stdout, result.returncode == 0
+
+
+      class Puller:
+          def __init__(self, repo, docs, wiki, flt, ci_author, ci_email, dry_run):
+              self.repo, self.docs, self.wiki, self.flt = repo, docs, wiki, flt
+              self.ci_author, self.dry_run = ci_author, dry_run
+              self.base, self.base_date = last_ci_commit(wiki, ci_author, ci_email)
+              self.docs_map = docs_map_at(wiki, self.base)   # recorded relationships, the authority
+              self.pulled = 0
+              self.pulled_paths = set()   # written by this run: a later delete in the same batch is not a repo edit
+              self.claimed = {}           # docs path -> wiki page that wrote it this run (two claimants = refuse)
+
+          # --- repo side helpers ---------------------------------------------------------------
+          def repo_rel(self, dest):
+              return str(self.docs.relative_to(self.repo) / dest)
+
+          def repo_edited_since_sync(self, dest):
+              """Did the repo change this file after CI last synced, other than through this run's own pulls?"""
+              if dest in self.pulled_paths:
+                  return False
+              # Strictly after the CI commit: the repo commit CI synced from can share its second.
+              out = git(self.repo, "log", "-1", "--format=%cI", "--", self.repo_rel(dest)).strip()
+              return bool(out) and when(out) > when(self.base_date)
+
+          def repo_last_edit(self, dest):
+              out = git(self.repo, "log", "-1", "--format=%aI", "--", self.repo_rel(dest)).strip()
+              return when(out) if out else when(EPOCH)
+
+          def dest_for(self, rel):
+              """docs/ path for a wiki page. `rel` is a wiki-relative Path from changed_files (git's own
+              listing), never user input.
+
+              Recorded first: a page CI wrote is in .gitlab/docs-map.json and maps back exactly, at any
+              depth, whatever the folders look like. Only a page born in the wiki UI falls to the rule:
+              it is a section index when the section exists on either side (a wiki folder of that name,
+              or a docs folder of that name, which may hold only .pages or attachments the wiki never
+              sees), else a plain page. home.md is always index.md. A docs page X.md beside a folder X/
+              with its own index.md cannot occur: wiki-sync.py refuses to write such a tree."""
+              if str(rel) in self.docs_map:
+                  return Path(self.docs_map[str(rel)])
+              if str(rel) == "home.md":
+                  return Path(INDEX)
+              section = rel.parent / rel.stem
+              if (self.docs / section).is_dir() or (self.wiki / section).is_dir():
+                  return section / INDEX
+              return rel
+
+          def claim(self, dest, rel):
+              """Two wiki pages may not land on one docs file in a run: a copy made in the UI onto a
+              path whose rule already points at a mapped file. Refusing leaves both wiki pages in
+              place (the caller stops before the wiki is rewritten) and puts the decision on a person."""
+              other = self.claimed.get(dest)
+              if other is not None and other != rel:
+                  raise SystemExit(f"wiki pages {other} and {rel} both map to docs/{dest}; rename one in the wiki")
+              self.claimed[dest] = rel
+
+          def convert(self, text, rel):
+              """Wiki page text -> (docs-relative path, docs-form text)."""
+              dest = self.dest_for(rel)
+              unresolved = []
+              out = wiki_import.rewrite(text, self.wiki / rel, self.wiki, dest, unresolved, self.flt)
+              for u in unresolved:
+                  print(f"  unresolved link left as-is: {u}")
+              return dest, out
+
+          def docs_file_for(self, rel):
+              """Where a (possibly deleted) wiki page lives in docs/, or None. The section may be gone
+              with the page, so both mappings are tried: the section index, then the plain path."""
+              candidates = [self.dest_for(rel), rel.parent / rel.stem / INDEX, rel]
+              return next((c for c in candidates if (self.docs / c).exists()), None)
+
+          # --- one wiki commit -------------------------------------------------------------------
+          def run(self):
+              """Apply every human wiki commit since the last sync; a wiped wiki is a reset, not a mass delete."""
+              if not has_commits(self.wiki):
+                  print("wiki is empty (no commits): nothing to pull, it will be seeded from docs/")
+                  return
+              commits = human_commits(self.wiki, self.base)
+              if not commits:
+                  print("wiki has no edits since the last sync")
+                  return
+              if page_count(self.wiki) == 0:
+                  print(f"wiki holds no pages after {len(commits)} commit(s): treating it as wiped, "
+                        "nothing is pulled or deleted, it will be reseeded from docs/")
+                  return
+              for commit in commits:
+                  self.apply(*commit)
+              print(f"{self.pulled} file(s) pulled from {len(commits)} wiki commit(s)")
+
+          def apply(self, chash, name, email, date, subject):
+              touched = []
+              for status, path, old_path in changed_files(self.wiki, chash):
+                  rel = Path(path)
+                  if rel.name.startswith("_") or any(p.startswith(".") for p in rel.parts) or not self.flt.allows(rel):
+                      continue  # _sidebar.md, GitLab's .gitlab/ files and excluded paths are wiki furniture
+                  if status == "R":
+                      touched.extend(self.pull_rename(Path(old_path), rel, chash))
+                      continue
+                  dest = self.pull_page(status, rel, chash, when(date), name) if rel.suffix == ".md" \
+                      else self.pull_attachment(status, rel, chash)
+                  if dest:
+                      touched.append(dest)
+              if not touched:
+                  return
+              self.pulled += len(touched)
+              self.pulled_paths.update(touched)
+              if self.dry_run:
+                  print(f"dry-run: would commit {len(touched)} file(s) as {name} <{email}>: {subject}")
+                  return
+              git(self.repo, "add", "-A", "--", *[self.repo_rel(t) for t in touched])
+              env = dict(os.environ, GIT_AUTHOR_NAME=name, GIT_AUTHOR_EMAIL=email, GIT_AUTHOR_DATE=date)
+              git(self.repo, "commit", "-q", "-m", f"wiki: {subject}\n\nPulled from wiki commit {chash[:8]} by {name}.", env=env)
+              print(f"committed {len(touched)} file(s) as {name} <{email}>: {subject}")
+
+          def pull_rename(self, old, new, chash):
+              """A page renamed in the wiki: move its docs file (history follows) and write the new
+              content there. The old page's docs file is the recorded one; the new path is unrecorded
+              by definition, so it follows the rule."""
+              source = self.docs_file_for(old)
+              touched = []
+              if new.suffix != ".md":
+                  touched += [d for d in (self.pull_attachment("D", old, chash), self.pull_attachment("A", new, chash)) if d]
+                  return touched
+              dest, theirs = self.convert(show(self.wiki, chash, str(new)).decode(), new)
+              self.claim(dest, new)
+              print(f"rename {old} -> {new}: docs {source} -> {dest}")
+              if not self.dry_run:
+                  (self.docs / dest).parent.mkdir(parents=True, exist_ok=True)
+                  if source and source != dest:
+                      git(self.repo, "mv", "-k", self.repo_rel(source), self.repo_rel(dest))
+                  (self.docs / dest).write_text(theirs)
+              # the old path is already staged by git mv (and gone from disk), so only dest is re-added
+              touched.append(dest)
+              return touched
+
+          def pull_page(self, status, rel, chash, date, who):
+              if status == "D":
+                  return self.delete_page(rel, who)
+              dest, theirs = self.convert(show(self.wiki, chash, str(rel)).decode(), rel)
+              self.claim(dest, rel)
+              target = self.docs / dest
+              ours = target.read_text() if target.exists() else None
+              base_wiki = show(self.wiki, self.base, str(rel))
+              base = self.convert(base_wiki.decode(), rel)[1] if base_wiki is not None else None
+              outcome = self.reconcile(dest, base, ours, theirs, date, who)
+              if outcome is None:
+                  return None
+              merged, how = outcome
+              print(f"pull   {rel} -> {dest} ({how})")
+              if not self.dry_run:
+                  target.parent.mkdir(parents=True, exist_ok=True)
+                  target.write_text(merged)
+              return dest
+
+          def reconcile(self, dest, base, ours, theirs, date, who):
+              """(text to write, how) for one page, or None when docs/ should stay as it is."""
+              if ours == theirs:
+                  return None
+              if ours is None:
+                  if base is not None and self.repo_last_edit(dest) > date:
+                      print(f"keep   {dest}: deleted in repo after the wiki edit, repo wins")
+                      return None
+                  return theirs, "new" if base is None else "restored, wiki edit is newer than the repo delete"
+              if base == ours:
+                  return theirs, "fast-forward"
+              merged, clean = merge_file(base, ours, theirs, f"wiki ({who})")
+              if clean:
+                  return merged, "merged with repo edits"
+              if date >= self.repo_last_edit(dest):
+                  return theirs, "conflict, wiki edit is newer, wiki wins"
+              print(f"keep   {dest}: conflict, repo edit is newer, repo wins")
+              return None
+
+          def delete_page(self, rel, who):
+              dest = self.docs_file_for(rel)
+              if dest is None:
+                  return None
+              if self.repo_edited_since_sync(dest):
+                  print(f"keep   {dest}: deleted in wiki but edited in repo since the sync")
+                  return None
+              print(f"delete {dest} (removed in wiki by {who})")
+              if not self.dry_run:
+                  (self.docs / dest).unlink()
+              return dest
+
+          def pull_attachment(self, status, rel, chash):
+              target = self.docs / rel
+              if status == "D":
+                  if not target.exists():
+                      return None
+                  print(f"delete {rel}")
+                  if not self.dry_run:
+                      target.unlink()
+                  return rel
+              data = show(self.wiki, chash, str(rel))
+              if target.exists() and target.read_bytes() == data:
+                  return None
+              print(f"pull   {rel} (attachment)")
+              if not self.dry_run:
+                  target.parent.mkdir(parents=True, exist_ok=True)
+                  target.write_bytes(data)
+              return rel
+
+
+      def main(docs, wiki, flt=None, ci_author=CI_AUTHOR, dry_run=False, repo=None, ci_email=CI_EMAIL):
+          flt = flt or docfilter.Filter()
+          if not (wiki / ".git").exists():
+              raise SystemExit(f"{wiki} is not a git clone of the wiki")
+          if (docs / ".git").exists():
+              raise SystemExit(f"{docs}/.git exists: docs/ must be a plain folder of the repo, not a nested repository")
+          repo = Path(repo or git(docs.parent, "rev-parse", "--show-toplevel").strip()).resolve()
+          Puller(repo, docs.resolve(), wiki.resolve(), flt, ci_author, ci_email, dry_run).run()
+          return 0
+
+
+      def cli(argv=None):
+          parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+          parser.add_argument("docs", type=Path)
+          parser.add_argument("wiki", type=Path)
+          parser.add_argument("--ci-author", default=CI_AUTHOR, help="author name wiki-sync.py commits as")
+          parser.add_argument("--ci-email", default=CI_EMAIL, help="its email; when given, both must match")
+          parser.add_argument("--repo", type=Path, help="repo to commit into (default: the one containing DOCS_DIR)")
+          parser.add_argument("--dry-run", action="store_true", help="report, change nothing")
+          docfilter.add_arguments(parser)
+          args = parser.parse_args(argv)
+          sys.exit(main(args.docs.resolve(), args.wiki.resolve(), docfilter.from_args(args), args.ci_author, args.dry_run,
+                        args.repo, args.ci_email))
+
+
+      if __name__ == "__main__":
+          cli()
+      CI_TPL_EMBED_EOF
+      cat > "$CI_TPL_RUNTIME_DIR/wiki-import.py" <<'CI_TPL_EMBED_EOF' || exit 1
+      #!/usr/bin/env python3
+      """One-time import of an existing GitLab wiki into a docs/ tree that wiki-sync.py can mirror back.
+
+      usage: wiki-import.py WIKI_CLONE DOCS_DIR [--include P]... [--exclude P]... [--config mkdocs.yml]
+
+      Takes a clone of <project>.wiki.git (root pages as <name>.md, child pages under <name>/,
+      attachments under uploads/) and writes:
+
+          docs/index.md                      from home.md (or generated: a list of the top level)
+          docs/<name>/index.md               from each root page <name>.md that has children
+          docs/<name>.md                     from each root page without children
+          docs/<name>/<child>.md             unchanged path
+          docs/uploads/...                   attachments, unchanged path (anywhere; nested ones too)
+
+      Folders that hold pages but no landing page get a generated index.md listing them, so a wiki
+      made of root folders only (operations/, engineering/) gets section pages and a home page.
+      Generated pages are ordinary files; edit them afterwards.
+
+      Links are rewritten to relative Markdown links with the .md extension, the style that renders
+      in GitLab's file view, in MkDocs and (after wiki-sync.py rewrites them back) in the wiki.
+      Wiki links come in several forms; each target is tried against the wiki root first (how GitLab
+      resolves them) and then against the page's own directory, with and without .md. Unresolvable
+      links are left as they are and listed at the end so you can fix them by hand.
+
+      --include / --exclude apply to wiki paths (gitignore-style, see docfilter.py); a link to an
+      excluded page is reported as unresolved rather than rewritten.
+      """
+      import argparse
+      import os
+      import re
+      import shutil
+      import sys
+      import urllib.parse
+      from pathlib import Path
+
+      sys.path.insert(0, str(Path(__file__).resolve().parent))
+      import docfilter  # noqa: E402
+
+      LINK = re.compile(r"(\]\()([^)#\s]+?)(#[^)]*)?(\))")
+
+
+      def link_quote(path: str) -> str:
+          """Percent-encode only what breaks a Markdown link target; unicode names stay readable."""
+          return re.sub(r"[ %#?]", lambda m: urllib.parse.quote(m.group()), path)
+      INDEX = "index.md"
+
+
+      def is_page(p: Path) -> bool:
+          return p.suffix == ".md" and not p.name.startswith("_")
+
+
+      def new_location(rel: Path, wiki: Path) -> Path:
+          """Where a wiki page lands in docs/: the exact inverse of wiki-sync.py's wiki_path.
+
+          home.md -> index.md; a page beside a folder of the same name, at any depth
+          (compute/kubernetes.md beside compute/kubernetes/), is that section's index.md.
+          """
+          if str(rel) == "home.md":
+              return Path(INDEX)
+          if (wiki / rel.parent / rel.stem).is_dir():
+              return rel.parent / rel.stem / INDEX
+          return rel
+
+
+      def resolve_target(target: str, page: Path, wiki: Path, flt: docfilter.Filter):
+          """Return the wiki-relative path of a link target, or None.
+
+          GitLab resolves `./x`, `../x` and anything ending in .md against the page's own directory,
+          and a bare `x` or `/x` against the wiki root. Try it that way round first, then the other,
+          so a sibling and a root page with the same name are told apart the way the UI does.
+          """
+          target = urllib.parse.unquote(target)
+          stripped = target.lstrip("/")
+          page_dir_first = target.startswith(("./", "../")) or target.endswith(".md")
+          bases = (page.parent, wiki) if page_dir_first else (wiki, page.parent)
+          for base in bases:
+              for name in (stripped, stripped + ".md", target, target + ".md"):
+                  candidate = base / name
+                  try:
+                      rel = candidate.resolve().relative_to(wiki.resolve())
+                  except ValueError:
+                      continue
+                  if candidate.is_file() and flt.allows(rel):
+                      return rel
+          return None
+
+
+      def rewrite(text: str, page: Path, wiki: Path, dest: Path, unresolved: list, flt: docfilter.Filter) -> str:
+          def sub(m):
+              target = m.group(2)
+              if "://" in target or target.startswith(("mailto:", "/uploads/")):
+                  return m.group(0)   # /uploads/ is the project's upload area, not the wiki's
+              found = resolve_target(target, page, wiki, flt)
+              if found is None:
+                  unresolved.append(f"{page.relative_to(wiki)}: {target}")
+                  return m.group(0)
+              new_target = new_location(found, wiki) if is_page(found) else found
+              rel = link_quote(os.path.relpath(new_target, dest.parent))
+              return f"{m.group(1)}{rel}{m.group(3) or ''}{m.group(4)}"
+
+          return LINK.sub(sub, text)
+
+
+      def import_page(src: Path, wiki: Path, docs: Path, unresolved: list, flt: docfilter.Filter) -> None:
+          dest = new_location(src.relative_to(wiki), wiki)
+          out = docs / dest
+          out.parent.mkdir(parents=True, exist_ok=True)
+          out.write_text(rewrite(src.read_text(), src, wiki, dest, unresolved, flt))
+
+
+      def copy_attachment(src: Path, wiki: Path, docs: Path) -> None:
+          out = docs / src.relative_to(wiki)
+          out.parent.mkdir(parents=True, exist_ok=True)
+          shutil.copy2(src, out)
+
+
+      def title_of(md: Path) -> str:
+          for line in md.read_text().splitlines():
+              if line.startswith("# "):
+                  return line[2:].strip()
+          return md.stem.replace("-", " ")
+
+
+      def listing(title: str, folder: Path) -> str:
+          """A Markdown page linking every page and section directly under folder."""
+          lines = [f"# {title}", ""]
+          for p in sorted(folder.iterdir()):
+              if p.suffix == ".md" and p.name != INDEX:
+                  lines.append(f"- [{title_of(p)}]({p.name})")
+              elif p.is_dir() and (p / INDEX).exists():
+                  lines.append(f"- [{title_of(p / INDEX)}]({p.name}/{INDEX})")
+          return "\n".join(lines) + "\n"
+
+
+      def write_missing_indexes(docs: Path) -> int:
+          """Give every folder that holds pages but no index.md a generated landing page, deepest first,
+          so a wiki made of root folders (no root pages) still gets section pages and a home page."""
+          made = 0
+          folders = sorted({p.parent for p in docs.rglob("*.md")} | {docs}, key=lambda d: -len(d.parts))
+          for folder in folders:
+              if not (folder / INDEX).exists():
+                  title = "Home" if folder == docs else folder.name.replace("-", " ")
+                  (folder / INDEX).write_text(listing(title, folder))
+                  made += 1
+          return made
+
+
+      def main(wiki: Path, docs: Path, flt: docfilter.Filter = None) -> None:
+          flt = flt or docfilter.Filter()
+          docs.mkdir(parents=True, exist_ok=True)
+          unresolved, pages, files = [], 0, 0
+          for src in sorted(wiki.rglob("*")):
+              if not src.is_file() or ".git" in src.parts or not flt.allows(src.relative_to(wiki)):
+                  continue
+              if src.suffix != ".md":
+                  copy_attachment(src, wiki, docs)
+                  files += 1
+              elif is_page(src):  # _sidebar.md and templates/ are wiki furniture; wiki-sync regenerates them
+                  import_page(src, wiki, docs, unresolved, flt)
+                  pages += 1
+          generated = write_missing_indexes(docs)
+          print(f"imported {pages} pages, {files} attachments into {docs}, generated {generated} index pages")
+          if unresolved:
+              print(f"{len(unresolved)} links could not be resolved (left unchanged):")
+              for u in unresolved:
+                  print("  " + u)
+
+
+      def cli(argv=None) -> None:
+          parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+          parser.add_argument("wiki", type=Path)
+          parser.add_argument("docs", type=Path)
+          docfilter.add_arguments(parser)
+          args = parser.parse_args(argv)
+          main(args.wiki.resolve(), args.docs.resolve(), docfilter.from_args(args))
+
+
+      if __name__ == "__main__":
+          cli()
+      CI_TPL_EMBED_EOF
+      cat > "$CI_TPL_RUNTIME_DIR/wiki-sync.py" <<'CI_TPL_EMBED_EOF' || exit 1
+      #!/usr/bin/env python3
+      """Mirror a docs/ tree into a GitLab wiki checkout and write _sidebar.md from the .pages nav.
+
+      usage: wiki-sync.py DOCS_DIR WIKI_DIR [--include P]... [--exclude P]... [--config mkdocs.yml]
+
+      - docs/index.md becomes home.md (the wiki front page); section/index.md becomes section.md
+        so the wiki titles the page "section" instead of "index"; every other page keeps its path.
+      - Page links are relative to the page's own directory and carry no extension: `./other`,
+        `../dir/page`, `../home`. GitLab renders those as wiki pages from any depth; a link that
+        ends in .md is served as the raw file instead, and a bare sibling (`other`, no ./) is
+        resolved from the wiki root. Attachment links keep their extension (`../uploads/x/f.png`).
+        The two relocated pages (index.md -> home.md, section/index.md -> section.md) get their
+        relative paths recomputed.
+      - _sidebar.md links are root-absolute (`/section/page`): the sidebar renders on every page,
+        so a relative link there would mean something different on each.
+      - Attachments are copied across; pages and attachments no longer in docs/ are deleted.
+      - .gitlab/docs-map.json records, for every page written, which docs/ file it came from, so the
+        reverse direction (wiki-pull.py) never has to infer where an edited page belongs. GitLab's own
+        .gitlab/redirects.yml in the same folder is left alone.
+      - Sidebar order follows each folder's .pages `nav` list (awesome-pages format); `...`
+        expands to the remaining pages, sorted. Folders without .pages are listed alphabetically.
+      - Filtering follows MkDocs: --exclude and exclude_docs skip paths entirely, --include keeps
+        only matches, not_in_nav keeps the page but drops it from the sidebar (see docfilter.py).
+      """
+      import argparse
+      import json
+      import os
+      import re
+      import urllib.parse
+      import shutil
+      import sys
+      from pathlib import Path
+
+      import yaml
+
+      sys.path.insert(0, str(Path(__file__).resolve().parent))
+      import docfilter  # noqa: E402
+
+      LINK = re.compile(r"(\]\()([^)#\s]+?)(#[^)]*)?(\))")
+
+
+      def link_quote(path: str) -> str:
+          """Percent-encode only what breaks a Markdown link target; unicode names stay readable."""
+          return re.sub(r"[ %#?]", lambda m: urllib.parse.quote(m.group()), path)
+      INDEX = "index.md"
+      PAGES = ".pages"
+      REST = "..."
+      DOCS_MAP = Path(".gitlab/docs-map.json")   # wiki page -> docs file, written by every sync
+
+
+      def title_of(md: Path) -> str:
+          for line in md.read_text().splitlines():
+              if line.startswith("# "):
+                  return line[2:].strip()
+          return md.stem.replace("-", " ").title()
+
+
+      def wiki_path(rel: Path) -> str:
+          if str(rel) == INDEX:
+              return "home"
+          if rel.name == INDEX:
+              return str(rel.parent)
+          return str(rel.with_suffix(""))
+
+
+      def wiki_file(rel: Path) -> Path:
+          """Where a docs file lands in the wiki clone (pages move for home and section indexes)."""
+          return Path(wiki_path(rel) + ".md") if rel.suffix == ".md" else rel
+
+
+      def page_relative(target: str) -> str:
+          """GitLab resolves a bare target from the wiki ROOT, `./x` from the page's own folder, so every
+          link this script writes needs the `./`. It matters for anything at or below the page's folder:
+          a section link `deep/` from compute/nodes.md relpaths to `deep`, which the wiki reads as the
+          root page `deep`. Attachments take the same rule."""
+          return target if target.startswith(("./", "../")) else "./" + target
+
+
+      def page_link(rel: Path, wiki_dir: Path) -> str:
+          """Wiki page link from a page in wiki_dir: page-dir relative, no extension, ./ on siblings."""
+          return page_relative(os.path.relpath(wiki_file(rel), wiki_dir)[:-len(".md")])
+
+
+      def rewrite_links(text: str, page: Path, root: Path, flt: docfilter.Filter) -> str:
+          """Re-point every resolvable relative link so it is relative to the page's wiki location."""
+          page_rel = page.relative_to(root)
+          wiki_dir = wiki_file(page_rel).parent
+
+          def sub(m):
+              target = m.group(2)
+              if "://" in target or target.startswith(("mailto:", "/")):
+                  return m.group(0)
+              resolved = (page.parent / urllib.parse.unquote(target)).resolve()   # "my%20notes.md" is a file with a space
+              try:
+                  rel = resolved.relative_to(root.resolve())
+              except ValueError:
+                  return m.group(0)  # points outside docs/; leave it
+              if not resolved.exists() or not flt.allows(rel):
+                  return m.group(0)
+              new = link_quote(page_link(rel, wiki_dir) if rel.suffix == ".md"
+                               else page_relative(os.path.relpath(rel, wiki_dir)))
+              return f"{m.group(1)}{new}{m.group(3) or ''}{m.group(4)}"
+
+          return LINK.sub(sub, text)
+
+
+      def pages_spec(folder: Path) -> dict:
+          spec_file = folder / PAGES
+          return (yaml.safe_load(spec_file.read_text()) if spec_file.exists() else None) or {}
+
+
+      def nav_items(folder: Path) -> list:
+          """(title_or_None, path) per .pages nav entry, with the string REST kept as a marker."""
+          items = []
+          for item in pages_spec(folder).get("nav") or [REST]:
+              if item == REST:
+                  items.append(REST)
+              else:
+                  title, target = next(iter(item.items())) if isinstance(item, dict) else (None, item)
+                  items.append((title, folder / target))
+          return items
+
+
+      def unlisted(folder: Path, listed: set) -> list:
+          """Pages and page-bearing folders not named in .pages, sorted, for the REST marker."""
+          return sorted(
+              p for p in folder.iterdir()
+              if p not in listed and not p.name.startswith(".")
+              and (p.suffix == ".md" or (p.is_dir() and any(p.rglob("*.md"))))
+          )
+
+
+      def nav_entries(folder: Path, root: Path, flt: docfilter.Filter) -> list:
+          """(title, wiki_link_or_None, children) in .pages order for one folder."""
+          items = nav_items(folder)
+          rest = unlisted(folder, {path for item in items if item != REST for _, path in [item]})
+          entries = []
+          for item in items:
+              for title, path in ([(None, p) for p in rest] if item == REST else [item]):
+                  entry = resolve(title, path, root, flt)
+                  if entry:
+                      entries.append(entry)
+          return entries
+
+
+      def resolve(title, path: Path, root: Path, flt: docfilter.Filter):
+          rel = path.relative_to(root)
+          if not path.exists() or not flt.allows(rel) or not flt.in_nav(rel):
+              return None
+          if path.is_dir():
+              index = path / INDEX
+              fallback = title_of(index) if index.exists() else path.name.replace("-", " ").title()
+              title = title or pages_spec(path).get("title") or fallback
+              link = wiki_path(index.relative_to(root)) if index.exists() else None
+              children = [c for c in nav_entries(path, root, flt) if c[1] != link]
+              return (title, link, children) if link or children else None
+          if path.suffix == ".md":
+              return (title or title_of(path), wiki_path(rel), [])
+          return None
+
+
+      def render(entries, depth=0) -> list:
+          lines = []
+          for title, link, children in entries:
+              # root-absolute: the sidebar shows on every page. Quoted like any other link: a page name
+              # with a space is not a link at all to a strict Markdown reader of the wiki checkout.
+              label = f"[{title}](/{link_quote(link)})" if link else title
+              lines.append("  " * depth + f"- {label}")
+              lines.extend(render(children, depth + 1))
+          return lines
+
+
+      def clear(wiki: Path) -> None:
+          """Remove every synced file, then any directories left empty. .git and GitLab's own .gitlab/
+          (redirects.yml, written when a page is renamed in the UI) are kept; the map is rewritten."""
+          keep = {".git", ".gitlab"}
+          for old in wiki.rglob("*"):
+              if not keep & set(old.parts) and old.is_file():
+                  old.unlink()
+          for empty in sorted((d for d in wiki.rglob("*") if d.is_dir() and not keep & set(d.parts)), reverse=True):
+              if not any(empty.iterdir()):
+                  empty.rmdir()
+
+
+      def check_collisions(docs: Path, flt: docfilter.Filter) -> None:
+          """Two docs pages may not land on one wiki page (a/b.md next to a/b/index.md would)."""
+          seen = {}
+          for src in sorted(docs.rglob("*.md")):
+              rel = src.relative_to(docs)
+              if any(part.startswith(".") for part in rel.parts) or not flt.allows(rel):
+                  continue
+              target = wiki_path(rel)
+              if target in seen:
+                  raise SystemExit(f"{rel} and {seen[target]} would both become wiki page {target}: rename one")
+              seen[target] = rel
+
+
+      def copy_tree(docs: Path, wiki: Path, flt: docfilter.Filter) -> tuple:
+          """Write pages (renamed, links rewritten) and copy attachments. Returns (pages, attachments)."""
+          check_collisions(docs, flt)
+          pages = attachments = 0
+          docs_map = {}
+          for src in docs.rglob("*"):
+              rel = src.relative_to(docs)
+              # Hidden files AND hidden directories are skipped: .pages, .git, .cache, tool caches.
+              # Copying a stray docs/.git or docs/.cache into the wiki clone would corrupt it.
+              if not src.is_file() or any(part.startswith(".") for part in rel.parts) or not flt.allows(rel):
+                  continue
+              if src.suffix == ".md":
+                  dst = wiki / wiki_file(rel)
+                  dst.parent.mkdir(parents=True, exist_ok=True)
+                  # bytes in, bytes out: read_text() would turn CRLF pages into LF ones
+                  dst.write_bytes(rewrite_links(src.read_bytes().decode(), src, docs, flt).encode())
+                  docs_map[str(wiki_file(rel))] = str(rel)
+                  pages += 1
+              else:
+                  dst = wiki / rel
+                  dst.parent.mkdir(parents=True, exist_ok=True)
+                  shutil.copy2(src, dst)
+                  attachments += 1
+          write_docs_map(wiki, docs_map)
+          return pages, attachments
+
+
+      def write_docs_map(wiki: Path, pages: dict) -> None:
+          """The relationship record: which docs/ file each wiki page was written from."""
+          (wiki / DOCS_MAP).parent.mkdir(parents=True, exist_ok=True)
+          (wiki / DOCS_MAP).write_text(json.dumps({"version": 1, "pages": dict(sorted(pages.items()))}, indent=1) + "\n")
+
+
+      def sidebar(docs: Path, flt: docfilter.Filter) -> list:
+          home = docs / INDEX
+          title = (title_of(home) if home.exists() else "") or "Home"
+          entries = [e for e in nav_entries(docs, docs, flt) if e[1] != "home"]  # the header link already covers it
+          return [f"**[{title}](/home)**", ""] + render(entries)
+
+
+      def main(docs: Path, wiki: Path, flt: docfilter.Filter = None) -> None:
+          flt = flt or docfilter.Filter()
+          clear(wiki)
+          pages, attachments = copy_tree(docs, wiki, flt)
+          lines = sidebar(docs, flt)
+          (wiki / "_sidebar.md").write_text("\n".join(lines) + "\n")
+          print(f"synced {pages} pages, {attachments} attachments, sidebar {len(lines) - 2} lines")
+
+
+      def cli(argv=None) -> None:
+          parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+          parser.add_argument("docs", type=Path)
+          parser.add_argument("wiki", type=Path)
+          docfilter.add_arguments(parser)
+          args = parser.parse_args(argv)
+          main(args.docs.resolve(), args.wiki.resolve(), docfilter.from_args(args))
+
+
+      if __name__ == "__main__":
+          cli()
+      CI_TPL_EMBED_EOF
+      cat > "$CI_TPL_RUNTIME_DIR/docfilter.py" <<'CI_TPL_EMBED_EOF' || exit 1
+      """Include/exclude filtering for wiki-sync.py and wiki-import.py, matching MkDocs' rules.
+
+      Patterns are gitignore-style, the same form MkDocs accepts in `exclude_docs` and `not_in_nav`:
+
+          drafts/            a folder anywhere, and everything under it
+          *.tmp              a name anywhere
+          /internal/*.md     anchored at the docs root
+          reference/**       everything under a folder
+
+      Sources, all optional and merged: `--include PATTERN` / `--exclude PATTERN` (repeatable) and
+      `--config mkdocs.yml`, whose `exclude_docs` and `not_in_nav` blocks are read so one file
+      governs the site, the wiki and the import. Excluded paths are neither copied nor linked;
+      `not_in_nav` paths are copied but left out of the wiki sidebar, as MkDocs leaves them out of
+      its nav.
+      """
+      import argparse
+      import fnmatch
+      from pathlib import Path
+
+      import yaml
+
+
+      def matches(rel: str, pattern: str) -> bool:
+          """Does the docs-relative posix path match one gitignore-style pattern?"""
+          pattern = pattern.strip()
+          if not pattern or pattern.startswith("#"):
+              return False
+          pattern = pattern.rstrip("/")
+          parts = rel.split("/")
+          if "/" not in pattern:  # a bare name matches that name at any depth, files and folders alike
+              return any(fnmatch.fnmatchcase(part, pattern) for part in parts)
+          pattern = pattern.lstrip("/")
+          return fnmatch.fnmatchcase(rel, pattern) or fnmatch.fnmatchcase(rel, pattern + "/*")
+
+
+      def patterns(block) -> list:
+          """MkDocs writes these as a multi-line string; a YAML list works too."""
+          if not block:
+              return []
+          lines = block.splitlines() if isinstance(block, str) else list(block)
+          return [line for line in (ln.strip() for ln in lines) if line and not line.startswith("#")]
+
+
+      def read_mkdocs(config: Path) -> tuple:
+          """(exclude_docs, not_in_nav) from mkdocs.yml. BaseLoader keeps the !!python/name tags MkDocs
+          configs carry from breaking the parse; every value comes back as a string, which is all we read."""
+          data = yaml.load(config.read_text(), Loader=yaml.BaseLoader) or {}
+          return patterns(data.get("exclude_docs")), patterns(data.get("not_in_nav"))
+
+
+      class Filter:
+          def __init__(self, include=(), exclude=(), not_in_nav=()):
+              self.include, self.exclude, self.not_in_nav = list(include), list(exclude), list(not_in_nav)
+
+          def allows(self, rel: Path) -> bool:
+              posix = rel.as_posix()
+              if self.include and not any(matches(posix, p) for p in self.include):
+                  return False
+              return not any(matches(posix, p) for p in self.exclude)
+
+          def in_nav(self, rel: Path) -> bool:
+              posix = rel.as_posix()
+              return not any(matches(posix, p) for p in self.not_in_nav)
+
+
+      def add_arguments(parser: argparse.ArgumentParser) -> None:
+          parser.add_argument("--include", action="append", default=[], metavar="PATTERN",
+                              help="only paths matching (repeatable); gitignore-style, relative to the docs root")
+          parser.add_argument("--exclude", action="append", default=[], metavar="PATTERN",
+                              help="skip paths matching (repeatable)")
+          parser.add_argument("--config", type=Path, metavar="MKDOCS_YML",
+                              help="also apply exclude_docs and not_in_nav from this mkdocs.yml")
+
+
+      def from_args(args: argparse.Namespace) -> Filter:
+          exclude, not_in_nav = list(args.exclude), []
+          if args.config:
+              cfg_exclude, cfg_nav = read_mkdocs(args.config)
+              exclude += cfg_exclude
+              not_in_nav += cfg_nav
+          return Filter(args.include, exclude, not_in_nav)
+      CI_TPL_EMBED_EOF
+      cat > "$CI_TPL_RUNTIME_DIR/requirements.txt" <<'CI_TPL_EMBED_EOF' || exit 1
+      # Python dependencies of the wiki runtime, pinned by version and hash.
+      #
+      # docfilter.py and wiki-sync.py import yaml to read exclude_docs / not_in_nav
+      # from a consumer's mkdocs.yml. That is the only third-party import in the
+      # runtime, and the component installs it with --require-hashes so an index
+      # serving a different artefact for this version fails the job instead of
+      # running. Section 12: pin runtime tools and dependency sources.
+      #
+      # Install exactly as the component does:
+      #   pip install --no-deps --require-hashes -r requirements.txt
+      #
+      # Hashes are the PyPI sha256 digests for 6.0.2: the source distribution and the
+      # two CPython 3.12 manylinux wheels (x86_64, aarch64). Add a hash when the
+      # execution image's interpreter or architecture changes, or the install fails
+      # closed — which is the intended behaviour, not a bug to work around.
+      pyyaml==6.0.2 \
+          --hash=sha256:d584d9ec91ad65861cc08d42e834324ef890a082e591037abe114850ff7bbc3e \
+          --hash=sha256:80bab7bfc629882493af4aa31a4cfa43a4c57c83813253626916b8c7ada83476 \
+          --hash=sha256:1f71ea527786de97d1a0cc0eacd1defc0985dcf6b3f17bb77dcfc8c34bec4dc5
+      CI_TPL_EMBED_EOF
+      # END embed
+      python3 -m pip install --quiet --no-deps --require-hashes \
+        -r "$CI_TPL_RUNTIME_DIR/requirements.txt"
+  script:
+    - bash "$CI_TPL_RUNTIME_DIR/wiki-deploy.sh" "$CI_TPL_WORKING_DIRECTORY" "$CI_TPL_WIKI_CLONE"
+  rules: $[[ inputs.run-rules ]]
+  allow_failure: false
+  interruptible: false
+  # Infrastructure only. Section 10.1 forbids weakening an outcome, and any
+  # condition other than runner_system_failure would retry a failed gate;
+  # tests/contracts/test_retry_policy.py fails the build on one.
+  retry:
+    max: $[[ inputs.max-retries ]]
+    when: [runner_system_failure]
+  # Insulation from the consumer's `default:` block (section 13.1). A component
+  # job runs in the image the component pins and the shell the component ships;
+  # a consumer's global image, before_script, after_script, cache, services,
+  # artifacts or hooks reaching it is a component running something nobody
+  # reviewed. Runner selection and timeouts are the consumer's to set, so those
+  # stay inherited. `retry` and `id_tokens` stay too: this component sets both
+  # itself, and a consumer-level definition is a deliberate estate choice.
+  inherit:
+    default: [tags, timeout, interruptible, retry, id_tokens]

@@ -1,0 +1,26 @@
+# examples/container-mirror/.gitlab-ci.yml
+#
+# The whole consumer configuration: an include, its inputs, and two data files
+# in the repository (images.txt, and optionally an RKE2 release manifest).
+#
+# Set these project CI/CD variables, all masked:
+#   REGISTRY_USER, REGISTRY_PASSWORD            the destination registry
+#   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY    the object store
+
+include:
+  - project: 'platform/gitlab-ci-templates'
+    ref: 'REPLACE_WITH_APPROVED_SHARED_CI_REF'
+    file: '/pipelines/container-mirror.yml'
+    inputs:
+      instance: mirror
+      changes-paths:
+        - 'images.txt'
+        - '.gitlab-ci.yml'
+      extra-list-files: images.txt
+      registry: registry.example.com
+      repository-prefix: mirror
+      arch: linux-amd64
+      s3-endpoint: 'https://s3.example.com'
+      s3-bucket: transfer
+      s3-prefix: export
+      have-key: have/blobs.txt

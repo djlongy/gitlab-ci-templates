@@ -1,0 +1,544 @@
+#### Public interface ####
+spec:
+  inputs:
+    instance:
+      type: string
+      description: Unique workload instance used in the job name.
+      regex: '^[a-z][a-z0-9-]{0,47}$'
+    stage:
+      type: string
+      description: Stage supplied by the owning composition.
+      default: verify
+    working-directory:
+      type: string
+      description: Source root to scan, relative to the consumer checkout.
+      default: '.'
+    execution-image:
+      type: string
+      description: >-
+        Approved gitleaks image pinned by digest. The default is the estate
+        mirror of zricethezav/gitleaks:v8.21.2.
+      regex: '^.+@sha256:[0-9a-f]{64}$'
+      default: 'docker.io/zricethezav/gitleaks@sha256:0e99e8821643ea5b235718642b93bb32486af9c8162c8b8731f7cbdc951a7f46'
+    runner-tags:
+      type: array
+      description: Runner selection from the estate profile.
+      default: []
+    max-retries:
+      type: number
+      description: >-
+        How many times the runner may retry this job. The condition is
+        runner_system_failure only, so this retries infrastructure and never a
+        failed gate.
+      default: 1
+      options: [0, 1, 2]
+    run-rules:
+      type: array
+      description: Job eligibility set by the composition.
+      default:
+        - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG'
+    policy-mode:
+      type: string
+      description: >-
+        blocking fails the job on a detected secret; advisory records it and
+        succeeds. An execution failure fails the job in both modes.
+      options: ['blocking', 'advisory']
+      default: 'blocking'
+    history-depth:
+      type: number
+      description: >-
+        Commits of git history to fetch and therefore to scan. 0 fetches the
+        full history. `gitleaks detect` scans commits, not the working tree, so
+        a shallow clone silently narrows the scan; this input sets GIT_DEPTH for
+        the job instead of inheriting whatever the consumer configured.
+      default: 0
+---
+
+#### Executable capability ####
+"$[[ inputs.instance ]]:security-secrets-gitleaks":
+  stage: $[[ inputs.stage ]]
+  image:
+    name: $[[ inputs.execution-image ]]
+    entrypoint: ['']
+  tags: $[[ inputs.runner-tags ]]
+  variables:
+    CI_TPL_WORKING_DIRECTORY: $[[ inputs.working-directory ]]
+    CI_TPL_ARTIFACT_DIR: '.ci-artifacts/$[[ inputs.instance ]]/security-secrets-gitleaks'
+    CI_TPL_POLICY_MODE: $[[ inputs.policy-mode ]]
+    CI_TPL_EXECUTION_IMAGE: $[[ inputs.execution-image ]]
+    GIT_DEPTH: "$[[ inputs.history-depth ]]"
+  dependencies: []
+  before_script:
+    - |
+      project_root=$(cd "$CI_PROJECT_DIR" && pwd -P)
+      cd "$CI_PROJECT_DIR/$CI_TPL_WORKING_DIRECTORY"
+      case "$(pwd -P)" in
+        "$project_root"|"$project_root"/*) ;;
+        *) echo 'ERROR: working-directory escapes the checkout'; exit 1 ;;
+      esac
+      mkdir -p "$CI_PROJECT_DIR/.ci-tpl" "$CI_PROJECT_DIR/$CI_TPL_ARTIFACT_DIR"
+    - |
+      # BEGIN embed dir $CI_PROJECT_DIR/.ci-tpl runtime/scan/scan-gate.sh
+      mkdir -p "$CI_PROJECT_DIR/.ci-tpl" || exit 1
+      cat > "$CI_PROJECT_DIR/.ci-tpl/scan-gate.sh" <<'CI_TPL_EMBED_EOF' || exit 1
+      #!/bin/sh
+      # Scanner gate and evidence writer for the security-* source components.
+      #
+      # Why this exists. A scanner's exit status conflates "found something" with
+      # "could not run": gitleaks returns 1 both for a leak and for a source path it
+      # cannot read, and trivy's default finding code is its generic error code.
+      # Section 10.1 of docs/gitlab-ci-agent-standard.md requires those outcomes to be
+      # distinguished, in advisory mode as well as blocking mode, and forbids
+      # `|| true`, `allow_failure: true` and an unconditional `exit 0` as the advisory
+      # mechanism. classify() below holds each tool's measured code table; a genuinely
+      # ambiguous code is resolved against the report the tool actually wrote.
+      #
+      # It also writes scan-result.json, the section 9.2 evidence record. The record
+      # is written on failure too: a missing record is not a clean scan.
+      #
+      # Delivery. A component `include:` imports YAML and never checks out this
+      # repository, so each template embeds this file verbatim in its job script.
+      # tests/runtime/scan/test_embedded_runtime.py fails when a copy drifts.
+      #
+      # Findings are counted from a severities file, one token per finding, which the
+      # job renders with the tool's own renderer (trivy --format template, grype
+      # --template, semgrep's and ansible-lint's bundled python3 over their own
+      # machine-readable report, gitleaks rule ids). Nothing here parses
+      # JSON: shell JSON parsing is how a nested `severity` key becomes an inflated
+      # count.
+      #
+      # Usage:
+      #   scan-gate.sh severities <threshold>
+      #       Print the trivy --severity list for a canonical minimum severity.
+      #   scan-gate.sh evaluate --tool <t> --status <n> --severities <file>
+      #                         --report <file> [--report <file>...]
+      #                         --threshold <sev> --policy-mode <blocking|advisory>
+      #                         --out <file> [optional metadata flags]
+      #
+      # Exit codes: 0 pass, 1 blocking findings at or above the threshold, 2 execution
+      # error (in both policy modes).
+
+      set -eu
+
+      die() {
+        echo "scan-gate: ERROR: $1" >&2
+        exit 2
+      }
+
+      # Canonical severity scale. `unknown` ranks below negligible and never gates:
+      # an unrated finding is not evidence of a rated one.
+      rank() {
+        case "$1" in
+          critical) echo 5 ;;
+          high) echo 4 ;;
+          medium) echo 3 ;;
+          low) echo 2 ;;
+          negligible) echo 1 ;;
+          *) echo 0 ;;
+        esac
+      }
+
+      trivy_severity_list() {
+        case "$1" in
+          critical) echo 'CRITICAL' ;;
+          high) echo 'HIGH,CRITICAL' ;;
+          medium) echo 'MEDIUM,HIGH,CRITICAL' ;;
+          low) echo 'LOW,MEDIUM,HIGH,CRITICAL' ;;
+          negligible) echo 'UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL' ;;
+          *) die "unknown severity threshold: $1" ;;
+        esac
+      }
+
+      # Map one token from the severities file onto the canonical scale. semgrep
+      # reports ERROR/WARNING/INFO; gitleaks has no severity scale at all, so every
+      # leaked secret is treated as the top severity rather than silently ranking 0.
+      canon() {
+        token=$(printf '%s' "$2" | tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz')
+        case "$1" in
+          semgrep)
+            case "$token" in
+              error) token=high ;;
+              warning) token=medium ;;
+              info|inventory|experiment) token=low ;;
+            esac
+            ;;
+          gitleaks)
+            token=critical
+            ;;
+          ansible-lint)
+            # SARIF levels are the only per-finding severity ansible-lint exposes.
+            # An unrecognised level ranks critical rather than unknown: an unrated
+            # finding would sit below every threshold, so a change in the tool's
+            # output format would turn violations into a pass.
+            case "$token" in
+              error) token=high ;;
+              warning) token=medium ;;
+              note) token=low ;;
+              *) token=critical ;;
+            esac
+            ;;
+        esac
+        case "$token" in
+          critical|high|medium|low|negligible) printf '%s' "$token" ;;
+          *) printf 'unknown' ;;
+        esac
+      }
+
+      # Exit-code tables, measured against the pinned images on 2026/09/15 rather than
+      # taken from the tools' documentation: grype's own docs describe 1 as its error
+      # code, and 0.118.0 in fact returns 2 for findings and 1 for an execution error,
+      # which is the opposite of what an unmeasured table would have said.
+      #
+      # `ambiguous` means the tool really does use one code for both outcomes; the
+      # caller resolves it against the report the tool wrote.
+      classify() {
+        case "$1" in
+          gitleaks)
+            # gitleaks 8.21.2: 0 no leaks, 1 leaks found, 1 also for a missing source
+            # path. Measured: `--source /no/such/path` exits 1.
+            case "$2" in
+              0) echo clean ;;
+              1) echo ambiguous ;;
+              *) echo error ;;
+            esac
+            ;;
+          semgrep)
+            # semgrep 1.79.0 with --error: 0 no findings, 1 findings, 7 unusable rule
+            # config, other non-zero codes are execution failures.
+            case "$2" in
+              0) echo clean ;;
+              1) echo findings ;;
+              *) echo error ;;
+            esac
+            ;;
+          trivy)
+            # trivy 0.69.3 is invoked with --exit-code 13 so that findings cannot be
+            # confused with its generic error code 1.
+            case "$2" in
+              0) echo clean ;;
+              13) echo findings ;;
+              *) echo error ;;
+            esac
+            ;;
+          grype)
+            # grype 0.118.0 with --fail-on: 0 clean, 2 findings at or above the
+            # threshold, 1 execution error (bad flag, unreadable source).
+            case "$2" in
+              0) echo clean ;;
+              2) echo findings ;;
+              *) echo error ;;
+            esac
+            ;;
+          ansible-lint)
+            # ansible-lint 26.4.0 in the pinned image, measured 2026/09/15 rather than
+            # read from its documentation: 0 no violations, 2 violations found, 1 an
+            # unusable configuration, 5 "Linter finished without analyzing any file".
+            # 5 is the one that matters here: a tree the linter never opened is not a
+            # clean tree, and the code says so, so it is an execution error in both
+            # policy modes.
+            case "$2" in
+              0) echo clean ;;
+              2) echo findings ;;
+              *) echo error ;;
+            esac
+            ;;
+          *)
+            die "unsupported tool: $1"
+            ;;
+        esac
+      }
+
+      jstr() {
+        printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+      }
+
+      evaluate() {
+        tool=''
+        status=''
+        severities_file=''
+        reports=''
+        threshold=''
+        policy_mode=''
+        out=''
+        scanner_version='unresolved'
+        scanner_image='unresolved'
+        db_snapshot=''
+        rules_ref=''
+        ignore_unfixed='false'
+        subject_kind='source'
+        working_directory='.'
+
+        while [ "$#" -gt 0 ]; do
+          case "$1" in
+            --tool) tool=$2 ; shift 2 ;;
+            --status) status=$2 ; shift 2 ;;
+            --severities) severities_file=$2 ; shift 2 ;;
+            --report)
+              # The list is whitespace separated, so a path containing whitespace
+              # would silently become two paths.
+              case "$2" in
+                *[[:space:]]*) die "report path must not contain whitespace: $2" ;;
+              esac
+              reports="$reports $2"
+              shift 2
+              ;;
+            --threshold) threshold=$2 ; shift 2 ;;
+            --policy-mode) policy_mode=$2 ; shift 2 ;;
+            --out) out=$2 ; shift 2 ;;
+            --scanner-version) scanner_version=$2 ; shift 2 ;;
+            --scanner-image) scanner_image=$2 ; shift 2 ;;
+            --db-snapshot) db_snapshot=$2 ; shift 2 ;;
+            --rules-ref) rules_ref=$2 ; shift 2 ;;
+            --ignore-unfixed) ignore_unfixed=$2 ; shift 2 ;;
+            --subject-kind) subject_kind=$2 ; shift 2 ;;
+            --working-directory) working_directory=$2 ; shift 2 ;;
+            *) die "unknown argument: $1" ;;
+          esac
+        done
+
+        [ -n "$tool" ] || die 'missing --tool'
+        [ -n "$status" ] || die 'missing --status'
+        [ -n "$severities_file" ] || die 'missing --severities'
+        [ -n "$threshold" ] || die 'missing --threshold'
+        [ -n "$policy_mode" ] || die 'missing --policy-mode'
+        [ -n "$out" ] || die 'missing --out'
+        [ -n "$reports" ] || die 'missing --report'
+
+        case "$policy_mode" in
+          blocking|advisory) ;;
+          *) die "policy-mode must be blocking or advisory, got: $policy_mode" ;;
+        esac
+
+        threshold_rank=$(rank "$threshold")
+        [ "$threshold_rank" -gt 0 ] || die "unknown severity threshold: $threshold"
+
+        # A vulnerability scanner with no database reports nothing and looks clean.
+        case "$tool" in
+          trivy|grype)
+            [ -n "$db_snapshot" ] || die "$tool reported no vulnerability database snapshot; refusing to call an unsourced scan clean"
+            ;;
+        esac
+
+        command -v sha256sum >/dev/null 2>&1 || die 'sha256sum is not available; report hashes cannot be recorded'
+
+        for report in $reports; do
+          [ -f "$report" ] || die "report not written: $report"
+          [ -s "$report" ] || die "report is empty: $report"
+        done
+        [ -f "$severities_file" ] || die "severity list not written: $severities_file"
+
+        count_critical=0
+        count_high=0
+        count_medium=0
+        count_low=0
+        count_negligible=0
+        count_unknown=0
+        at_threshold=0
+
+        while IFS= read -r line || [ -n "$line" ]; do
+          [ -n "$line" ] || continue
+          severity=$(canon "$tool" "$line")
+          case "$severity" in
+            critical) count_critical=$((count_critical + 1)) ;;
+            high) count_high=$((count_high + 1)) ;;
+            medium) count_medium=$((count_medium + 1)) ;;
+            low) count_low=$((count_low + 1)) ;;
+            negligible) count_negligible=$((count_negligible + 1)) ;;
+            *) count_unknown=$((count_unknown + 1)) ;;
+          esac
+          if [ "$(rank "$severity")" -ge "$threshold_rank" ]; then
+            at_threshold=$((at_threshold + 1))
+          fi
+        done < "$severities_file"
+
+        total=$((count_critical + count_high + count_medium + count_low + count_negligible + count_unknown))
+
+        outcome=$(classify "$tool" "$status")
+        detail=''
+        if [ "$outcome" = ambiguous ]; then
+          if [ "$at_threshold" -gt 0 ]; then
+            outcome=findings
+            detail="exit $status disambiguated by $at_threshold finding(s) at or above $threshold"
+          else
+            outcome=error
+            detail="exit $status with no finding at or above $threshold; treated as an execution failure"
+          fi
+        fi
+        if [ "$outcome" = clean ] && [ "$at_threshold" -gt 0 ]; then
+          outcome=error
+          detail="$tool exited 0 while reporting $at_threshold finding(s) at or above $threshold; the gate did not run"
+        fi
+        if [ "$outcome" = findings ] && [ "$at_threshold" -eq 0 ]; then
+          # semgrep --error fails on any finding regardless of severity. Findings
+          # below the threshold are recorded, not gated.
+          outcome=below-threshold
+          detail="$total finding(s) recorded, none at or above $threshold"
+        fi
+
+        case "$outcome" in
+          error) completion=failed ;;
+          *) completion=completed ;;
+        esac
+
+        mkdir -p "$(dirname "$out")"
+        {
+          printf '{\n'
+          printf '  "schema_version": 1,\n'
+          printf '  "subject": {\n'
+          printf '    "kind": "%s",\n' "$(jstr "$subject_kind")"
+          printf '    "project": "%s",\n' "$(jstr "${CI_PROJECT_PATH:-unresolved}")"
+          printf '    "commit": "%s",\n' "$(jstr "${CI_COMMIT_SHA:-unresolved}")"
+          printf '    "working_directory": "%s"\n' "$(jstr "$working_directory")"
+          printf '  },\n'
+          printf '  "scanner": {\n'
+          printf '    "name": "%s",\n' "$(jstr "$tool")"
+          printf '    "version": "%s",\n' "$(jstr "$scanner_version")"
+          printf '    "image": "%s",\n' "$(jstr "$scanner_image")"
+          printf '    "exit_status": %s,\n' "$status"
+          printf '    "rules_ref": "%s"\n' "$(jstr "$rules_ref")"
+          printf '  },\n'
+          printf '  "database": {\n'
+          printf '    "snapshot": "%s"\n' "$(jstr "${db_snapshot:-not-applicable}")"
+          printf '  },\n'
+          printf '  "completion": "%s",\n' "$completion"
+          printf '  "outcome": "%s",\n' "$outcome"
+          printf '  "detail": "%s",\n' "$(jstr "$detail")"
+          printf '  "counts": {\n'
+          printf '    "total": %s,\n' "$total"
+          printf '    "at_or_above_threshold": %s,\n' "$at_threshold"
+          printf '    "critical": %s,\n' "$count_critical"
+          printf '    "high": %s,\n' "$count_high"
+          printf '    "medium": %s,\n' "$count_medium"
+          printf '    "low": %s,\n' "$count_low"
+          printf '    "negligible": %s,\n' "$count_negligible"
+          printf '    "unknown": %s\n' "$count_unknown"
+          printf '  },\n'
+          printf '  "policy": {\n'
+          printf '    "mode": "%s",\n' "$(jstr "$policy_mode")"
+          printf '    "threshold": "%s",\n' "$(jstr "$threshold")"
+          printf '    "ignore_unfixed": %s,\n' "$([ "$ignore_unfixed" = true ] && echo true || echo false)"
+          printf '    "exceptions": []\n'
+          printf '  },\n'
+          printf '  "reports": [\n'
+          first=1
+          for report in $reports; do
+            if [ "$first" -eq 1 ]; then first=0; else printf ',\n'; fi
+            printf '    {"path": "%s", "sha256": "%s"}' \
+              "$(jstr "$report")" "$(sha256sum "$report" | cut -d' ' -f1)"
+          done
+          printf '\n  ],\n'
+          printf '  "created_at": "%s",\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          printf '  "pipeline_id": "%s",\n' "$(jstr "${CI_PIPELINE_ID:-unresolved}")"
+          printf '  "job_id": "%s"\n' "$(jstr "${CI_JOB_ID:-unresolved}")"
+          printf '}\n'
+        } > "$out"
+
+        echo "scan-gate: $tool exit $status -> $outcome ($total finding(s), $at_threshold at or above $threshold)"
+        [ -z "$detail" ] || echo "scan-gate: $detail"
+        echo "scan-gate: evidence written to $out"
+
+        case "$outcome" in
+          error)
+            echo "scan-gate: FAIL: the scan did not complete correctly. Advisory mode does not cover execution failures." >&2
+            exit 2
+            ;;
+          findings)
+            if [ "$policy_mode" = advisory ]; then
+              echo "scan-gate: advisory mode: $at_threshold finding(s) at or above $threshold recorded, scan completed correctly."
+              exit 0
+            fi
+            echo "scan-gate: FAIL: $at_threshold finding(s) at or above $threshold." >&2
+            exit 1
+            ;;
+          *)
+            echo "scan-gate: PASS: no finding at or above $threshold."
+            exit 0
+            ;;
+        esac
+      }
+
+      case "${1:-}" in
+        severities)
+          [ "$#" -eq 2 ] || die 'usage: scan-gate.sh severities <threshold>'
+          trivy_severity_list "$2"
+          ;;
+        evaluate)
+          shift
+          evaluate "$@"
+          ;;
+        *)
+          die 'usage: scan-gate.sh severities <threshold> | scan-gate.sh evaluate ...'
+          ;;
+      esac
+      CI_TPL_EMBED_EOF
+      chmod +x "$CI_PROJECT_DIR/.ci-tpl/scan-gate.sh" || exit 1
+      # END embed
+  script:
+    - |
+      artifacts="$CI_PROJECT_DIR/$CI_TPL_ARTIFACT_DIR"
+      echo "gitleaks scanning $(git rev-list --count HEAD) commit(s) of history (GIT_DEPTH=$GIT_DEPTH)"
+      set +e
+      gitleaks detect --source . --redact \
+        --report-format json --report-path "$artifacts/gitleaks.json"
+      CI_TPL_STATUS=$?
+      set -e
+    - |
+      artifacts="$CI_PROJECT_DIR/$CI_TPL_ARTIFACT_DIR"
+      # gitleaks has no severity scale, so the severity list is one line per
+      # finding and scan-gate.sh ranks every leaked secret at the top severity.
+      # RuleID appears exactly once per finding in the JSON report.
+      #
+      # The status is captured rather than left to the pipeline. A clean report
+      # is `[]`, grep matches nothing and exits 1, and the runner's
+      # `set -eo pipefail` killed the job there, before the gate ran and before
+      # scan-result.json was written: platform/cluster-gitops MR !7 pipeline 5663 exited
+      # 1 on "no leaks found". Exit 1 is no match and 2 or more is a real read
+      # failure, which must still fail rather than count as zero findings.
+      set +e
+      grep -o '"RuleID"' "$artifacts/gitleaks.json" > "$artifacts/severities.txt"
+      CI_TPL_GREP_STATUS=$?
+      set -e
+      if [ "$CI_TPL_GREP_STATUS" -gt 1 ]; then
+        echo "ERROR: cannot read the gitleaks report at $artifacts/gitleaks.json" >&2
+        exit 2
+      fi
+      echo "gitleaks findings: $(wc -l < "$artifacts/severities.txt" | tr -d ' ')"
+    - |
+      artifacts="$CI_PROJECT_DIR/$CI_TPL_ARTIFACT_DIR"
+      sh "$CI_PROJECT_DIR/.ci-tpl/scan-gate.sh" evaluate \
+        --tool gitleaks \
+        --status "$CI_TPL_STATUS" \
+        --severities "$artifacts/severities.txt" \
+        --report "$artifacts/gitleaks.json" \
+        --threshold critical \
+        --policy-mode "$CI_TPL_POLICY_MODE" \
+        --scanner-version "$(gitleaks version 2>/dev/null | tr -d '\r')" \
+        --scanner-image "$CI_TPL_EXECUTION_IMAGE" \
+        --working-directory "$CI_TPL_WORKING_DIRECTORY" \
+        --out "$artifacts/scan-result.json"
+  artifacts:
+    name: '$[[ inputs.instance ]]-security-secrets-gitleaks-$CI_JOB_ID'
+    paths:
+      - '.ci-artifacts/$[[ inputs.instance ]]/security-secrets-gitleaks/'
+    when: always
+    expire_in: 1 week
+  rules: $[[ inputs.run-rules ]]
+  allow_failure: false
+  interruptible: true
+  # Infrastructure only. Section 10.1 forbids weakening an outcome, and any
+  # condition other than runner_system_failure would retry a failed gate;
+  # tests/contracts/test_retry_policy.py fails the build on one.
+  retry:
+    max: $[[ inputs.max-retries ]]
+    when: [runner_system_failure]
+  # Insulation from the consumer's `default:` block (section 13.1). A component
+  # job runs in the image the component pins and the shell the component ships;
+  # a consumer's global image, before_script, after_script, cache, services,
+  # artifacts or hooks reaching it is a component running something nobody
+  # reviewed. Runner selection and timeouts are the consumer's to set, so those
+  # stay inherited. `retry` and `id_tokens` stay too: this component sets both
+  # itself, and a consumer-level definition is a deliberate estate choice.
+  inherit:
+    default: [tags, timeout, interruptible, retry, id_tokens]

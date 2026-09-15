@@ -1,0 +1,59 @@
+---
+# Contract for templates/terraform-validate. The other half of the contract is
+# the spec:inputs header of template.yml.
+name: terraform-validate
+kind: component
+status: released
+introduced_in: 1.0.0
+minimum_gitlab: '18.9'
+
+# Retry policy: the `max-retries` input (0, 1 or 2, default 1) sets `retry: max`,
+# and `retry: when` is `runner_system_failure` and nothing else. A job killed by
+# its runner runs again; a failed gate never does.
+emitted_jobs:
+  - pattern: '{instance}:terraform-validate'
+    stage: verify
+    blocking: true
+
+outputs: []
+
+required_secrets: []
+
+runtime_image:
+  reference: 'docker.io/hashicorp/terraform@sha256:5820b87995595425074f881500a037b0ccd41158d0d9b44d78f5f120612f2d3d'
+  pinning: digest
+  tool_versions:
+    terraform: 1.11.4
+
+trust:
+  privileged: false
+  # -backend=false skips the state backend, but init still installs the
+  # providers and modules the configuration requires.
+  network_egress:
+    - registry.example.com
+    - registry.terraform.io
+    - gitlab.example.com
+  protected_ref_required: false
+
+validation:
+  evidence:
+    - source-reviewed
+    - yaml-parsed
+    - gitlab-linted
+    - runtime-tested
+    - integration-tested
+  verified_at: 2026/09/16
+  revision: '1.0.0-rc.2'
+  environment: >-
+    gitlab.example.com 18.9.1-ee, project 18, POST /api/v4/projects/<project-id>/ci/lint.
+    Executed on shared ref 1.0.0-rc.2 in: platform/terraform-modules (15) 5720 and
+    5724 in lockfile-mode module; platform/terraform-dns (16) 5736 and 5744
+    and platform/terraform-hypervisor-roles (22) 5735 in lockfile-mode readonly.
+  notes: >-
+    Linted through the CI Lint API from tests/pipelines/test_terraform_lint.py.
+    The init line each lockfile-mode produces is executed against a terraform
+    stub in tests/runtime/terraform/test_terraform_validate_job_shell.py.
+    Nothing here has been executed in a real pipeline.
+    lockfile-mode: readonly is the default and holds the committed lockfile;
+    module drops -lockfile=readonly for a module repository that commits none,
+    and still passes no -upgrade. An unrecognised value fails the job.

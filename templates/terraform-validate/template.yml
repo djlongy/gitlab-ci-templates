@@ -1,0 +1,122 @@
+---
+# templates/terraform-validate/template.yml
+#
+# Validates an initialised Terraform configuration without backend access and
+# without production credentials. It replaces terraform/validate.yml, whose
+# undeclared DEPLOY_DIR silently fell back to the checkout root and whose
+# `terraform init -backend=false` was free to rewrite the provider lockfile.
+#
+# -lockfile=readonly holds the committed lockfile (section 11.2 item 2). It is
+# the default, and it is wrong for a repository that ships reusable modules:
+# HashiCorp's guidance is that a module does not commit .terraform.lock.hcl, and
+# terraform-module-publish already excludes it from the archive. With no lockfile
+# to honour, init resolves providers afresh and readonly refuses the result with
+# "Provider dependency changes detected". `lockfile-mode: module` drops the flag
+# for exactly that case. It does NOT add -upgrade: the point is to let init
+# record what it resolved, not to move versions.
+#
+# -backend=false skips the state backend; it does NOT make the job offline,
+# because init still fetches the providers and modules the configuration needs.
+
+#### Public interface ####
+spec:
+  inputs:
+    instance:
+      type: string
+      description: Unique workload instance used in the job name.
+      regex: '^[a-z][a-z0-9-]{0,47}$'
+    stage:
+      type: string
+      description: Stage supplied by the owning composition.
+      default: verify
+    working-directory:
+      type: string
+      description: Terraform root relative to the consumer checkout.
+      default: '.'
+    lockfile-mode:
+      type: string
+      description: >-
+        How init treats .terraform.lock.hcl. `readonly` holds the committed
+        lockfile and fails when the configuration needs providers it does not
+        pin. `module` is for a module repository that commits no lockfile: init
+        runs without -lockfile=readonly, and still without -upgrade.
+      options: ['readonly', 'module']
+      default: readonly
+    execution-image:
+      type: string
+      description: >-
+        Approved Terraform execution image pinned by digest. The default is
+        hashicorp/terraform:1.11 (Terraform 1.11.4) through the estate's
+        pull-through mirror.
+      regex: '^.+@sha256:[0-9a-f]{64}$'
+      default: 'docker.io/hashicorp/terraform@sha256:5820b87995595425074f881500a037b0ccd41158d0d9b44d78f5f120612f2d3d'
+    runner-tags:
+      type: array
+      description: Runner selection from the estate profile.
+      default: []
+    max-retries:
+      type: number
+      description: >-
+        How many times the runner may retry this job. The condition is
+        runner_system_failure only, so this retries infrastructure and never a
+        failed gate.
+      default: 1
+      options: [0, 1, 2]
+    run-rules:
+      type: array
+      description: Job eligibility set by the composition.
+      default:
+        - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG'
+---
+
+#### Executable capability ####
+"$[[ inputs.instance ]]:terraform-validate":
+  stage: $[[ inputs.stage ]]
+  image:
+    name: $[[ inputs.execution-image ]]
+    entrypoint: ['']
+  tags: $[[ inputs.runner-tags ]]
+  variables:
+    CI_TPL_WORKING_DIRECTORY: $[[ inputs.working-directory ]]
+    CI_TPL_LOCKFILE_MODE: $[[ inputs.lockfile-mode ]]
+    TF_IN_AUTOMATION: 'true'
+  dependencies: []
+  before_script:
+    - |
+      project_root=$(cd "$CI_PROJECT_DIR" && pwd -P)
+      cd "$CI_PROJECT_DIR/$CI_TPL_WORKING_DIRECTORY"
+      case "$(pwd -P)" in
+        "$project_root"|"$project_root"/*) ;;
+        *) echo 'ERROR: working-directory escapes the checkout'; exit 1 ;;
+      esac
+    - |
+      # The value is constrained by `options:`, but CI_TPL_LOCKFILE_MODE is a
+      # job variable and a project variable of the same name overrides it. An
+      # unknown value fails rather than choosing a mode.
+      case "$CI_TPL_LOCKFILE_MODE" in
+        readonly) terraform init -backend=false -input=false -lockfile=readonly ;;
+        module) terraform init -backend=false -input=false ;;
+        *) echo "ERROR: unknown lockfile-mode '$CI_TPL_LOCKFILE_MODE'"; exit 1 ;;
+      esac
+  script:
+    - terraform validate -no-color
+  rules: $[[ inputs.run-rules ]]
+  allow_failure: false
+  interruptible: true
+  # Infrastructure only. Section 10.1 forbids weakening an outcome, and any
+  # condition other than runner_system_failure would retry a failed gate;
+  # tests/contracts/test_retry_policy.py fails the build on one.
+  retry:
+    max: $[[ inputs.max-retries ]]
+    when: [runner_system_failure]
+  # Insulation from the consumer's `default:` block (section 13.1). A component
+  # job runs in the image the component pins and the shell the component ships;
+  # a consumer's global image, before_script, after_script, cache, services,
+  # artifacts or hooks reaching it is a component running something nobody
+  # reviewed. Runner selection and timeouts are the consumer's to set, so those
+  # stay inherited. `retry` and `id_tokens` stay too: this component sets both
+  # itself, and a consumer-level definition is a deliberate estate choice.
+  inherit:
+    default: [tags, timeout, interruptible, retry, id_tokens]

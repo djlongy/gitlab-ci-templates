@@ -1,0 +1,863 @@
+---
+# templates/terraform-plan/template.yml
+#
+# Produces the reviewable plan for one Terraform root, state and environment,
+# plus the evidence record terraform-apply validates before it mutates anything
+# (section 9.3). It is one half of the split of terraform/plan-apply.yml; the
+# other half is templates/terraform-apply.
+#
+# The plan is the deployment artifact. It is written under
+# .ci-artifacts/<instance>/terraform-plan/, restricted to developers, and
+# retained for the estate's plan retention rather than the old one hour.
+#
+# Planning is not automatically safe: providers and data sources execute. The
+# default rules therefore admit only default-branch pushes. A composition that
+# wants speculative merge-request plans widens run-rules deliberately, having
+# decided the credentials suit that trust level (section 11.2 item 3).
+
+#### Public interface ####
+spec:
+  inputs:
+    instance:
+      type: string
+      description: Unique workload instance used in the job name and artifact path.
+      regex: '^[a-z][a-z0-9-]{0,47}$'
+    stage:
+      type: string
+      description: Stage supplied by the owning composition.
+      default: plan
+    working-directory:
+      type: string
+      description: Terraform root relative to the consumer checkout.
+      default: '.'
+    environment:
+      type: string
+      description: >-
+        Environment this plan targets. Valid names come from the `environments`
+        list in .ci/estate.yml; this component does not invent new ones.
+      regex: '^[a-z][a-z0-9-]{0,23}$'
+    state-id:
+      type: string
+      description: >-
+        GitLab-managed Terraform state name. Also the resource group, so two
+        jobs touching one state serialise.
+      regex: '^[a-z0-9][a-z0-9._-]{0,63}$'
+    state-username:
+      type: string
+      description: HTTP backend username that pairs with the state token.
+      default: 'gitlab-ci-token'
+    state-token-variable:
+      type: string
+      description: >-
+        NAME of the masked CI variable holding the state backend token. The
+        value never appears in an input (section 6.1).
+      regex: '^[A-Z][A-Z0-9_]{0,63}$'
+      default: 'GITLAB_TF_STATE_TOKEN'
+    execution-image:
+      type: string
+      description: >-
+        Approved Terraform execution image pinned by digest. The default is
+        hashicorp/terraform:1.11 (Terraform 1.11.4) through the estate's
+        pull-through mirror.
+      regex: '^.+@sha256:[0-9a-f]{64}$'
+      default: 'docker.io/hashicorp/terraform@sha256:5820b87995595425074f881500a037b0ccd41158d0d9b44d78f5f120612f2d3d'
+    runner-tags:
+      type: array
+      description: Runner selection from the estate profile.
+      default: []
+    max-retries:
+      type: number
+      description: >-
+        How many times the runner may retry this job. The condition is
+        runner_system_failure only, so this retries infrastructure and never a
+        failed gate.
+      default: 1
+      options: [0, 1, 2]
+    var-file:
+      type: string
+      description: >-
+        Optional non-secret variable file relative to the working directory.
+        Files matching *.auto.tfvars are loaded by Terraform without this.
+      default: ''
+    lock-timeout:
+      type: string
+      description: How long Terraform waits for the state lock.
+      default: '3m'
+    plan-expire-in:
+      type: string
+      description: Artifact retention for the plan, from `retention.plans` in the estate profile.
+      default: '7 days'
+    max-plan-age-hours:
+      type: number
+      description: >-
+        Maximum deployable plan age recorded in the evidence. terraform-apply
+        rejects an older plan and must be configured with the same number.
+      default: 24
+    vault-auth:
+      type: boolean
+      description: >-
+        Exchange the job's ID token for a Vault token before running Terraform,
+        for providers that read their credentials from Vault.
+      default: false
+    vault-address:
+      type: string
+      description: Vault address, from `auth.vault.address` in the estate profile.
+      default: 'https://vault.example.com:8200'
+    vault-jwt-path:
+      type: string
+      description: Vault JWT auth mount, from `auth.vault.jwt_mount`.
+      default: 'jwt'
+    vault-role:
+      type: string
+      description: Vault role to bind, from `auth.vault.roles`. Never hardcoded in the job.
+      default: 'gitlab-ci-terraform'
+    run-rules:
+      type: array
+      description: >-
+        Job eligibility set by the composition. The default plans only on a
+        default-branch push.
+      default:
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+---
+
+#### Executable capability ####
+"$[[ inputs.instance ]]:terraform-plan":
+  stage: $[[ inputs.stage ]]
+  image:
+    name: $[[ inputs.execution-image ]]
+    entrypoint: ['']
+  tags: $[[ inputs.runner-tags ]]
+  resource_group: $[[ inputs.state-id ]]
+  id_tokens:
+    VAULT_ID_TOKEN:
+      aud: $[[ inputs.vault-address ]]
+  variables:
+    CI_TPL_INSTANCE: $[[ inputs.instance ]]
+    CI_TPL_WORKING_DIRECTORY: $[[ inputs.working-directory ]]
+    CI_TPL_ENVIRONMENT: $[[ inputs.environment ]]
+    CI_TPL_STATE_ID: $[[ inputs.state-id ]]
+    CI_TPL_VAR_FILE: $[[ inputs.var-file ]]
+    CI_TPL_LOCK_TIMEOUT: $[[ inputs.lock-timeout ]]
+    CI_TPL_MAX_PLAN_AGE_HOURS: '$[[ inputs.max-plan-age-hours ]]'
+    CI_TPL_VAULT_AUTH: '$[[ inputs.vault-auth ]]'
+    CI_TPL_VAULT_JWT_PATH: $[[ inputs.vault-jwt-path ]]
+    CI_TPL_VAULT_ROLE: $[[ inputs.vault-role ]]
+    CI_TPL_RUNTIME: '/tmp/ci-tpl-tfguard.sh'
+    VAULT_ADDR: $[[ inputs.vault-address ]]
+    TF_IN_AUTOMATION: 'true'
+    TF_INPUT: '0'
+    TF_HTTP_ADDRESS: '$CI_API_V4_URL/projects/$CI_PROJECT_ID/terraform/state/$[[ inputs.state-id ]]'
+    TF_HTTP_LOCK_ADDRESS: '$CI_API_V4_URL/projects/$CI_PROJECT_ID/terraform/state/$[[ inputs.state-id ]]/lock'
+    TF_HTTP_UNLOCK_ADDRESS: '$CI_API_V4_URL/projects/$CI_PROJECT_ID/terraform/state/$[[ inputs.state-id ]]/lock'
+    TF_HTTP_LOCK_METHOD: 'POST'
+    TF_HTTP_UNLOCK_METHOD: 'DELETE'
+    TF_HTTP_USERNAME: $[[ inputs.state-username ]]
+    TF_HTTP_PASSWORD: '${$[[ inputs.state-token-variable ]]}'
+  # Source-only: no producer to name, and no needs, so the stage barrier holds.
+  # terraform-apply relies on that: needing this job transitively carries every
+  # gate in the earlier stages (section 8 rule 8).
+  dependencies: []
+  before_script:
+    - |
+      project_root=$(cd "$CI_PROJECT_DIR" && pwd -P)
+      cd "$CI_PROJECT_DIR/$CI_TPL_WORKING_DIRECTORY"
+      case "$(pwd -P)" in
+        "$project_root"|"$project_root"/*) ;;
+        *) echo 'ERROR: working-directory escapes the checkout'; exit 1 ;;
+      esac
+    - |
+      # BEGIN embed file $CI_TPL_RUNTIME runtime/terraform/tfguard.sh
+      cat > "$CI_TPL_RUNTIME" <<'CI_TPL_EMBED_EOF' || exit 1
+      #!/bin/sh
+      # tfguard.sh — Terraform plan evidence and the gates that guard an apply.
+      #
+      # Section 9.3 of docs/gitlab-ci-agent-standard.md defines plan-metadata.json,
+      # section 11.2 items 6 and 7 define what apply must check before it mutates
+      # anything, and section 11.5 defines what a published module archive may
+      # contain. This file implements all three so the templates stay thin.
+      #
+      # WHY ONE FILE, AND WHY IT IS EMBEDDED
+      # A component include imports YAML. The job runs on the CONSUMER checkout, so
+      # nothing from this repository is on disk (section 12: "Do not call adjacent
+      # scripts/... assuming a component include checked out the shared repository").
+      # templates/terraform-{plan,apply,module-publish}/template.yml therefore carry a
+      # base64 copy of this exact file and decode it at job start. Keep the two in
+      # lockstep with:
+      #
+      #     python3 runtime/terraform/embed.py --write
+      #
+      # tests/runtime/terraform/test_embed_lockstep.py fails when they drift.
+      #
+      # PORTABILITY
+      # POSIX sh plus busybox awk, sed, date, sha256sum and tar. The pinned terraform
+      # image (hashicorp/terraform, Alpine 3.21) ships no jq and no python, so JSON is
+      # read with purpose-built awk scanners rather than a parser, and every scanner
+      # has a positive control that fails loudly when the input is not the shape it
+      # expects. A scanner that silently finds nothing is indistinguishable from a
+      # clean plan, which is exactly the failure this guard exists to prevent.
+      #
+      # No eval anywhere. Every argument is passed quoted.
+
+      set -eu
+
+      PROGRAM='tfguard.sh'
+      SCHEMA_VERSION=1
+
+      die() {
+        printf '%s: %s\n' "$PROGRAM" "$*" >&2
+        exit 1
+      }
+
+      note() {
+        printf '%s: %s\n' "$PROGRAM" "$*" >&2
+      }
+
+      require() {
+        # require <value> <what>
+        [ -n "$1" ] || die "missing required argument: $2"
+      }
+
+      # --------------------------------------------------------------------------
+      # Shared helpers
+      # --------------------------------------------------------------------------
+
+      # JSON string escaping for the values we write. Backslash first, then quote,
+      # then the control characters a path or an identifier could plausibly carry.
+      json_escape() {
+        printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/	/\\t/g'
+      }
+
+      sha256_of() {
+        # sha256_of <path> -> bare hex digest
+        [ -f "$1" ] || die "cannot hash a file that is not there: $1"
+        sha256sum "$1" | awk '{print $1}'
+      }
+
+      engine_version() {
+        # The pinned image owns the binary; ask it rather than trusting an input.
+        terraform version 2>/dev/null |
+          awk 'NR == 1 { sub(/^Terraform v/, "", $0); print $0; exit }'
+      }
+
+      # Read one scalar out of a plan-metadata.json this script wrote. The file is
+      # our own artifact in a fixed one-key-per-line shape, so a line matcher is
+      # enough and a JSON parser is not. read_metadata prints nothing and returns 1
+      # when the key is absent, so every caller can tell "absent" from "empty".
+      read_metadata() {
+        # read_metadata <file> <key>
+        awk -v key="$2" '
+          BEGIN { found = 0 }
+          {
+            line = $0
+            sub(/^[ \t]+/, "", line)
+            needle = "\"" key "\":"
+            if (substr(line, 1, length(needle)) != needle) next
+            rest = substr(line, length(needle) + 1)
+            sub(/^[ \t]+/, "", rest)
+            sub(/,$/, "", rest)
+            if (substr(rest, 1, 1) == "\"") {
+              rest = substr(rest, 2, length(rest) - 2)
+              gsub(/\\"/, "\"", rest)
+              gsub(/\\\\/, "\\", rest)
+            }
+            print rest
+            found = 1
+            exit
+          }
+          END { if (!found) exit 1 }
+        ' "$1"
+      }
+
+      expect_metadata() {
+        # expect_metadata <file> <key> -> value, or die
+        value=$(read_metadata "$1" "$2") ||
+          die "plan metadata has no \"$2\" key: $1 is not a plan-metadata.json this version wrote"
+        printf '%s' "$value"
+      }
+
+      compare() {
+        # compare <what> <expected> <actual>
+        if [ "$2" != "$3" ]; then
+          die "$1 mismatch: the saved plan says '$3', this job expects '$2'. Create and review a new plan."
+        fi
+        note "ok: $1 = $2"
+      }
+
+      # RFC 3339 UTC timestamp to epoch seconds, in awk, because busybox date -d and
+      # BSD date -j disagree on everything. Prints nothing and returns 1 when the
+      # timestamp is not the exact shape this script writes.
+      timestamp_to_epoch() {
+        printf '%s\n' "$1" | awk '
+          function days_from_civil(y, m, d,    era, yoe, doy, doe) {
+            if (m <= 2) y = y - 1
+            era = int((y >= 0 ? y : y - 399) / 400)
+            yoe = y - era * 400
+            doy = int((153 * (m + (m > 2 ? -3 : 9)) + 2) / 5) + d - 1
+            doe = yoe * 365 + int(yoe / 4) - int(yoe / 100) + doy
+            return era * 146097 + doe - 719468
+          }
+          {
+            if ($0 !~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z$/) {
+              exit 1
+            }
+            print days_from_civil(substr($0, 1, 4) + 0, substr($0, 6, 2) + 0, substr($0, 9, 2) + 0) * 86400 \
+              + substr($0, 12, 2) * 3600 + substr($0, 15, 2) * 60 + substr($0, 18, 2)
+          }
+        '
+      }
+
+      # --------------------------------------------------------------------------
+      # plan-metadata: write the evidence record beside a saved plan (section 9.3)
+      # --------------------------------------------------------------------------
+
+      cmd_plan_metadata() {
+        plan='' out='' instance='' environment='' state_id='' working_directory=''
+        backend_address='' lockfile='' max_age_seconds=''
+
+        while [ $# -gt 0 ]; do
+          case "$1" in
+            --plan) plan=${2:-}; shift 2 ;;
+            --out) out=${2:-}; shift 2 ;;
+            --instance) instance=${2:-}; shift 2 ;;
+            --environment) environment=${2:-}; shift 2 ;;
+            --state-id) state_id=${2:-}; shift 2 ;;
+            --working-directory) working_directory=${2:-}; shift 2 ;;
+            --backend-address) backend_address=${2:-}; shift 2 ;;
+            --lockfile) lockfile=${2:-}; shift 2 ;;
+            --max-age-seconds) max_age_seconds=${2:-}; shift 2 ;;
+            *) die "plan-metadata: unknown argument $1" ;;
+          esac
+        done
+
+        require "$plan" --plan
+        require "$out" --out
+        require "$instance" --instance
+        require "$environment" --environment
+        require "$state_id" --state-id
+        require "$working_directory" --working-directory
+        require "$lockfile" --lockfile
+        require "$max_age_seconds" --max-age-seconds
+
+        [ -f "$plan" ] || die "terraform wrote no plan file at $plan"
+        [ -s "$plan" ] || die "the plan file at $plan is empty"
+
+        # Section 11.2 item 2: commit and honour the provider lockfile. A root with no
+        # lockfile cannot have its providers pinned, so apply has nothing to compare
+        # against and this stops here rather than recording an absence as a value.
+        [ -f "$lockfile" ] || die "no provider lockfile at $lockfile; commit .terraform.lock.hcl before planning"
+
+        version=$(engine_version)
+        [ -n "$version" ] || die "could not read the terraform version from the execution image"
+
+        created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+        plan_sha=$(sha256_of "$plan")
+        lock_sha=$(sha256_of "$lockfile")
+
+        {
+          printf '{\n'
+          printf '  "schema_version": %s,\n' "$SCHEMA_VERSION"
+          printf '  "engine": "terraform",\n'
+          printf '  "engine_version": "%s",\n' "$(json_escape "$version")"
+          printf '  "instance": "%s",\n' "$(json_escape "$instance")"
+          printf '  "environment": "%s",\n' "$(json_escape "$environment")"
+          printf '  "state_id": "%s",\n' "$(json_escape "$state_id")"
+          printf '  "backend_address": "%s",\n' "$(json_escape "$backend_address")"
+          printf '  "working_directory": "%s",\n' "$(json_escape "$working_directory")"
+          printf '  "source_commit": "%s",\n' "$(json_escape "${CI_COMMIT_SHA:-}")"
+          printf '  "pipeline_id": "%s",\n' "$(json_escape "${CI_PIPELINE_ID:-}")"
+          printf '  "job_id": "%s",\n' "$(json_escape "${CI_JOB_ID:-}")"
+          printf '  "plan_sha256": "%s",\n' "$plan_sha"
+          printf '  "lockfile_sha256": "%s",\n' "$lock_sha"
+          printf '  "created_at": "%s",\n' "$created_at"
+          printf '  "max_age_seconds": %s\n' "$max_age_seconds"
+          printf '}\n'
+        } > "$out"
+
+        # A producer validates its own output before declaring success (section 9.4).
+        for key in schema_version engine engine_version instance environment state_id \
+          working_directory source_commit pipeline_id job_id plan_sha256 \
+          lockfile_sha256 created_at max_age_seconds; do
+          read_metadata "$out" "$key" >/dev/null ||
+            die "the metadata this job just wrote is unreadable: \"$key\" missing from $out"
+        done
+        [ -n "$(read_metadata "$out" source_commit)" ] ||
+          die "source_commit is empty; CI_COMMIT_SHA was not set in this job"
+
+        note "wrote $out for plan $plan_sha"
+      }
+
+      # --------------------------------------------------------------------------
+      # validate-plan: everything section 11.2 item 7 requires before an apply
+      # --------------------------------------------------------------------------
+
+      cmd_validate_plan() {
+        plan='' metadata='' instance='' environment='' state_id='' working_directory=''
+        lockfile='' max_age_seconds='' now=''
+
+        while [ $# -gt 0 ]; do
+          case "$1" in
+            --plan) plan=${2:-}; shift 2 ;;
+            --metadata) metadata=${2:-}; shift 2 ;;
+            --instance) instance=${2:-}; shift 2 ;;
+            --environment) environment=${2:-}; shift 2 ;;
+            --state-id) state_id=${2:-}; shift 2 ;;
+            --working-directory) working_directory=${2:-}; shift 2 ;;
+            --lockfile) lockfile=${2:-}; shift 2 ;;
+            --max-age-seconds) max_age_seconds=${2:-}; shift 2 ;;
+            --now) now=${2:-}; shift 2 ;;
+            *) die "validate-plan: unknown argument $1" ;;
+          esac
+        done
+
+        require "$plan" --plan
+        require "$metadata" --metadata
+        require "$instance" --instance
+        require "$environment" --environment
+        require "$state_id" --state-id
+        require "$working_directory" --working-directory
+        require "$lockfile" --lockfile
+        require "$max_age_seconds" --max-age-seconds
+
+        [ -f "$plan" ] || die "no saved plan at $plan; the producer job did not publish one"
+        [ -f "$metadata" ] || die "no plan metadata at $metadata; this plan carries no evidence and will not be applied"
+        [ -f "$lockfile" ] || die "no provider lockfile at $lockfile in this checkout"
+
+        # Every value is read into a variable before it is compared. A failing
+        # expect_metadata inside a command-substituted argument would exit only the
+        # subshell and leave the caller comparing against an empty string.
+        meta_schema=$(expect_metadata "$metadata" schema_version)
+        meta_engine=$(expect_metadata "$metadata" engine)
+        meta_engine_version=$(expect_metadata "$metadata" engine_version)
+        meta_instance=$(expect_metadata "$metadata" instance)
+        meta_environment=$(expect_metadata "$metadata" environment)
+        meta_state_id=$(expect_metadata "$metadata" state_id)
+        meta_working_directory=$(expect_metadata "$metadata" working_directory)
+        meta_source_commit=$(expect_metadata "$metadata" source_commit)
+        meta_plan_sha=$(expect_metadata "$metadata" plan_sha256)
+        meta_lock_sha=$(expect_metadata "$metadata" lockfile_sha256)
+        meta_max_age=$(expect_metadata "$metadata" max_age_seconds)
+        created_at=$(expect_metadata "$metadata" created_at)
+
+        version=$(engine_version)
+        [ -n "$version" ] || die "could not read the terraform version from the execution image"
+        plan_sha=$(sha256_of "$plan")
+        lock_sha=$(sha256_of "$lockfile")
+
+        compare 'metadata schema version' "$SCHEMA_VERSION" "$meta_schema"
+        compare 'engine' 'terraform' "$meta_engine"
+        compare 'engine version' "$version" "$meta_engine_version"
+        compare 'instance' "$instance" "$meta_instance"
+        compare 'environment' "$environment" "$meta_environment"
+        compare 'state id' "$state_id" "$meta_state_id"
+        compare 'working directory' "$working_directory" "$meta_working_directory"
+        compare 'source commit' "${CI_COMMIT_SHA:-}" "$meta_source_commit"
+        compare 'plan file sha256' "$plan_sha" "$meta_plan_sha"
+        compare 'provider lockfile sha256' "$lock_sha" "$meta_lock_sha"
+
+        # The recorded maximum age must be the one this job is configured to enforce.
+        # A plan produced under a longer window is not silently accepted here.
+        compare 'maximum deployable plan age' "$max_age_seconds" "$meta_max_age"
+
+        created_epoch=$(timestamp_to_epoch "$created_at") ||
+          die "plan created_at is not an RFC 3339 UTC timestamp: $created_at"
+        [ -n "$created_epoch" ] ||
+          die "plan created_at is not an RFC 3339 UTC timestamp: $created_at"
+        [ -n "$now" ] || now=$(date -u +%s)
+        age=$((now - created_epoch))
+        if [ "$age" -lt 0 ]; then
+          die "the plan claims to have been created $(( -age ))s in the future; the clock or the metadata is wrong"
+        fi
+        if [ "$age" -gt "$max_age_seconds" ]; then
+          die "the plan is ${age}s old and the maximum deployable age is ${max_age_seconds}s. Create and review a new plan."
+        fi
+        note "ok: plan age ${age}s within ${max_age_seconds}s"
+
+        note 'plan evidence accepted'
+      }
+
+      # --------------------------------------------------------------------------
+      # destroy-guard: refuse a plan that deletes or replaces anything (11.2 item 10)
+      # --------------------------------------------------------------------------
+      #
+      # Reads `terraform show -json <plan>`. There is no jq, so this splits the
+      # document on the literal key sequence `"change":{"actions":[`, which cannot
+      # occur inside a JSON string because a quote inside a string is escaped. Only
+      # records after `"resource_changes":[` are counted, so drift reported in
+      # `resource_drift` (serialised earlier in the same document) is not mistaken
+      # for a planned deletion.
+      #
+      # The positive control matters more than the scan: if the document declares
+      # resource changes but no record matched, the shape is not the one this scanner
+      # understands and it exits 1 rather than reporting a clean plan.
+      #
+      # Exit codes: 0 no deletions, or deletions explicitly allowed. 3 deletions
+      # found and not allowed. 1 the plan JSON is missing, empty or unrecognised.
+
+      cmd_destroy_guard() {
+        plan_json='' allow_destroy='false'
+
+        while [ $# -gt 0 ]; do
+          case "$1" in
+            --plan-json) plan_json=${2:-}; shift 2 ;;
+            --allow-destroy) allow_destroy=${2:-}; shift 2 ;;
+            *) die "destroy-guard: unknown argument $1" ;;
+          esac
+        done
+
+        require "$plan_json" --plan-json
+        [ -f "$plan_json" ] || die "no plan JSON at $plan_json"
+        [ -s "$plan_json" ] || die "the plan JSON at $plan_json is empty; terraform show produced nothing"
+
+        set +e
+        summary=$(awk '
+          BEGIN {
+            RS = "\"change\":\\{\"actions\":\\["
+            destroy = 0; replace = 0; total = 0; seen_changes = 0; declared = 0; stop = 0
+          }
+          {
+            # Terraform serialises resource_drift before resource_changes and
+            # output_changes after it. Count only what lies between: drift is
+            # observed reality, not a planned deletion.
+            #
+            # A record holds one actions array followed by the text up to the next
+            # one, so the markers found in THIS record describe what comes after its
+            # actions. Eligibility is therefore decided from the state carried in
+            # from the previous record, before the markers below update it.
+            countable = seen_changes && !stop
+            if (index($0, "\"resource_changes\":[") > 0) seen_changes = 1
+            if (index($0, "\"resource_changes\":[{") > 0) declared = 1
+            if (index($0, "\"output_changes\":") > 0 || index($0, "\"prior_state\":") > 0) stop = 1
+            if (NR == 1) next
+            if (!countable) next
+            end = index($0, "]")
+            if (end < 2) next
+            actions = substr($0, 1, end - 1)
+            total++
+            if (index(actions, "\"delete\"") == 0) next
+            if (index(actions, "\"create\"") > 0) replace++
+            else destroy++
+          }
+          END {
+            if (declared && total == 0) {
+              print "SHAPE"
+              exit 0
+            }
+            printf "%d %d %d\n", destroy, replace, total
+          }
+        ' "$plan_json")
+        status=$?
+        set -e
+        [ "$status" -eq 0 ] || die "could not scan $plan_json"
+
+        if [ "$summary" = 'SHAPE' ]; then
+          die "the plan JSON declares resource changes but none matched the expected shape; this scanner cannot vouch for it"
+        fi
+
+        destroy=$(printf '%s' "$summary" | awk '{print $1}')
+        replace=$(printf '%s' "$summary" | awk '{print $2}')
+        total=$(printf '%s' "$summary" | awk '{print $3}')
+        removals=$((destroy + replace))
+
+        note "resource changes: $total, destroying: $destroy, replacing: $replace"
+
+        if [ "$removals" -eq 0 ]; then
+          note 'ok: the plan destroys and replaces nothing'
+          return 0
+        fi
+
+        if [ "$allow_destroy" = 'true' ]; then
+          note "allow-destroy is true: proceeding with $destroy destroy and $replace replace actions"
+          return 0
+        fi
+
+        printf '%s: this plan removes %s resource(s): %s destroy, %s replace.\n' \
+          "$PROGRAM" "$removals" "$destroy" "$replace" >&2
+        printf '%s: set the allow-destroy input to true on a reviewed destroy flow to permit it.\n' \
+          "$PROGRAM" >&2
+        exit 3
+      }
+
+      # --------------------------------------------------------------------------
+      # vault-login: exchange the job's ID token for a Vault token (section 10.2)
+      # --------------------------------------------------------------------------
+      #
+      # Prints ONLY the client token on stdout so the caller can capture it with a
+      # command substitution; every message goes to stderr. The JWT is read from
+      # VAULT_ID_TOKEN in the environment, never from an argument.
+      #
+      # The estate's consumers pipe this through `sed` and use whatever comes out. A
+      # sed that matches nothing yields an empty token and Terraform then fails much
+      # later with an unrelated provider error, so an unusable response fails here.
+
+      cmd_vault_login() {
+        address='' jwt_path='' role=''
+        while [ $# -gt 0 ]; do
+          case "$1" in
+            --address) address=${2:-}; shift 2 ;;
+            --jwt-path) jwt_path=${2:-}; shift 2 ;;
+            --role) role=${2:-}; shift 2 ;;
+            *) die "vault-login: unknown argument $1" ;;
+          esac
+        done
+
+        require "$address" --address
+        require "$jwt_path" --jwt-path
+        require "$role" --role
+        [ -n "${VAULT_ID_TOKEN:-}" ] ||
+          die 'VAULT_ID_TOKEN is empty; the job declares no usable id_token'
+
+        set +e
+        response=$(wget -q -O - \
+          --header='Content-Type: application/json' \
+          --post-data="{\"role\":\"${role}\",\"jwt\":\"${VAULT_ID_TOKEN}\"}" \
+          "${address}/v1/auth/${jwt_path}/login" 2>/dev/null)
+        status=$?
+        set -e
+        # The body is never echoed: a successful response carries the token itself.
+        [ "$status" -eq 0 ] ||
+          die "Vault login to ${address}/v1/auth/${jwt_path}/login failed (wget exit $status) for role ${role}"
+
+        token=$(printf '%s' "$response" | sed -n 's/.*"client_token":"\([^"]*\)".*/\1/p')
+        [ -n "$token" ] ||
+          die "Vault login response carried no client_token for role ${role}"
+
+        printf '%s\n' "$token"
+      }
+
+      # --------------------------------------------------------------------------
+      # module-version: normalise an optional leading v and reject anything else
+      # --------------------------------------------------------------------------
+
+      cmd_module_version() {
+        tag=''
+        while [ $# -gt 0 ]; do
+          case "$1" in
+            --tag) tag=${2:-}; shift 2 ;;
+            *) die "module-version: unknown argument $1" ;;
+          esac
+        done
+
+        require "$tag" --tag
+        version=${tag#v}
+        printf '%s\n' "$version" | awk '
+          /^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$/ { exit 0 }
+          { exit 1 }
+        ' || die "tag '$tag' is not MAJOR.MINOR.PATCH with an optional v prefix"
+
+        printf '%s\n' "$version"
+      }
+
+      # --------------------------------------------------------------------------
+      # module-package: archive module content only (section 11.5)
+      # --------------------------------------------------------------------------
+
+      cmd_module_package() {
+        source_dir='' out=''
+        while [ $# -gt 0 ]; do
+          case "$1" in
+            --source) source_dir=${2:-}; shift 2 ;;
+            --out) out=${2:-}; shift 2 ;;
+            *) die "module-package: unknown argument $1" ;;
+          esac
+        done
+
+        require "$source_dir" --source
+        require "$out" --out
+        [ -d "$source_dir" ] || die "module source directory does not exist: $source_dir"
+
+        # Everything that is state, credentials, provider cache or a generated plan.
+        # tfvars are excluded because a module never needs them and they routinely
+        # carry secrets in this estate.
+        tar -czf "$out" -C "$source_dir" \
+          --exclude='./.git' \
+          --exclude='./.terraform' \
+          --exclude='*.tfstate' \
+          --exclude='*.tfstate.*' \
+          --exclude='*.tfplan' \
+          --exclude='tfplan' \
+          --exclude='.terraform.lock.hcl' \
+          --exclude='*.tfvars' \
+          --exclude='*.tfvars.json' \
+          --exclude='.env' \
+          --exclude='*.pem' \
+          --exclude='*.key' \
+          --exclude='./.ci-artifacts' \
+          .
+
+        [ -s "$out" ] || die "packaging produced an empty archive at $out"
+
+        contents=$(tar -tzf "$out")
+        printf '%s\n' "$contents" | grep -q '\.tf$' ||
+          die "the archive contains no .tf file; $source_dir is not a terraform module root"
+
+        leaked=$(printf '%s\n' "$contents" | grep -E '(^|/)\.terraform/|\.tfstate|\.tfvars$|\.tfvars\.json$|(^|/)tfplan$|\.pem$|\.key$' || true)
+        [ -z "$leaked" ] || die "excluded content reached the archive: $leaked"
+
+        note "packaged $out"
+      }
+
+      # --------------------------------------------------------------------------
+      # module-registry-assert: the version must be absent before publishing, and
+      # present afterwards (sections 11.5 and 9.4)
+      # --------------------------------------------------------------------------
+      #
+      # The token is read from CI_JOB_TOKEN in the environment, never from an
+      # argument, so it does not appear in the process list.
+
+      cmd_module_registry_assert() {
+        api_url='' project_id='' name='' system='' version='' expect='absent'
+        while [ $# -gt 0 ]; do
+          case "$1" in
+            --expect) expect=${2:-}; shift 2 ;;
+            --api-url) api_url=${2:-}; shift 2 ;;
+            --project-id) project_id=${2:-}; shift 2 ;;
+            --name) name=${2:-}; shift 2 ;;
+            --system) system=${2:-}; shift 2 ;;
+            --version) version=${2:-}; shift 2 ;;
+            *) die "module-registry-assert: unknown argument $1" ;;
+          esac
+        done
+
+        require "$api_url" --api-url
+        require "$project_id" --project-id
+        require "$name" --name
+        require "$system" --system
+        require "$version" --version
+        case "$expect" in
+          present|absent) ;;
+          *) die "module-registry-assert: --expect takes present or absent, not '$expect'" ;;
+        esac
+        [ -n "${CI_JOB_TOKEN:-}" ] || die 'CI_JOB_TOKEN is not set; cannot ask the registry what it holds'
+
+        url="${api_url}/projects/${project_id}/packages?package_type=terraform_module&package_name=${name}%2F${system}&per_page=100"
+
+        set +e
+        body=$(curl --silent --show-error --fail-with-body --max-time 60 \
+          --header "JOB-TOKEN: ${CI_JOB_TOKEN}" "$url" 2>&1)
+        status=$?
+        set -e
+        # A registry we cannot read is not an empty registry (section 10.1: an
+        # authentication or registry response that cannot be validated fails).
+        [ "$status" -eq 0 ] || die "could not list existing packages (curl exit $status): $body"
+        case "$body" in
+          '['*) ;;
+          *) die "the packages API did not return a JSON array; refusing to treat that as 'version absent'" ;;
+        esac
+
+        existing=$(printf '%s' "$body" | awk -v want_name="\"name\":\"${name}/${system}\"" \
+          -v want_version="\"version\":\"${version}\"" '
+          BEGIN { RS = "\\{\"id\":"; hit = 0 }
+          NR == 1 { next }
+          index($0, want_name) > 0 && index($0, want_version) > 0 { hit = 1 }
+          END { print hit }
+        ')
+
+        if [ "$expect" = 'absent' ]; then
+          [ "$existing" = '0' ] ||
+            die "${name}/${system} ${version} is already published; a released module version is immutable"
+          note "ok: ${name}/${system} ${version} is not published yet"
+          return 0
+        fi
+
+        [ "$existing" = '1' ] ||
+          die "${name}/${system} ${version} is not in the registry after publishing; the upload was accepted but produced nothing"
+        note "ok: ${name}/${system} ${version} is published"
+      }
+
+      # --------------------------------------------------------------------------
+
+      usage() {
+        cat >&2 <<'USAGE'
+      usage: tfguard.sh <command> [options]
+
+        plan-metadata         write plan-metadata.json beside a saved plan
+        validate-plan         check a saved plan's evidence before an apply
+        destroy-guard         refuse a plan that destroys or replaces resources
+        vault-login           exchange the job ID token for a Vault token
+        module-version        normalise and validate a module release tag
+        module-package        archive module content, excluding state and secrets
+        module-registry-assert  check whether a module version is in the registry
+      USAGE
+        exit 2
+      }
+
+      [ $# -gt 0 ] || usage
+      command=$1
+      shift
+
+      case "$command" in
+        plan-metadata) cmd_plan_metadata "$@" ;;
+        validate-plan) cmd_validate_plan "$@" ;;
+        destroy-guard) cmd_destroy_guard "$@" ;;
+        vault-login) cmd_vault_login "$@" ;;
+        module-version) cmd_module_version "$@" ;;
+        module-package) cmd_module_package "$@" ;;
+        module-registry-assert) cmd_module_registry_assert "$@" ;;
+        *) usage ;;
+      esac
+      CI_TPL_EMBED_EOF
+      chmod +x "$CI_TPL_RUNTIME" || exit 1
+      # END embed
+    - |
+      case "$TF_HTTP_PASSWORD" in
+        ''|'${'*)
+          echo 'ERROR: the state backend token is empty. Set the CI variable named by state-token-variable as a masked project or group variable.'
+          exit 1
+          ;;
+      esac
+    - |
+      if [ "$CI_TPL_VAULT_AUTH" = 'true' ]; then
+        VAULT_TOKEN=$(sh "$CI_TPL_RUNTIME" vault-login \
+          --address "$VAULT_ADDR" --jwt-path "$CI_TPL_VAULT_JWT_PATH" \
+          --role "$CI_TPL_VAULT_ROLE") || exit 1
+        export VAULT_TOKEN
+      fi
+    - terraform init -input=false -lockfile=readonly
+  script:
+    - |
+      set -e
+      artifact_dir="$CI_PROJECT_DIR/.ci-artifacts/$CI_TPL_INSTANCE/terraform-plan"
+      mkdir -p "$artifact_dir"
+      set -- -input=false -lock-timeout="$CI_TPL_LOCK_TIMEOUT" -out="$artifact_dir/tfplan"
+      if [ -n "$CI_TPL_VAR_FILE" ]; then
+        set -- "$@" -var-file="$CI_TPL_VAR_FILE"
+      fi
+      terraform plan "$@"
+      terraform show -no-color "$artifact_dir/tfplan" > "$artifact_dir/plan.txt"
+      sh "$CI_TPL_RUNTIME" plan-metadata \
+        --plan "$artifact_dir/tfplan" \
+        --out "$artifact_dir/plan-metadata.json" \
+        --instance "$CI_TPL_INSTANCE" \
+        --environment "$CI_TPL_ENVIRONMENT" \
+        --state-id "$CI_TPL_STATE_ID" \
+        --working-directory "$CI_TPL_WORKING_DIRECTORY" \
+        --backend-address "$TF_HTTP_ADDRESS" \
+        --lockfile "$(pwd -P)/.terraform.lock.hcl" \
+        --max-age-seconds "$((CI_TPL_MAX_PLAN_AGE_HOURS * 3600))"
+  artifacts:
+    name: "$[[ inputs.instance ]]-terraform-plan-$CI_JOB_ID"
+    expire_in: $[[ inputs.plan-expire-in ]]
+    # A saved plan discloses every planned value. Developer access is the
+    # narrowest setting GitLab offers for an artifact a reviewer must read.
+    access: 'developer'
+    when: on_success
+    paths:
+      - .ci-artifacts/$[[ inputs.instance ]]/terraform-plan/
+  rules: $[[ inputs.run-rules ]]
+  allow_failure: false
+  interruptible: true
+  # Infrastructure only. Section 10.1 forbids weakening an outcome, and any
+  # condition other than runner_system_failure would retry a failed gate;
+  # tests/contracts/test_retry_policy.py fails the build on one.
+  retry:
+    max: $[[ inputs.max-retries ]]
+    when: [runner_system_failure]
+  # Insulation from the consumer's `default:` block (section 13.1). A component
+  # job runs in the image the component pins and the shell the component ships;
+  # a consumer's global image, before_script, after_script, cache, services,
+  # artifacts or hooks reaching it is a component running something nobody
+  # reviewed. Runner selection and timeouts are the consumer's to set, so those
+  # stay inherited. `retry` and `id_tokens` stay too: this component sets both
+  # itself, and a consumer-level definition is a deliberate estate choice.
+  inherit:
+    default: [tags, timeout, interruptible, retry, id_tokens]

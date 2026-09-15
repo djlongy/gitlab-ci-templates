@@ -1,0 +1,180 @@
+---
+# pipelines/ansible-verify.yml
+#
+# Source verification for an Ansible repository, and nothing else.
+#
+#   verify -> ansible-lint, ansible-syntax, gitleaks
+#   plan   -> ansible-check, only when `check-mode` is true
+#
+# This composition deploys nothing. There is no ansible-deploy component in this
+# repository, so no deploy stage is declared: section 7.1 reserves the name, and
+# an empty stage is not a placeholder to fill.
+#
+# Check mode is off by default and, when on, it is not a deployment plan.
+# Section 11.3 calls it partial predictive coverage: a task guarded by a
+# `when:` on a registered result, or one that a previous task's change would
+# have produced, is not evaluated. It also opens SSH sessions to real managed
+# hosts, which is why its rule set is web and schedule only, never a merge
+# request. `diff` stays off so rendered templates carrying credentials are not
+# printed into the job log.
+#
+# Vault password handling: `vault-password-secret` names the CI variable holding
+# the Ansible Vault passphrase. The name, never the value.
+
+#### Consumer interface ####
+spec:
+  inputs:
+    instance:
+      type: string
+      description: >-
+        Repository identifier. Jobs are `<instance>:ansible-lint`,
+        `<instance>:ansible-syntax`, `<instance>:security-secrets-gitleaks` and,
+        when enabled, `<instance>:ansible-check`.
+      regex: '^[a-z][a-z0-9-]{0,47}$'
+    working-directory:
+      type: string
+      description: >-
+        Directory the playbook and inventory paths are relative to, itself
+        relative to the consumer checkout.
+      default: '.'
+    playbook:
+      type: string
+      description: Playbook checked for syntax, relative to working-directory.
+      regex: '^[A-Za-z0-9._/-]{1,200}\.ya?ml$'
+    inventory:
+      type: string
+      description: >-
+        Inventory file or directory, relative to working-directory. Required
+        for check mode: without it ansible-playbook falls back to the implicit
+        localhost and reports a clean check of nothing.
+      default: ''
+    extra-vars-file:
+      type: string
+      description: >-
+        One non-secret variables file, relative to working-directory. Secrets
+        belong in the vault password mechanism or a CI variable, never here.
+      default: ''
+    check-mode:
+      type: string
+      description: >-
+        Run `ansible-playbook --check` in the plan stage. Needs `inventory`.
+        Off by default because it connects to managed hosts.
+      options: ['true', 'false']
+      default: 'false'
+    limit:
+      type: string
+      description: >-
+        Host pattern passed to --limit during check mode. Empty means every host
+        the play targets. An inventory filename does not prove a disjoint host
+        set.
+      default: ''
+    vault-password-secret:
+      type: string
+      description: >-
+        Name of the CI variable holding the Ansible Vault passphrase. The name,
+        never the value. Empty means the repository has no vaulted files.
+      default: ''
+    runner-tags:
+      type: array
+      description: Approved runner selection from the estate profile.
+      default: []
+    lint-image:
+      type: string
+      description: Approved ansible-lint image pinned by digest.
+      regex: '^.+@sha256:[0-9a-f]{64}$'
+      default: 'docker.io/pipelinecomponents/ansible-lint@sha256:1c4d2abd372a2dce7ea1cb8e27b650db809115d410a87a4aba2438bd028de735'
+    execution-image:
+      type: string
+      description: >-
+        Approved Ansible execution environment pinned by digest, carrying
+        ansible-core and the pinned collections. Used by syntax and check.
+      regex: '^.+@sha256:[0-9a-f]{64}$'
+      default: 'registry.example.com/shared/base/ansible-ee@sha256:64703d0cec04567ef5b5108b755528ad911db3a6ebb5dfa90d20cabc145d3c9b'
+    gitleaks-image:
+      type: string
+      description: Approved gitleaks image pinned by digest.
+      regex: '^.+@sha256:[0-9a-f]{64}$'
+      default: 'docker.io/zricethezav/gitleaks@sha256:0e99e8821643ea5b235718642b93bb32486af9c8162c8b8731f7cbdc951a7f46'
+---
+
+#### Pipeline ownership ####
+# `web` and `schedule` are admitted because check mode runs from them. They
+# create no duplicate: neither source produces a second pipeline for a branch.
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG'
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+    - when: never
+
+stages:
+  - verify
+  - plan
+
+#### Components at the same shared-CI revision ####
+include:
+  - local: '/templates/ansible-lint/template.yml'
+    inputs:
+      instance: $[[ inputs.instance ]]
+      stage: verify
+      working-directory: $[[ inputs.working-directory ]]
+      execution-image: $[[ inputs.lint-image ]]
+      runner-tags: $[[ inputs.runner-tags ]]
+      vault-password-secret: $[[ inputs.vault-password-secret ]]
+      run-rules:
+        - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG'
+
+  - local: '/templates/ansible-syntax/template.yml'
+    inputs:
+      instance: $[[ inputs.instance ]]
+      stage: verify
+      working-directory: $[[ inputs.working-directory ]]
+      playbook: $[[ inputs.playbook ]]
+      inventory: $[[ inputs.inventory ]]
+      extra-vars-file: $[[ inputs.extra-vars-file ]]
+      execution-image: $[[ inputs.execution-image ]]
+      runner-tags: $[[ inputs.runner-tags ]]
+      vault-password-secret: $[[ inputs.vault-password-secret ]]
+      run-rules:
+        - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG'
+
+  - local: '/templates/security-secrets-gitleaks/template.yml'
+    inputs:
+      instance: $[[ inputs.instance ]]
+      stage: verify
+      working-directory: $[[ inputs.working-directory ]]
+      execution-image: $[[ inputs.gitleaks-image ]]
+      runner-tags: $[[ inputs.runner-tags ]]
+      policy-mode: blocking
+      run-rules:
+        - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG'
+
+  #### plan ####
+  - local: '/templates/ansible-check/template.yml'
+    rules:
+      - if: '"$[[ inputs.check-mode ]]" == "true"'
+    inputs:
+      instance: $[[ inputs.instance ]]
+      stage: plan
+      working-directory: $[[ inputs.working-directory ]]
+      playbook: $[[ inputs.playbook ]]
+      inventory: $[[ inputs.inventory ]]
+      limit: $[[ inputs.limit ]]
+      extra-vars-file: $[[ inputs.extra-vars-file ]]
+      diff: false
+      execution-image: $[[ inputs.execution-image ]]
+      runner-tags: $[[ inputs.runner-tags ]]
+      vault-password-secret: $[[ inputs.vault-password-secret ]]
+      run-rules:
+        - if: '$CI_PIPELINE_SOURCE == "web"'
+        - if: '$CI_PIPELINE_SOURCE == "schedule"'

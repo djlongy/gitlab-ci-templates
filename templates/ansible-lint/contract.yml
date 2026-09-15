@@ -1,0 +1,110 @@
+---
+# Contract for the ansible-lint component. Schema: tests/contracts/contract.schema.json.
+# The inputs are not restated here; the catalogue generator reads them from the
+# spec header of template.yml.
+name: ansible-lint
+kind: component
+status: experimental
+introduced_in: 1.0.0
+minimum_gitlab: '18.9'
+
+# Retry policy: the `max-retries` input (0, 1 or 2, default 1) sets `retry: max`,
+# and `retry: when` is `runner_system_failure` and nothing else. A job killed by
+# its runner runs again; a failed gate never does.
+emitted_jobs:
+  - pattern: '{instance}:ansible-lint'
+    stage: verify
+    # Blocking by default: any violation stops the pipeline, which is what the
+    # bare `ansible-lint` exit 2 did. `policy-mode: advisory` records the
+    # violations and passes, and never through `|| true` or allow_failure: the
+    # exit code is classified by the embedded scan-gate.sh, which still fails on
+    # a run that could not complete.
+    blocking: true
+
+# The human-readable report stays in the job log. The two files are what the
+# policy decision is made from, and what an advisory run leaves behind as the
+# record that the violations were seen.
+outputs:
+  - path: .ci-artifacts/{instance}/ansible-lint/scan-result.json
+    producer: '{instance}:ansible-lint'
+    format: JSON
+    schema: section 9.2 scan-result, schema_version 1
+    subject_identity: the project path, commit and working-directory that were linted
+    retention: 1 week
+  - path: .ci-artifacts/{instance}/ansible-lint/ansible-lint.sarif
+    producer: '{instance}:ansible-lint'
+    format: SARIF 2.1.0
+    schema: the linter's own output, archived as evidence only
+    subject_identity: the files ansible-lint opened in the working directory
+    retention: 1 week
+
+required_secrets:
+  - name: ANSIBLE_VAULT_PASSWORD
+    kind: ci-variable
+    scope: >-
+      Needed only when the tree contains Ansible Vault encrypted files, because
+      ansible-lint runs a syntax check that has to decrypt them. The component
+      takes the variable NAME through the vault-password-secret input; this
+      entry records the name platform/infrastructure uses today. It must be a masked
+      variable and not a file type variable, since the job reads its value.
+    protected_ref_required: true
+
+runtime_image:
+  # The estate execution environment, registry.example.com/shared/base/ansible-ee,
+  # does NOT contain ansible-lint: it is built from ansible/execution/Containerfile
+  # in the infrastructure repository, which installs ansible-core, ansible-runner, hvac,
+  # netaddr and requests and nothing else. Until the estate builds a lint image,
+  # the default is this community image, which is why the component ships as
+  # experimental rather than released.
+  #
+  # Its ansible-lint is 26.4.0. platform/infrastructure pins 25.1.3 today, so adopting this
+  # component changes the rule set that repository is measured against. Resolve
+  # that before promoting the component past experimental.
+  reference: >-
+    docker.io/pipelinecomponents/ansible-lint@sha256:1c4d2abd372a2dce7ea1cb8e27b650db809115d410a87a4aba2438bd028de735
+  pinning: digest
+  tool_versions:
+    ansible-lint: 26.4.0
+    ansible-core: 2.20.6
+    ansible-compat: 26.3.0
+
+trust:
+  privileged: false
+  # The image pull only. --offline stops ansible-lint reaching Galaxy mid-run,
+  # so the job needs no other egress.
+  network_egress:
+    - registry.example.com
+  runner_profile: linux/amd64 docker executor, unprivileged
+  protected_ref_required: false
+
+validation:
+  evidence:
+    - source-reviewed
+    - yaml-parsed
+    - gitlab-linted
+    - runtime-tested
+  verified_at: 2026/09/15
+  environment: gitlab.example.com 18.9.1-ee, project 18
+  notes: >-
+    gitlab-linted through the CI Lint API by
+    tests/pipelines/test_ansible_components.py. The job shell is behaviour
+    tested by tests/runtime/ansible/ with ansible-lint stubbed, covering the
+    checkout escape check, the vault password handling and the exact argument
+    list. runtime-tested: on 2026/09/15 the job's own shell, extracted from this
+    template, was run in the pinned image against three trees in both policy
+    modes. A tree with violations exits 1 blocking and 0 advisory with the
+    findings in scan-result.json; a clean tree exits 0 in both; a tree the
+    linter analysed nothing in exits 2 in both, which is the execution error
+    advisory mode does not cover. The tool's own codes behind that are exit 0
+    clean, 2 violations, 1 unusable configuration and 5 nothing analysed. That
+    is where the missing path argument comes from: `ansible-lint .` reported
+    zero files processed and exit 0 on the failing tree. The same session
+    measured the exit codes the policy gate classifies (0 clean, 2 violations, 1
+    unusable configuration, 5 nothing analysed) and that `--sarif-file` writes
+    its file on a clean tree but is suppressed by `-f codeclimate`, which is why
+    the SARIF is the report this component keeps. Nothing here was executed by a
+    GitLab runner, so this is not integration-tested. Status: experimental,
+    because no consumer pipeline has run any ansible component. platform/infrastructure
+    merge-request pipelines 5747 and 5750 created
+    example-unprotected:ansible-lint and skipped it: its stage sits behind a
+    preflight that failed. A skipped job is not evidence.

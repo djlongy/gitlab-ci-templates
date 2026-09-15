@@ -1,4 +1,86 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["config:recommended"]
+  "extends": [
+    "local>software/renovate-runner"
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Execution images pulled from Docker Hub. The depName capture deliberately excludes the registry prefix so the version lookup goes to Docker Hub, which the bot can read. If you repoint these at a private pull-through cache, keep the capture excluding its host: a bot that cannot authenticate to your registry logs \"found no results from datasource\" at INFO and silently stops updating. The execution-image default in template.yml, the runtime_image.reference restating it in contract.yml, and the composition input default restating it again in pipelines/ are all matched, so a bump moves all three together; nothing else ties them. Trivy is deliberately held at 0.69.3, which predates the 0.69.4-6 supply chain compromise: read the proposal before taking it.",
+      "managerFilePatterns": [
+        "/^templates/[^/]+/template\\.yml$/",
+        "/^templates/[^/]+/contract\\.yml$/",
+        "/^pipelines/[^/]+\\.yml$/"
+      ],
+      "matchStrings": [
+        "docker\\.io/(?<depName>[a-z0-9][a-z0-9._-]*(?:/[a-z0-9._-]+)*)@(?<currentDigest>sha256:[0-9a-f]{64})"
+      ],
+      "currentValueTemplate": "latest",
+      "datasourceTemplate": "docker"
+    },
+    {
+      "customType": "regex",
+      "description": "Execution images on a registry other than Docker Hub. The depName capture includes the registry host, which is where the lookup goes. Matched in the components and in the compositions that restate the pin.",
+      "managerFilePatterns": [
+        "/^templates/[^/]+/template\\.yml$/",
+        "/^templates/[^/]+/contract\\.yml$/",
+        "/^pipelines/[^/]+\\.yml$/"
+      ],
+      "matchStrings": [
+        "(?<depName>(?:cgr\\.dev|gcr\\.io)/[a-z0-9._-]+(?:/[a-z0-9._-]+)*)@(?<currentDigest>sha256:[0-9a-f]{64})"
+      ],
+      "currentValueTemplate": "latest",
+      "datasourceTemplate": "docker"
+    },
+    {
+      "customType": "regex",
+      "description": "cosign, installed by runtime/sign and verified against a pinned subset of its release checksums. runtime/sign/cosign_checksums.txt is NOT updated by this manager: refresh it by hand in the same change or the job fails closed on the checksum.",
+      "managerFilePatterns": [
+        "/^runtime/sign/cosign_attest\\.py$/",
+        "/^templates/container-sign-attest-cosign/template\\.yml$/"
+      ],
+      "matchStrings": [
+        "COSIGN_VERSION = \"(?<currentValue>v[0-9]+\\.[0-9]+\\.[0-9]+)\""
+      ],
+      "depNameTemplate": "sigstore/cosign",
+      "datasourceTemplate": "github-releases"
+    },
+    {
+      "customType": "regex",
+      "description": "ko, installed by the ko build component through the Go module proxy, which verifies the download.",
+      "managerFilePatterns": [
+        "/^templates/container-build-ko/template\\.yml$/"
+      ],
+      "matchStrings": [
+        "ko-version:[\\s\\S]{0,400}?default: '(?<currentValue>v[0-9]+\\.[0-9]+\\.[0-9]+)'"
+      ],
+      "depNameTemplate": "ko-build/ko",
+      "datasourceTemplate": "github-releases"
+    },
+    {
+      "customType": "regex",
+      "description": "Release binaries downloaded and checksum-verified at job time: kubeconform, and kustomize whose tag is path-encoded in the URL. The literal sha256 passed to ci_tpl_install_tool is NOT updated by this manager: refresh it by hand in the same change or the job fails closed on the checksum.",
+      "managerFilePatterns": [
+        "/^templates/[^/]+/template\\.yml$/"
+      ],
+      "matchStrings": [
+        "https://github\\.com/(?<depName>[A-Za-z0-9._-]+/[A-Za-z0-9._-]+)/releases/download/(?<currentValue>v[0-9]+\\.[0-9]+\\.[0-9]+)/",
+        "https://github\\.com/(?<depName>[A-Za-z0-9._-]+/[A-Za-z0-9._-]+)/releases/download/[A-Za-z0-9._-]+%2F(?<currentValue>v[0-9]+\\.[0-9]+\\.[0-9]+)/"
+      ],
+      "datasourceTemplate": "github-releases"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "An execution image update changes what every consumer of that component runs, and these pins carry no tag to read, so the proposal is a digest move against latest. Never automerge one.",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchUpdateTypes": [
+        "digest"
+      ],
+      "automerge": false,
+      "groupName": "CI execution images"
+    }
+  ]
 }

@@ -1,0 +1,92 @@
+---
+# templates/terraform-fmt/template.yml
+#
+# Checks Terraform source formatting. It replaces terraform/lint.yml, which was
+# named "lint" while running `terraform fmt -check -recursive`; section 5.1
+# requires the name to describe the actual capability.
+#
+# Non-mutating: -check reports, -write is never used.
+
+#### Public interface ####
+spec:
+  inputs:
+    instance:
+      type: string
+      description: Unique workload instance used in the job name.
+      regex: '^[a-z][a-z0-9-]{0,47}$'
+    stage:
+      type: string
+      description: Stage supplied by the owning composition.
+      default: verify
+    working-directory:
+      type: string
+      description: Terraform root relative to the consumer checkout.
+      default: '.'
+    execution-image:
+      type: string
+      description: >-
+        Approved Terraform execution image pinned by digest. The default is
+        hashicorp/terraform:1.11 (Terraform 1.11.4) through the estate's
+        pull-through mirror.
+      regex: '^.+@sha256:[0-9a-f]{64}$'
+      default: 'docker.io/hashicorp/terraform@sha256:5820b87995595425074f881500a037b0ccd41158d0d9b44d78f5f120612f2d3d'
+    runner-tags:
+      type: array
+      description: Runner selection from the estate profile.
+      default: []
+    max-retries:
+      type: number
+      description: >-
+        How many times the runner may retry this job. The condition is
+        runner_system_failure only, so this retries infrastructure and never a
+        failed gate.
+      default: 1
+      options: [0, 1, 2]
+    run-rules:
+      type: array
+      description: Job eligibility set by the composition.
+      default:
+        - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG'
+---
+
+#### Executable capability ####
+"$[[ inputs.instance ]]:terraform-fmt":
+  stage: $[[ inputs.stage ]]
+  image:
+    name: $[[ inputs.execution-image ]]
+    entrypoint: ['']
+  tags: $[[ inputs.runner-tags ]]
+  variables:
+    CI_TPL_WORKING_DIRECTORY: $[[ inputs.working-directory ]]
+    TF_IN_AUTOMATION: 'true'
+  dependencies: []
+  before_script:
+    - |
+      project_root=$(cd "$CI_PROJECT_DIR" && pwd -P)
+      cd "$CI_PROJECT_DIR/$CI_TPL_WORKING_DIRECTORY"
+      case "$(pwd -P)" in
+        "$project_root"|"$project_root"/*) ;;
+        *) echo 'ERROR: working-directory escapes the checkout'; exit 1 ;;
+      esac
+  script:
+    - terraform fmt -check -recursive .
+  rules: $[[ inputs.run-rules ]]
+  allow_failure: false
+  interruptible: true
+  # Infrastructure only. Section 10.1 forbids weakening an outcome, and any
+  # condition other than runner_system_failure would retry a failed gate;
+  # tests/contracts/test_retry_policy.py fails the build on one.
+  retry:
+    max: $[[ inputs.max-retries ]]
+    when: [runner_system_failure]
+  # Insulation from the consumer's `default:` block (section 13.1). A component
+  # job runs in the image the component pins and the shell the component ships;
+  # a consumer's global image, before_script, after_script, cache, services,
+  # artifacts or hooks reaching it is a component running something nobody
+  # reviewed. Runner selection and timeouts are the consumer's to set, so those
+  # stay inherited. `retry` and `id_tokens` stay too: this component sets both
+  # itself, and a consumer-level definition is a deliberate estate choice.
+  inherit:
+    default: [tags, timeout, interruptible, retry, id_tokens]

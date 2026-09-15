@@ -1,0 +1,22 @@
+---
+# examples/terraform-module/.gitlab-ci.yml
+#
+# A repository that publishes one Terraform module to the GitLab module
+# registry.
+#
+# `module-name` and `module-system` are the second and third parts of
+# <namespace>/<name>/<system>; the namespace is the project's own. The version
+# comes from the tag, and a version already in the registry is refused rather
+# than overwritten, so a failed upload needs a new tag.
+#
+# A module repository commits no .terraform.lock.hcl. The composition already
+# validates with `lockfile-mode: module` for that reason; there is nothing to
+# set here, and committing a lockfile is what would break the pipeline.
+include:
+  - project: 'platform/gitlab-ci-templates'
+    ref: 'REPLACE_WITH_APPROVED_SHARED_CI_REF'
+    file: '/pipelines/terraform-module.yml'
+    inputs:
+      instance: hypervisor-vm
+      module-name: 'vm'
+      module-system: 'hypervisor'

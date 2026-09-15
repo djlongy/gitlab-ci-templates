@@ -1,0 +1,63 @@
+---
+# pipelines/terraform-module.contract.yml — the contract for the composition beside it.
+#
+# Section 6.3. The catalogue generator reads this plus the spec:inputs header
+# of terraform-module.yml; do not restate inputs here.
+name: terraform-module
+kind: pipeline
+status: experimental
+introduced_in: 1.0.0
+minimum_gitlab: '18.9'
+emitted_jobs:
+  - pattern: '{instance}:terraform-fmt'
+    stage: verify
+    blocking: true
+  - pattern: '{instance}:terraform-validate'
+    stage: verify
+    blocking: true
+  - pattern: '{instance}:terraform-module-publish'
+    stage: publish
+    blocking: true
+outputs: []
+required_secrets:
+  - name: CI_JOB_TOKEN
+    kind: ci-variable
+    scope: Supplied by GitLab. Used for the packages API read that proves the version is new,
+      the upload, and the read that proves the upload produced a package. No project secret
+      is needed.
+runtime_image:
+  reference: 'per component: every include forwards a digest-pinned execution image, and the
+    ones a consumer may need to change are inputs of this composition'
+  pinning: input
+trust:
+  privileged: false
+  network_egress:
+    - registry.example.com
+    - registry.terraform.io
+    - gitlab.example.com
+  runner_profile: shared-docker, the estate instance runners. They are registered untagged,
+    so runner-tags selects nothing today and a tag is not a permission boundary.
+  protected_ref_required: false
+validation:
+  evidence:
+    - source-reviewed
+    - yaml-parsed
+    - gitlab-linted
+  verified_at: 2026/09/16
+  environment: gitlab.example.com 18.9.1-ee, project 18, POST /api/v4/projects/<project-id>/ci/lint
+  notes: >-
+    Verify then publish on a protected tag. Publication is immutable: a version
+    already in the registry is refused rather than overwritten, so a failed
+    upload needs a new version. No test stage is declared because no module test
+    component exists. This composition applies nothing. terraform-validate is
+    given lockfile-mode: module, because a module repository commits no
+    .terraform.lock.hcl and the default readonly init fails on it; the consumer
+    does not choose this and it is not an input. Evidence is gitlab-linted only.
+    Status: experimental. The verify half HAS executed on 1.0.0-rc.2:
+    platform/terraform-modules (project 15) merge-request pipeline 5720 and main
+    pipeline 5724, 8 of 8 terraform-fmt and terraform-validate jobs green across
+    four instances in lockfile-mode module. The publish half has not: it is
+    tag-gated and no tag pipeline has ever been created from this composition.
+    The rule applied here is the one used for terraform-deploy: a composition is
+    released when a real pipeline has run every job it creates, and publishing
+    is what this one is for.

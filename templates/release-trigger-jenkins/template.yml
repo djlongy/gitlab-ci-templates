@@ -1,0 +1,258 @@
+---
+# templates/release-trigger-jenkins/template.yml
+#
+# Start a Jenkins job from a GitLab pipeline, authenticating through the
+# GitLab ID token -> Vault JWT login -> Jenkins API token chain. Replaces the
+# hidden job `.jenkins_trigger_base` in promote/jenkins-trigger.yml.
+#
+# What changed from that file:
+#   - It had no `rules:` at all, so any pipeline source that extended it could
+#     fire a production Jenkins job, merge request pipelines included. The
+#     default `run-rules` below refuses merge request pipelines outright and
+#     makes the trigger a manual decision on the default branch or a protected
+#     tag (sections 7.2 and 10.2).
+#   - The Vault address, auth mount, role, KV path and field names were hard
+#     coded. They are inputs now, defaulted from .ci/estate.yml auth.vault
+#     (section 10.2).
+#   - It recorded nothing. The job now writes trigger-result.json naming what it
+#     started, and fails when Jenkins accepts the POST without queueing a build
+#     (section 9.4).
+#   - Credentials went to curl in argv, where any process on the runner can read
+#     them. They go through a mode-0600 curl config file instead.
+
+#### Public interface ####
+spec:
+  inputs:
+    instance:
+      type: string
+      description: Unique workload instance used in the job name.
+      regex: '^[a-z][a-z0-9-]{0,47}$'
+    stage:
+      type: string
+      description: Stage supplied by the owning composition.
+      default: deploy
+    job-path:
+      type: string
+      description: >-
+        Jenkins job path as it appears in the UI, folders separated by `/`,
+        for example `audit/tls-cert-expiry`. A leading underscore is a Jenkins
+        job name like any other: `_seed-all-dsl-jobs` is one that exists.
+      regex: '^[A-Za-z0-9_][A-Za-z0-9._/-]{0,199}$'
+    parameters:
+      type: string
+      description: >-
+        Request body for buildWithParameters, as Jenkins documents it, e.g.
+        {"parameter": [{"name": "DAYS", "value": "30"}]}. Validated as JSON
+        before use. Empty means the job takes no parameters and the plain
+        /build endpoint is used. Never put a secret here (section 6.1).
+      default: ''
+    jenkins-url:
+      type: string
+      description: Base URL of the Jenkins controller.
+      default: 'https://jenkins.example.com'
+    vault-address:
+      type: string
+      description: Vault address, from .ci/estate.yml auth.vault.address.
+      default: 'https://vault.example.com:8200'
+    vault-auth-path:
+      type: string
+      description: JWT auth mount, from .ci/estate.yml auth.vault.jwt_mount.
+      default: jwt
+    vault-role:
+      type: string
+      description: >-
+        Vault JWT role this job logs in as. The estate profile lists the roles
+        that exist; pick the least-privileged one that can read the KV path.
+      default: gitlab-ci
+    vault-secret-path:
+      type: string
+      description: >-
+        KV v2 API path holding the Jenkins API credentials, including the
+        `data/` segment.
+      default: 'kv/data/apps/jenkins/runtime'
+    vault-username-field:
+      type: string
+      description: Field at vault-secret-path holding the Jenkins user name.
+      default: admin_user
+    vault-token-field:
+      type: string
+      description: Field at vault-secret-path holding that user's API token.
+      default: api_token_ci
+    id-token-audience:
+      type: string
+      description: Audience bound to the Vault JWT role.
+      default: 'https://vault.example.com:8200'
+    execution-image:
+      type: string
+      description: >-
+        Approved execution image pinned by digest. Needs a POSIX shell and the
+        package manager used to add curl and jq.
+      regex: '^.+@sha256:[0-9a-f]{64}$'
+      default: 'docker.io/alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc'
+    runner-tags:
+      type: array
+      description: Runner selection from the estate profile.
+      default: []
+    max-retries:
+      type: number
+      description: >-
+        How many times the runner may retry this job. The condition is
+        runner_system_failure only, so this retries infrastructure and never a
+        failed gate.
+      default: 1
+      options: [0, 1, 2]
+    run-rules:
+      type: array
+      description: >-
+        Job eligibility set by the composition. Starting a Jenkins job is a
+        mutation, so the default never fires on a merge request pipeline and is
+        manual everywhere else (section 6.1: never default a production mutation
+        to unconditional execution).
+      default:
+        - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+          when: never
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+          when: manual
+        - if: '$CI_COMMIT_TAG && $CI_COMMIT_REF_PROTECTED == "true"'
+          when: manual
+---
+
+#### Executable capability ####
+"$[[ inputs.instance ]]:release-trigger-jenkins":
+  stage: $[[ inputs.stage ]]
+  image:
+    name: $[[ inputs.execution-image ]]
+    entrypoint: ['']
+  tags: $[[ inputs.runner-tags ]]
+  id_tokens:
+    VAULT_ID_TOKEN:
+      aud: $[[ inputs.id-token-audience ]]
+  variables:
+    GIT_STRATEGY: none
+    CI_TPL_ARTIFACT_DIR: "$CI_PROJECT_DIR/.ci-artifacts/$[[ inputs.instance ]]/release-trigger-jenkins"
+    CI_TPL_JENKINS_URL: $[[ inputs.jenkins-url ]]
+    CI_TPL_JOB_PATH: $[[ inputs.job-path ]]
+    CI_TPL_PARAMETERS: $[[ inputs.parameters ]]
+    CI_TPL_VAULT_ADDR: $[[ inputs.vault-address ]]
+    CI_TPL_VAULT_AUTH_PATH: $[[ inputs.vault-auth-path ]]
+    CI_TPL_VAULT_ROLE: $[[ inputs.vault-role ]]
+    CI_TPL_VAULT_SECRET_PATH: $[[ inputs.vault-secret-path ]]
+    CI_TPL_VAULT_USERNAME_FIELD: $[[ inputs.vault-username-field ]]
+    CI_TPL_VAULT_TOKEN_FIELD: $[[ inputs.vault-token-field ]]
+  dependencies: []
+  before_script:
+    - apk add --no-cache curl jq
+  script:
+    - |
+      set -eu
+      umask 077
+      mkdir -p "$CI_TPL_ARTIFACT_DIR"
+      work=$(mktemp -d)
+      trap 'rm -rf "$work"' EXIT
+
+      if [ -n "$CI_TPL_PARAMETERS" ]; then
+        printf '%s' "$CI_TPL_PARAMETERS" | jq -e 'type == "object"' >/dev/null \
+          || { echo 'ERROR: parameters is not a JSON object'; exit 1; }
+      fi
+
+      echo "Vault JWT login at $CI_TPL_VAULT_ADDR (mount $CI_TPL_VAULT_AUTH_PATH, role $CI_TPL_VAULT_ROLE)"
+      jq -n --arg jwt "$VAULT_ID_TOKEN" --arg role "$CI_TPL_VAULT_ROLE" \
+        '{jwt: $jwt, role: $role}' > "$work/login.json"
+      curl --silent --show-error --fail --max-time 10 \
+        --data @"$work/login.json" \
+        "$CI_TPL_VAULT_ADDR/v1/auth/$CI_TPL_VAULT_AUTH_PATH/login" > "$work/login-response.json" \
+        || { echo 'ERROR: Vault JWT login failed'; exit 1; }
+      vault_token=$(jq -r '.auth.client_token // empty' < "$work/login-response.json")
+      [ -n "$vault_token" ] || { echo 'ERROR: Vault returned no client token'; exit 1; }
+
+      # Credentials reach curl through a private config file: an argv -u or -H
+      # is readable by every process on the runner and survives in job traces.
+      printf 'header = "X-Vault-Token: %s"\n' "$vault_token" > "$work/vault.curlrc"
+      curl --config "$work/vault.curlrc" --silent --show-error --fail --max-time 10 \
+        "$CI_TPL_VAULT_ADDR/v1/$CI_TPL_VAULT_SECRET_PATH" > "$work/secret.json" \
+        || { echo "ERROR: reading $CI_TPL_VAULT_SECRET_PATH failed"; exit 1; }
+
+      jenkins_user=$(jq -r --arg f "$CI_TPL_VAULT_USERNAME_FIELD" '.data.data[$f] // empty' < "$work/secret.json")
+      jenkins_token=$(jq -r --arg f "$CI_TPL_VAULT_TOKEN_FIELD" '.data.data[$f] // empty' < "$work/secret.json")
+      [ -n "$jenkins_user" ] || { echo "ERROR: $CI_TPL_VAULT_USERNAME_FIELD missing at $CI_TPL_VAULT_SECRET_PATH"; exit 1; }
+      [ -n "$jenkins_token" ] || { echo "ERROR: $CI_TPL_VAULT_TOKEN_FIELD missing at $CI_TPL_VAULT_SECRET_PATH"; exit 1; }
+      printf 'user = "%s:%s"\n' "$jenkins_user" "$jenkins_token" > "$work/jenkins.curlrc"
+
+      echo "Fetching CSRF crumb from $CI_TPL_JENKINS_URL"
+      curl --config "$work/jenkins.curlrc" --silent --show-error --fail --max-time 10 \
+        "$CI_TPL_JENKINS_URL/crumbIssuer/api/json" > "$work/crumb.json" \
+        || { echo 'ERROR: could not obtain a CSRF crumb'; exit 1; }
+      crumb_field=$(jq -r '.crumbRequestField // empty' < "$work/crumb.json")
+      crumb_value=$(jq -r '.crumb // empty' < "$work/crumb.json")
+      [ -n "$crumb_field" ] && [ -n "$crumb_value" ] \
+        || { echo 'ERROR: crumb response had no crumb'; exit 1; }
+      printf 'header = "%s: %s"\n' "$crumb_field" "$crumb_value" >> "$work/jenkins.curlrc"
+
+      job_route=$(printf '%s' "$CI_TPL_JOB_PATH" | sed 's|/|/job/|g')
+      if [ -n "$CI_TPL_PARAMETERS" ]; then
+        endpoint="$CI_TPL_JENKINS_URL/job/$job_route/buildWithParameters"
+        printf '%s' "$CI_TPL_PARAMETERS" > "$work/parameters.json"
+        set -- --data @"$work/parameters.json" --header 'Content-Type: application/json'
+      else
+        endpoint="$CI_TPL_JENKINS_URL/job/$job_route/build"
+        set --
+      fi
+
+      echo "POST $endpoint"
+      status=$(curl --config "$work/jenkins.curlrc" --silent --show-error --max-time 30 \
+        --request POST "$@" \
+        --dump-header "$work/response-headers.txt" \
+        --output "$work/response.txt" \
+        --write-out '%{http_code}' "$endpoint")
+      case "$status" in
+        200|201) ;;
+        *) echo "ERROR: Jenkins returned HTTP $status"; exit 1 ;;
+      esac
+
+      # Jenkins answers a successful trigger with the queue item in Location.
+      # Without it the POST was accepted but nothing was scheduled, which the
+      # old template reported as a success.
+      queue_item=$(awk 'tolower($1) == "location:" { print $2 }' "$work/response-headers.txt" | tr -d '\r' | tail -1)
+      [ -n "$queue_item" ] \
+        || { echo 'ERROR: Jenkins queued no build (no Location header)'; exit 1; }
+
+      jq -n \
+        --arg endpoint "$endpoint" \
+        --arg job "$CI_TPL_JOB_PATH" \
+        --arg queue "$queue_item" \
+        --arg status "$status" \
+        --arg commit "$CI_COMMIT_SHA" \
+        --arg pipeline "$CI_PIPELINE_ID" \
+        --arg job_id "$CI_JOB_ID" \
+        --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        --argjson parameterised "$([ -n "$CI_TPL_PARAMETERS" ] && echo true || echo false)" \
+        '{schema_version: 1, target: "jenkins", endpoint: $endpoint, job_path: $job,
+          parameterised: $parameterised, queue_item: $queue, http_status: $status,
+          source_commit: $commit, pipeline_id: $pipeline, job_id: $job_id,
+          triggered_at: $at}' > "$CI_TPL_ARTIFACT_DIR/trigger-result.json"
+      jq -e '.queue_item | length > 0' "$CI_TPL_ARTIFACT_DIR/trigger-result.json" >/dev/null
+      echo "Queued $CI_TPL_JOB_PATH at $queue_item"
+  artifacts:
+    name: "$[[ inputs.instance ]]-release-trigger-jenkins-$CI_JOB_ID"
+    paths:
+      - .ci-artifacts/$[[ inputs.instance ]]/release-trigger-jenkins/
+    when: always
+    expire_in: 1 week
+  rules: $[[ inputs.run-rules ]]
+  allow_failure: false
+  interruptible: false
+  # Infrastructure only. Section 10.1 forbids weakening an outcome, and any
+  # condition other than runner_system_failure would retry a failed gate;
+  # tests/contracts/test_retry_policy.py fails the build on one.
+  retry:
+    max: $[[ inputs.max-retries ]]
+    when: [runner_system_failure]
+  # Insulation from the consumer's `default:` block (section 13.1). A component
+  # job runs in the image the component pins and the shell the component ships;
+  # a consumer's global image, before_script, after_script, cache, services,
+  # artifacts or hooks reaching it is a component running something nobody
+  # reviewed. Runner selection and timeouts are the consumer's to set, so those
+  # stay inherited. `retry` and `id_tokens` stay too: this component sets both
+  # itself, and a consumer-level definition is a deliberate estate choice.
+  inherit:
+    default: [tags, timeout, interruptible, retry, id_tokens]

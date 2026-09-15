@@ -1,0 +1,181 @@
+---
+# ansible-playbook --syntax-check for one playbook.
+#
+# Source-only: --syntax-check parses the play, its imports and its variable
+# files, and contacts no managed host. It does decrypt vaulted variable files,
+# so the Ansible Vault password is needed wherever the tree has them.
+#
+# One playbook per instance. Two playbooks means two instances, which is what
+# gives them distinct job names; a list input would collapse them into one job
+# whose failure does not say which playbook broke.
+spec:
+  inputs:
+    instance:
+      type: string
+      description: Unique workload instance used in the job name.
+      regex: '^[a-z][a-z0-9-]{0,47}$'
+    stage:
+      type: string
+      description: Stage supplied by the owning composition.
+      default: verify
+    working-directory:
+      type: string
+      description: >-
+        Directory the playbook paths are relative to, itself relative to the
+        consumer checkout. Validated again at runtime, because a higher
+        precedence CI variable can override the job variable that carries it.
+      default: '.'
+      regex: '^[A-Za-z0-9._/-]{1,200}$'
+    playbook:
+      type: string
+      description: Playbook to check, relative to working-directory.
+      regex: '^[A-Za-z0-9._/-]{1,200}\.ya?ml$'
+    inventory:
+      type: string
+      description: >-
+        Inventory file or directory, relative to working-directory. Empty means
+        ansible-playbook falls back to its configured inventory, which on a
+        runner is the implicit localhost.
+      default: ''
+      regex: '^[A-Za-z0-9._/-]{0,200}$'
+    extra-vars-file:
+      type: string
+      description: >-
+        One non-secret variables file, relative to working-directory, passed as
+        --extra-vars @<path>. Secrets belong in the vault password mechanism or
+        a CI variable, never here. Section 11.3 asks for a list; GitLab has no
+        way to expand an array input into shell arguments safely, so this is a
+        single validated path. See contract.yml.
+      default: ''
+      regex: '^[A-Za-z0-9._/-]{0,200}$'
+    execution-image:
+      type: string
+      description: >-
+        Ansible execution environment pinned by digest. The default is the
+        estate image built from the infrastructure repository.
+      default: 'registry.example.com/shared/base/ansible-ee@sha256:64703d0cec04567ef5b5108b755528ad911db3a6ebb5dfa90d20cabc145d3c9b'
+      regex: '^.+@sha256:[0-9a-f]{64}$'
+    runner-tags:
+      type: array
+      description: Runner selection from the estate profile.
+      default: []
+    max-retries:
+      type: number
+      description: >-
+        How many times the runner may retry this job. The condition is
+        runner_system_failure only, so this retries infrastructure and never a
+        failed gate.
+      default: 1
+      options: [0, 1, 2]
+    run-rules:
+      type: array
+      description: Job eligibility set by the composition.
+      default:
+        - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG'
+    vault-password-secret:
+      type: string
+      description: >-
+        NAME of the masked CI variable holding the Ansible Vault password, never
+        the value. Leave empty when the tree has no encrypted files. A file type
+        variable does not work here: the job reads the variable's value.
+      default: ''
+      regex: '^[A-Z0-9_]*$'
+---
+
+"$[[ inputs.instance ]]:ansible-syntax":
+  stage: $[[ inputs.stage ]]
+  image:
+    name: $[[ inputs.execution-image ]]
+    entrypoint: ['']
+  tags: $[[ inputs.runner-tags ]]
+  variables:
+    CI_TPL_WORKING_DIRECTORY: $[[ inputs.working-directory ]]
+    CI_TPL_PLAYBOOK: $[[ inputs.playbook ]]
+    CI_TPL_INVENTORY: $[[ inputs.inventory ]]
+    CI_TPL_EXTRA_VARS_FILE: $[[ inputs.extra-vars-file ]]
+    CI_TPL_VAULT_PASSWORD_SECRET: $[[ inputs.vault-password-secret ]]
+  # Source-only job with no needs, so nothing should be downloaded for it.
+  # `dependencies: []` does that without the early scheduling `needs: []` brings.
+  dependencies: []
+  before_script:
+    - |
+      project_root=$(cd "$CI_PROJECT_DIR" && pwd -P)
+      if ! cd "$CI_PROJECT_DIR/$CI_TPL_WORKING_DIRECTORY"; then
+        echo 'ERROR: working-directory does not exist'
+        exit 1
+      fi
+      case "$(pwd -P)" in
+        "$project_root"|"$project_root"/*) ;;
+        *) echo 'ERROR: working-directory escapes the checkout'; exit 1 ;;
+      esac
+    - |
+      # The inputs are regex constrained at pipeline creation, but the values
+      # arrive here as CI variables and a project or group variable of the same
+      # name takes precedence over a job variable. Check them again.
+      ci_tpl_check_path() {
+        case "$2" in
+          '') return 0 ;;
+          /*) echo "ERROR: $1 must be relative to working-directory: $2"; exit 1 ;;
+          *..*) echo "ERROR: $1 must not traverse upwards: $2"; exit 1 ;;
+        esac
+        if [ ! -e "$2" ]; then
+          echo "ERROR: $1 not found under $(pwd -P): $2"
+          exit 1
+        fi
+      }
+      ci_tpl_check_path playbook "$CI_TPL_PLAYBOOK"
+      ci_tpl_check_path inventory "$CI_TPL_INVENTORY"
+      ci_tpl_check_path extra-vars-file "$CI_TPL_EXTRA_VARS_FILE"
+      if [ -z "$CI_TPL_PLAYBOOK" ]; then
+        echo 'ERROR: playbook is empty'
+        exit 1
+      fi
+    - |
+      if [ -n "$CI_TPL_VAULT_PASSWORD_SECRET" ]; then
+        CI_TPL_VAULT_PASSWORD_FILE=$(mktemp) || { echo 'ERROR: mktemp failed'; exit 1; }
+        chmod 600 "$CI_TPL_VAULT_PASSWORD_FILE"
+        if ! printenv "$CI_TPL_VAULT_PASSWORD_SECRET" > "$CI_TPL_VAULT_PASSWORD_FILE"; then
+          echo "ERROR: CI variable $CI_TPL_VAULT_PASSWORD_SECRET is not set"
+          exit 1
+        fi
+        # printenv succeeds on a variable that is set but empty, and writes a
+        # newline, so the file is never zero bytes. Count the bytes that are not
+        # newlines instead, without ever holding the value in a shell variable.
+        if [ "$(tr -d '\n' < "$CI_TPL_VAULT_PASSWORD_FILE" | wc -c)" -eq 0 ]; then
+          echo "ERROR: CI variable $CI_TPL_VAULT_PASSWORD_SECRET is empty"
+          exit 1
+        fi
+        export ANSIBLE_VAULT_PASSWORD_FILE="$CI_TPL_VAULT_PASSWORD_FILE"
+      fi
+  script:
+    # Arguments are assembled as positional parameters so every value stays one
+    # quoted word. Nothing here is passed through a shell that could re-split it.
+    - |
+      set -- "$CI_TPL_PLAYBOOK"
+      if [ -n "$CI_TPL_INVENTORY" ]; then
+        set -- --inventory "$CI_TPL_INVENTORY" "$@"
+      fi
+      if [ -n "$CI_TPL_EXTRA_VARS_FILE" ]; then
+        set -- "$@" --extra-vars "@$CI_TPL_EXTRA_VARS_FILE"
+      fi
+      ansible-playbook --syntax-check "$@"
+  rules: $[[ inputs.run-rules ]]
+  allow_failure: false
+  interruptible: true
+  # Infrastructure only. Section 10.1 forbids weakening an outcome, and any
+  # condition other than runner_system_failure would retry a failed gate;
+  # tests/contracts/test_retry_policy.py fails the build on one.
+  retry:
+    max: $[[ inputs.max-retries ]]
+    when: [runner_system_failure]
+  # Insulation from the consumer's `default:` block (section 13.1). A component
+  # job runs in the image the component pins and the shell the component ships;
+  # a consumer's global image, before_script, after_script, cache, services,
+  # artifacts or hooks reaching it is a component running something nobody
+  # reviewed. Runner selection and timeouts are the consumer's to set, so those
+  # stay inherited. `retry` and `id_tokens` stay too: this component sets both
+  # itself, and a consumer-level definition is a deliberate estate choice.
+  inherit:
+    default: [tags, timeout, interruptible, retry, id_tokens]

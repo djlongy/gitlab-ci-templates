@@ -1,0 +1,55 @@
+---
+# The documented consumer shape for a chart repository: validate the chart and
+# the manifests, then publish the chart from a protected tag.
+#
+# This fixture is PARSED, not linted. `ref:` must be an approved immutable
+# release tag (section 14.2), no such tag carries these components yet, and
+# .ci/estate.yml records shared_ci.approved_ref as unresolved for exactly that
+# reason. Linting it today would fail on a missing file and say nothing about
+# the components. The lint evidence lives in
+# tests/pipelines/test_helm_kubernetes_components.py, which renders the same
+# components and posts the merged configuration to the CI Lint API.
+#
+# What this file is checked for: that every input it sets exists, and that it
+# sets every input the components require. That is the part a consumer gets
+# wrong, and it rots the moment an input is renamed.
+#
+# Once a release exists, replace REPLACE_WITH_APPROVED_SHARED_CI_REF and the
+# stages/workflow move into a composition under pipelines/.
+stages:
+  - verify
+  - publish
+
+include:
+  - project: 'platform/gitlab-ci-templates'
+    ref: 'REPLACE_WITH_APPROVED_SHARED_CI_REF'
+    file: '/templates/helm-validate/template.yml'
+    inputs:
+      instance: demo-app
+      chart-paths: deploy/chart/demo-app
+      values-files: |
+        deploy/chart/demo-app/values-staging.yaml
+        deploy/chart/demo-app/values-prod.yaml
+      kubernetes-version: 1.31.0
+      # The chart renders ExternalSecrets, whose schemas are not in
+      # kubeconform's catalogue. Point at a CRD schema source rather than
+      # setting ignore-missing-schemas, which would pass them unvalidated.
+      schema-locations: |
+        https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json
+
+  - project: 'platform/gitlab-ci-templates'
+    ref: 'REPLACE_WITH_APPROVED_SHARED_CI_REF'
+    file: '/templates/kubernetes-validate/template.yml'
+    inputs:
+      instance: demo-app
+      manifest-paths: deploy/manifests
+
+  - project: 'platform/gitlab-ci-templates'
+    ref: 'REPLACE_WITH_APPROVED_SHARED_CI_REF'
+    file: '/templates/helm-package-publish/template.yml'
+    inputs:
+      instance: demo-app
+      chart-path: deploy/chart/demo-app
+      chart-repository: registry.example.com/charts
+      # run-rules is left at its default: a protected tag only. The template
+      # this replaces published on every default-branch push.

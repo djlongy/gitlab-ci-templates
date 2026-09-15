@@ -1,0 +1,67 @@
+---
+# pipelines/ansible-verify.contract.yml — the contract for the composition beside it.
+#
+# Section 6.3. The catalogue generator reads this plus the spec:inputs header
+# of ansible-verify.yml; do not restate inputs here.
+name: ansible-verify
+kind: pipeline
+status: experimental
+introduced_in: 1.0.0
+minimum_gitlab: '18.9'
+emitted_jobs:
+  - pattern: '{instance}:ansible-lint'
+    stage: verify
+    blocking: true
+  - pattern: '{instance}:ansible-syntax'
+    stage: verify
+    blocking: true
+  - pattern: '{instance}:security-secrets-gitleaks'
+    stage: verify
+    blocking: true
+  - pattern: '{instance}:ansible-check'
+    stage: plan
+    blocking: true
+outputs: []
+required_secrets:
+  - name: ANSIBLE_VAULT_PASSWORD
+    kind: ci-variable
+    scope: Needed only when the tree contains Ansible Vault encrypted files, because ansible-lint
+      runs a syntax check that has to decrypt them. The component takes the variable NAME
+      through the vault-password-secret input; this entry records the name platform/infrastructure uses
+      today. It must be a masked variable and not a file type variable, since the job reads
+      its value.
+    protected_ref_required: true
+  - name: ANSIBLE_PRIVATE_KEY_FILE
+    kind: file-variable
+    scope: 'SSH credential for the managed hosts. The component does not manage key material:
+      a file type CI variable of this name sets the variable to the path of the file the runner
+      wrote, which is exactly what Ansible expects, so no handling is needed and none is added.
+      Scope the variable to protected refs so an untrusted merge request pipeline cannot reach
+      the fleet with it.'
+    protected_ref_required: true
+runtime_image:
+  reference: 'per component: every include forwards a digest-pinned execution image, and the
+    ones a consumer may need to change are inputs of this composition'
+  pinning: input
+trust:
+  privileged: false
+  network_egress:
+    - registry.example.com
+    - managed hosts on tcp/22 for the selected inventory
+  runner_profile: shared-docker, the estate instance runners. They are registered untagged,
+    so runner-tags selects nothing today and a tag is not a permission boundary.
+  protected_ref_required: true
+validation:
+  evidence:
+    - source-reviewed
+    - yaml-parsed
+    - gitlab-linted
+  verified_at: 2026/09/15
+  environment: gitlab.example.com 18.9.1-ee, project 18, POST /api/v4/projects/<project-id>/ci/lint
+  notes: 'Verification only; nothing is deployed and no deploy stage is declared, because
+    no ansible-deploy component exists. Check mode is off by default and, when on, runs in
+    the plan stage on `web` and `schedule` only: it opens SSH sessions to real managed hosts,
+    and its output is partial predictive coverage, not a deployment plan. `diff` is forced
+    off so rendered templates carrying credentials are not printed into the job log. `vault-password-secret`
+    is the NAME of the CI variable holding the Ansible Vault passphrase. Evidence is gitlab-linted
+    only.'

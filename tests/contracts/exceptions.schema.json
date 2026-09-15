@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://gitlab.example.com/platform/gitlab-ci-templates/tests/contracts/exceptions.schema.json",
+  "title": "Reviewed exceptions",
+  "description": "Schema for .ci/exceptions.yml, per docs/gitlab-ci-agent-standard.md section 3. The file is a record, not an enforcement mechanism: nothing reads it at pipeline time, and deleting an entry does not undo the deviation it describes. What the schema enforces is that an accepted deviation carries the four things a reviewer needs to act on it later — what it covers, which rule it excepts, who owns it, and when it lapses.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "exceptions"],
+  "$defs": {
+    "date": {
+      "description": "yyyy/mm/dd. An exception with no expiry is a decision and belongs in the standard or an ADR instead, so 'unresolved' is not accepted here.",
+      "type": "string",
+      "pattern": "^[0-9]{4}/[0-9]{2}/[0-9]{2}$"
+    },
+    "sentence": {
+      "description": "Prose a reviewer who was not there can act on. Not a label.",
+      "type": "string",
+      "minLength": 20
+    }
+  },
+  "properties": {
+    "schema_version": {"const": 1},
+    "exceptions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "scope",
+          "rule",
+          "reason",
+          "owner",
+          "granted_at",
+          "expires_at",
+          "compensating_controls"
+        ],
+        "properties": {
+          "id": {
+            "description": "EXC-nnnn. The same pattern a consumer's .ci/project.yml uses in its exceptions list, so an id written there resolves here.",
+            "type": "string",
+            "pattern": "^[A-Z]+-[0-9]+$"
+          },
+          "scope": {
+            "description": "What the exception covers: a path, a template, a consumer project, or the whole repository.",
+            "type": "string",
+            "minLength": 8
+          },
+          "rule": {
+            "description": "The rule being excepted, quoted from the standard and prefixed with its section number.",
+            "type": "string",
+            "pattern": "^[0-9]+(\\.[0-9]+)* .+"
+          },
+          "reason": {"$ref": "#/$defs/sentence"},
+          "owner": {
+            "description": "The person accountable for closing it. An exception nobody owns does not close.",
+            "type": "string",
+            "minLength": 2
+          },
+          "granted_at": {"$ref": "#/$defs/date"},
+          "expires_at": {"$ref": "#/$defs/date"},
+          "compensating_controls": {
+            "description": "What limits the risk while the exception stands, or the single item 'none' to say plainly that nothing does.",
+            "type": "array",
+            "minItems": 1,
+            "items": {"type": "string", "minLength": 4}
+          }
+        }
+      }
+    }
+  }
+}

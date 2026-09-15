@@ -1,0 +1,169 @@
+---
+# pipelines/kubernetes-gitops.yml
+#
+# Verification for a desired-state repository that a controller reconciles.
+#
+#   verify -> kubernetes-validate, gitleaks, and helm-validate when the
+#             repository also carries charts
+#
+# GitOps means CI does not deploy. `.ci/estate.yml` records
+# `kubernetes.deployment_mode: gitops` with ArgoCD on platform-gitops and
+# workloads-gitops and Flux on cluster-gitops. This composition renders and
+# schema-validates what the controller will apply, and stops there. Section 11.4
+# forbids mixing a direct apply with a controller managing the same objects, so
+# no deploy stage exists here and none should be added: a direct-apply pipeline
+# is a different composition with its own credentials and environment record.
+#
+# Rendering is not reconciliation. `helm template` runs without a cluster, so
+# `lookup` is always empty and hook-driven resources are absent. The rendered
+# output is review evidence for what was validated, never a claim about the
+# cluster's resulting state.
+
+#### Consumer interface ####
+spec:
+  inputs:
+    instance:
+      type: string
+      description: >-
+        Repository identifier. Jobs are `<instance>:kubernetes-validate`,
+        `<instance>:security-secrets-gitleaks` and, when enabled,
+        `<instance>:helm-validate`.
+      regex: '^[a-z][a-z0-9-]{0,47}$'
+    working-directory:
+      type: string
+      description: Directory the manifest and chart paths are relative to.
+      default: '.'
+    manifest-paths:
+      type: string
+      description: >-
+        Manifest sources to render and schema-validate, one per line. A
+        directory holding kustomization.yaml is rendered with kustomize build;
+        any other directory contributes its .yaml and .yml files. A list that
+        names no path fails the job.
+    kubernetes-version:
+      type: string
+      description: Kubernetes API version the rendered resources are checked against.
+      default: '1.31.0'
+    schema-locations:
+      type: string
+      description: >-
+        Extra schema locations for custom resources, one per line. A GitOps
+        repository usually needs these: the controller's own CRDs are not in
+        the bundled schema set.
+      default: ''
+    ignore-missing-schemas:
+      type: boolean
+      description: >-
+        Skip resources with no schema instead of failing. Off by default: an
+        unvalidated CRD that silently passes is how an invalid manifest reaches
+        a cluster. Prefer adding the schema location.
+      default: false
+    charts:
+      type: string
+      description: >-
+        Also lint, render and schema-validate the charts named in chart-paths.
+      options: ['true', 'false']
+      default: 'false'
+    chart-paths:
+      type: string
+      description: >-
+        Chart directories to validate, one per line, each containing a
+        Chart.yaml. Only read when charts is true.
+      default: ''
+    values-files:
+      type: string
+      description: >-
+        Values files rendered during chart validation, one per line. Only read
+        when charts is true.
+      default: ''
+    release-name:
+      type: string
+      description: Release name used for the chart validation render.
+      default: 'validate'
+    runner-tags:
+      type: array
+      description: Approved runner selection from the estate profile.
+      default: []
+    kubernetes-image:
+      type: string
+      description: >-
+        Approved image pinned by digest for the manifest validation toolchain.
+      regex: '^.+@sha256:[0-9a-f]{64}$'
+      default: 'docker.io/alpine@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d'
+    helm-image:
+      type: string
+      description: Approved Helm image pinned by digest. Only used when charts is true.
+      regex: '^.+@sha256:[0-9a-f]{64}$'
+      default: 'docker.io/alpine/helm@sha256:ed9dfc49d43d034df3f9880eb777caf0183e5156508672478b80412c63f3db4f'
+    gitleaks-image:
+      type: string
+      description: Approved gitleaks image pinned by digest.
+      regex: '^.+@sha256:[0-9a-f]{64}$'
+      default: 'docker.io/zricethezav/gitleaks@sha256:0e99e8821643ea5b235718642b93bb32486af9c8162c8b8731f7cbdc951a7f46'
+---
+
+#### Pipeline ownership ####
+# The repositories this replaces ran on `push` only, so a merge request never
+# got a verification pipeline — which is the source that most needs one.
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG'
+    - when: never
+
+stages:
+  - verify
+
+#### Components at the same shared-CI revision ####
+include:
+  - local: '/templates/kubernetes-validate/template.yml'
+    inputs:
+      instance: $[[ inputs.instance ]]
+      stage: verify
+      working-directory: $[[ inputs.working-directory ]]
+      manifest-paths: $[[ inputs.manifest-paths ]]
+      kubernetes-version: $[[ inputs.kubernetes-version ]]
+      schema-locations: $[[ inputs.schema-locations ]]
+      ignore-missing-schemas: $[[ inputs.ignore-missing-schemas ]]
+      execution-image: $[[ inputs.kubernetes-image ]]
+      runner-tags: $[[ inputs.runner-tags ]]
+      run-rules:
+        - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG'
+
+  - local: '/templates/security-secrets-gitleaks/template.yml'
+    inputs:
+      instance: $[[ inputs.instance ]]
+      stage: verify
+      working-directory: $[[ inputs.working-directory ]]
+      execution-image: $[[ inputs.gitleaks-image ]]
+      runner-tags: $[[ inputs.runner-tags ]]
+      policy-mode: blocking
+      run-rules:
+        - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG'
+
+  - local: '/templates/helm-validate/template.yml'
+    rules:
+      - if: '"$[[ inputs.charts ]]" == "true"'
+    inputs:
+      instance: $[[ inputs.instance ]]
+      stage: verify
+      working-directory: $[[ inputs.working-directory ]]
+      chart-paths: $[[ inputs.chart-paths ]]
+      values-files: $[[ inputs.values-files ]]
+      release-name: $[[ inputs.release-name ]]
+      kubernetes-version: $[[ inputs.kubernetes-version ]]
+      schema-locations: $[[ inputs.schema-locations ]]
+      ignore-missing-schemas: $[[ inputs.ignore-missing-schemas ]]
+      execution-image: $[[ inputs.helm-image ]]
+      runner-tags: $[[ inputs.runner-tags ]]
+      run-rules:
+        - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG'

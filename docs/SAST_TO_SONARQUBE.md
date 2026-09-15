@@ -25,34 +25,35 @@ Verified against Community Build **26.4** on **2026/09/09**.
 
 ## Wiring
 
-`security/sonarqube.yml` pulls the SARIF artifacts of `semgrep` and `trivy-fs`
-via `needs: [..., optional: true]`, auto-discovers every `*.sarif` in the
-workspace, and appends `-Dsonar.sarifReportPaths`. Repos that include
-`sonarqube.yml` on its own keep working — the needs are optional, and with no
-SARIF present the job runs SonarQube's own analysis exactly as before.
+`templates/quality-sonarqube` collects the SARIF artifacts of the jobs named in
+its `sarif-report-jobs` input, auto-discovers every `*.sarif` in the workspace,
+and appends `-Dsonar.sarifReportPaths`.
 
-Nothing to change in a consumer repo. Including `pipelines/devsecops.yml`, or
-`security/sonarqube.yml` plus either scanner, is enough — **unless the repo
-overrides the sonarqube job's `needs:`**. GitLab replaces `needs:` rather than
-merging it, so an override drops the scanner artifacts and the job silently
-falls back to SonarQube's own analysis. A repo that overrides `needs:` for a
-coverage artifact must re-add the scanners:
+`sarif-report-jobs` is required and has no default. A container composition
+fills it with its own scanner jobs; a consumer that includes the component
+directly names them itself. A job named there that the pipeline does not create
+fails pipeline creation, which is the difference from the removed flat
+template: that one declared `needs: [..., optional: true]`, so a consumer who
+replaced the job's `needs:` — GitLab replaces rather than merges — silently
+dropped the scanner artifacts and fell back to SonarQube's own analysis while
+the pipeline stayed green.
+
+A consumer adding its own producer lists every producer it wants, because the
+input is the whole set:
 
 ```yaml
-sonarqube:
-  needs:
-    - job: go-test          # the repo's own addition
-      artifacts: true
-    - job: semgrep          # keep these two
-      artifacts: true
-      optional: true
-    - job: trivy-fs
-      artifacts: true
-      optional: true
+    inputs:
+      instance: api
+      sarif-report-jobs:
+        - job: 'api:security-sast-semgrep'
+        - job: 'api:security-filesystem-trivy'
+        - job: 'go-test'
 ```
 
-The job prints a hint when it finds no SARIF, so this shows up in the log
-rather than as an unexplained empty dashboard.
+`policy-mode` decides what a failed quality gate does: `advisory` records the
+result and passes, `blocking` fails the job. Both fail on an execution error, a
+gate that never returns and a named SARIF report that is missing, so a green
+job means the gate was read, not that the upload succeeded.
 
 Opt-in variables:
 
@@ -109,12 +110,13 @@ analyses mainline only, so on a repo that already carries findings, new-code
 conditions stay green while the backlog sits there untouched. A gate with
 overall-code conditions is what surfaces standing debt.
 
-Create a gate (for example `Strict code hygiene`) with the Sonar way
-conditions plus `vulnerabilities > 0` and `security_rating > A`. To adopt it for one project:
+A gate named `Platform code hygiene` exists on the server with the Sonar way
+conditions plus `vulnerabilities > 0` and `security_rating > A`. It is assigned
+to nothing. To adopt it for one project:
 
 ```bash
 curl -u "$SQ_TOKEN:" -X POST https://sonarqube.example.com/api/qualitygates/select \
-  -d 'gateName=Strict code hygiene&projectKey=<namespace>:<name>'
+  -d 'gateName=Platform code hygiene&projectKey=<namespace>:<name>'
 ```
 
 Start with one repo. `vulnerabilities > 0` is strict, and every SARIF finding
@@ -124,8 +126,8 @@ counts toward it.
 
 Community Build has no portfolio feature, but
 `https://sonarqube.example.com/projects` lists every project with its gate
-status, security rating and vulnerability count, and sorts by any of them.
-At a few dozen projects that is enough of a cross-project view.
+status, security rating and vulnerability count, and sorts by any of them. At
+17 projects that is the estate view.
 
 If that stops being enough — you want triage workflow, finding ownership,
 false-positive suppression, or one dashboard across scanners — DefectDojo

@@ -1,0 +1,87 @@
+---
+name: helm-package-publish
+kind: component
+status: experimental
+introduced_in: 1.0.0
+minimum_gitlab: '18.9'
+
+# Retry policy: the `max-retries` input (0, 1 or 2, default 1) sets `retry: max`,
+# and `retry: when` is `runner_system_failure` and nothing else. A job killed by
+# its runner runs again; a failed gate never does.
+emitted_jobs:
+  - pattern: '{instance}:helm-package-publish'
+    stage: publish
+    blocking: true
+
+outputs:
+  - path: .ci-artifacts/{instance}/helm-package-publish/chart.json
+    producer: '{instance}:helm-package-publish'
+    format: json
+    schema: >-
+      schema_version 1; repository, name, version, digest (sha256:<64 hex>),
+      reference (<repository>@<digest>), archive, archive_sha256,
+      source_commit, pipeline_id, job_id, created_at (UTC RFC 3339). The
+      producer checks every field is present and non-empty before the job
+      succeeds.
+    subject_identity: >-
+      reference, the chart at its registry digest as helm reported it after the
+      push. The chart equivalent of image.json in section 9.1; a downstream job
+      consumes this, never the version tag.
+    retention: 1 week
+  - path: .ci-artifacts/{instance}/helm-package-publish/{name}-{version}.tgz
+    producer: '{instance}:helm-package-publish'
+    format: gzip
+    subject_identity: archive_sha256 in chart.json.
+    retention: 1 week
+
+required_secrets:
+  - name: HARBOR_USER
+    kind: ci-variable
+    scope: Push access to the chart-repository OCI namespace.
+    protected_ref_required: true
+  - name: HARBOR_PASSWORD
+    kind: ci-variable
+    scope: Push access to the chart-repository OCI namespace.
+    protected_ref_required: true
+
+runtime_image:
+  reference: 'docker.io/alpine/helm@sha256:ed9dfc49d43d034df3f9880eb777caf0183e5156508672478b80412c63f3db4f'
+  pinning: digest
+  tool_versions:
+    helm: 3.16.3
+    architecture: linux/amd64
+
+trust:
+  privileged: false
+  network_egress:
+    # The execution image, and the default destination registry.
+    - registry.example.com
+    # Any chart repository a chart's Chart.lock points at.
+  runner_profile: shared-docker
+  protected_ref_required: true
+
+validation:
+  evidence:
+    - source-reviewed
+    - yaml-parsed
+    - gitlab-linted
+    - runtime-tested
+  verified_at: 2026/09/15
+  environment: >-
+    alpine/helm 3.16.3 at the pinned digest, linux/amd64 under Docker on macOS,
+    publishing to a local OCI registry (registry:2). The probe added
+    --insecure/--plain-http for that registry; the component itself uses TLS,
+    which is therefore the one behaviour not exercised end to end.
+  notes: >-
+    Runtime-tested as the copy embedded in template.yml. Five cases were
+    exercised: a first publish producing chart.json with a real registry digest;
+    a republish of the same version refused; the same republish allowed with
+    allow-overwrite; a run with the password variable empty, which fails before
+    any registry contact; and a chart-repository with no project path. Two
+    measured facts the script depends on, both against helm 3.16.3: `helm
+    package` writes "Successfully packaged chart and saved it to:" to STDOUT,
+    and `helm push` writes "Pushed:" and "Digest:" to STDERR. Reading the wrong
+    stream yields an empty digest, so both are captured deliberately and the
+    result is checked. run-rules defaults to a protected tag; the template this
+    replaces published on every default-branch push with no gate. No pipeline
+    has been run: the merged configuration is linted only.

@@ -1,0 +1,82 @@
+---
+# Contract for templates/terraform-apply. The other half of the contract is the
+# spec:inputs header of template.yml.
+name: terraform-apply
+kind: component
+status: experimental
+introduced_in: 1.0.0
+minimum_gitlab: '18.9'
+
+# Retry policy: the `max-retries` input (0, 1 or 2, default 1) sets `retry: max`,
+# and `retry: when` is `runner_system_failure` and nothing else. A job killed by
+# its runner runs again; a failed gate never does.
+emitted_jobs:
+  - pattern: '{instance}:terraform-apply'
+    stage: deploy
+    blocking: true
+
+# The mutation is the outcome; GitLab's own deployment record and job log are
+# the evidence. Nothing is written under .ci-artifacts.
+outputs: []
+
+required_secrets:
+  - name: GITLAB_TF_STATE_TOKEN
+    kind: ci-variable
+    scope: >-
+      Default value of the state-token-variable input. Read/write on the
+      project's Terraform state through the GitLab HTTP backend. Must be masked,
+      and should be an identity distinct from the one the plan job uses.
+    protected_ref_required: true
+  - name: VAULT_ID_TOKEN
+    kind: id-token
+    audience: https://vault.example.com:8200
+    role: gitlab-ci-terraform
+    scope: >-
+      Minted only when the vault-auth input is true, for providers that read
+      credentials from Vault.
+
+runtime_image:
+  reference: 'docker.io/hashicorp/terraform@sha256:5820b87995595425074f881500a037b0ccd41158d0d9b44d78f5f120612f2d3d'
+  pinning: digest
+  tool_versions:
+    terraform: 1.11.4
+    tfguard.sh: >-
+      runtime/terraform/tfguard.sh, carried in the template as base64 and
+      decoded at job start; kept in lockstep by runtime/terraform/embed.py
+
+trust:
+  privileged: false
+  network_egress:
+    - registry.example.com
+    - gitlab.example.com
+    - registry.terraform.io
+    - vault.example.com
+  runner_profile: >-
+    A runner that may hold production mutation credentials. A runner tag selects
+    a runner; it is not a permission boundary.
+  # The default rules offer the manual apply only on a default-branch push.
+  # Attach protected-environment approvers to the environment input: when:
+  # manual on its own is pressable by any project Developer.
+  protected_ref_required: true
+
+validation:
+  evidence:
+    - source-reviewed
+    - yaml-parsed
+    - gitlab-linted
+    - runtime-tested
+  verified_at: 2026/09/15
+  environment: gitlab.example.com 18.9.1-ee, hashicorp/terraform 1.11.4 on Alpine 3.21
+  notes: >-
+    runtime-tested covers every pre-apply refusal in tests/runtime/terraform/:
+    tampered plan, changed lockfile, stale plan, wrong instance, environment,
+    state id, working directory, source commit, engine version and recorded
+    maximum age, plus the destroy guard against real terraform plan JSON. No
+    apply has been executed against real infrastructure. `gate-jobs` is spliced
+    into needs after the plan producer, which is never replaced by it; the
+    splice is the same one the security components use and it was linted here
+    with an empty list and with a cross-instance entry. Status: experimental.
+    The gated half is unrun: platform/terraform-dns main pipeline 5744
+    CREATED example:terraform-apply and tenant-b:terraform-apply as manual jobs
+    and nobody started them, so no plan this repository produced has been
+    consumed by an apply. A created job is not an executed one.

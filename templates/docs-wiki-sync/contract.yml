@@ -1,0 +1,75 @@
+---
+name: docs-wiki-sync
+kind: component
+status: released
+introduced_in: 1.0.0
+minimum_gitlab: '18.9'
+minimum_runner: '16.0'
+
+# Retry policy: the `max-retries` input (0, 1 or 2, default 1) sets `retry: max`,
+# and `retry: when` is `runner_system_failure` and nothing else. A job killed by
+# its runner runs again; a failed gate never does.
+emitted_jobs:
+  - pattern: '{instance}:docs-wiki-sync'
+    stage: verify
+    # The sync either completes a cycle or fails: wiki-deploy.sh runs under
+    # `set -euo pipefail` and the job carries no success mask.
+    blocking: true
+
+# The job mutates the project wiki and the default branch; it produces no
+# pipeline artifact. Its record is the git history of both.
+outputs: []
+
+required_secrets:
+  - name: WIKI_TOKEN
+    kind: ci-variable
+    scope: >-
+      write_repository on the project, Maintainer when the default branch is
+      protected. Clones and pushes the wiki, and pushes pulled wiki edits to the
+      default branch.
+    protected_ref_required: false
+
+runtime_image:
+  reference: 'docker.io/python@sha256:cd7c412d000912f29075a1b8803e43cb2f38bb67f104019df526df5ceaf30569'
+  pinning: digest
+  tool_versions:
+    python: '3.12'
+    pyyaml: 6.0.2
+
+trust:
+  privileged: false
+  network_egress:
+    - gitlab.example.com
+    - registry.example.com
+    - the configured Python package index
+  runner_profile: shared-docker
+  protected_ref_required: false
+
+validation:
+  evidence:
+    - source-reviewed
+    - yaml-parsed
+    - gitlab-linted
+    - runtime-tested
+    - integration-tested
+  verified_at: 2026/09/16
+  revision: '1.0.0-rc.2'
+  environment: >-
+    gitlab.example.com 18.9.1-ee, project 18, POST /api/v4/projects/<project-id>/ci/lint.
+    Executed on shared ref 1.0.0-rc.2 in: platform/wiki-tpl-flat (project 79)
+    pipeline 5726, platform/wiki-tpl-nested (80) 5727 and platform/wiki-tpl-odd (81)
+    5728, all three docs:docs-wiki-sync green; platform/docs-site (70) 5733
+    (merge request, component included directly), 5737 (default-branch push) and
+    5740 (schedule). Both directions ran: the pull step reached its decision and
+    reported "wiki has no edits since the last sync", which rc.1 skipped
+    entirely through a swallowed failure. Importing an actual wiki edit has
+    still not been exercised in a pipeline.
+  notes: >-
+    Failure semantics (section 10.1): a missing WIKI_TOKEN excludes the job
+    through run-rules rather than failing it; once the job runs, an absent token,
+    an unreachable wiki, a rejected push after the bounded retries, a payload
+    whose sha256 does not match, or a pyyaml artefact whose hash does not match
+    all fail the job. Compatibility: this component drops the
+    `.not_for_wiki_sync` rules fragment that consumers pulled in by
+    `!reference`, and takes the documentation folder as the `working-directory`
+    input instead of the top-level `DOCS_DIR` variable.

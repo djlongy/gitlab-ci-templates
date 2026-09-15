@@ -1,0 +1,20 @@
+---
+# examples/docs-wiki/.gitlab-ci.yml
+#
+# A repository whose whole pipeline is mirroring docs/ to its own wiki.
+#
+# WIKI_TOKEN is required by every rule in the composition, so set it as a group
+# or project CI variable first: without it the job is skipped rather than
+# failing halfway through regenerating the wiki.
+#
+# A repository that also has its own checks includes
+# /templates/docs-wiki-sync/template.yml directly instead, because this file
+# owns `workflow:` and `stages:`.
+include:
+  - project: 'platform/gitlab-ci-templates'
+    ref: 'REPLACE_WITH_APPROVED_SHARED_CI_REF'
+    file: '/pipelines/docs-wiki.yml'
+    inputs:
+      instance: docs
+      working-directory: 'docs'
+      mkdocs-config: 'mkdocs.yml'

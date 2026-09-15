@@ -1,9 +1,0 @@
-# A whole .gitlab-ci.yml for a repo that only mirrors its docs folder to its wiki.
-include:
-  - project: 'platform/ci-templates'
-    file: '/docs/wiki-sync.yml'
-    ref: main
-
-# Only when the markdown does not live in docs/
-# variables:
-#   DOCS_DIR: "documentation"

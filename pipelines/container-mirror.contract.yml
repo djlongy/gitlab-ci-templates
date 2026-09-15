@@ -1,0 +1,108 @@
+---
+# pipelines/container-mirror.contract.yml — the contract for the composition
+# beside it.
+#
+# Section 6.3. The catalogue generator reads this plus the spec:inputs header of
+# container-mirror.yml; do not restate inputs here.
+name: container-mirror
+kind: pipeline
+status: released
+introduced_in: 1.0.0
+minimum_gitlab: '18.9'
+emitted_jobs:
+  - pattern: '{instance}:container-list-rke2'
+    stage: verify
+    blocking: true
+  - pattern: '{instance}:container-mirror-skopeo'
+    stage: publish
+    blocking: true
+  - pattern: '{instance}:container-export-skopeo'
+    stage: publish
+    blocking: true
+outputs:
+  - path: .ci-artifacts/{instance}/container-list-rke2/images.txt
+    producer: '{instance}:container-list-rke2'
+    format: One upstream reference per line, sorted and deduplicated.
+    retention: 30 days
+  - path: .ci-artifacts/{instance}/container-mirror-skopeo/digests.txt
+    producer: '{instance}:container-mirror-skopeo'
+    format: Destination reference and its sha256 digest, tab separated.
+    retention: 30 days
+  - path: .ci-artifacts/{instance}/container-export-skopeo/manifest.json
+    producer: '{instance}:container-export-skopeo'
+    format: >-
+      A transfer stamp and every image's manifest, config and layer digests,
+      including the layers left out of the archive.
+    retention: 30 days
+required_secrets:
+  - name: REGISTRY_USER
+    kind: ci-variable
+    scope: Robot account for the destination registry. Unless vault-addr is set.
+    protected_ref_required: true
+  - name: REGISTRY_PASSWORD
+    kind: ci-variable
+    scope: Robot token for the above. Unless vault-addr is set.
+    protected_ref_required: true
+  - name: AWS_ACCESS_KEY_ID
+    kind: ci-variable
+    scope: Object-store key for the transfer prefix. Unless vault-addr is set.
+    protected_ref_required: true
+  - name: AWS_SECRET_ACCESS_KEY
+    kind: ci-variable
+    scope: Object-store secret for the above. Unless vault-addr is set.
+    protected_ref_required: true
+  - name: VAULT_JWT
+    kind: id-token
+    audience: The vault-addr input.
+    role: The vault-role input.
+    scope: >-
+      Vault mode only, selected by a non-empty vault-addr, which then also
+      requires vault-role, vault-kv-path and vault-s3-kv-path.
+runtime_image:
+  reference: >-
+    per component: the execution-image input of this composition is forwarded to
+    all three, digest-pinned
+  pinning: input
+trust:
+  privileged: false
+  network_egress:
+    - github.com, for the RKE2 release lists
+    - every source registry named in the reference lists
+    - the destination registry named by the registry input
+    - the s3-endpoint host
+    - the vault-addr host, in Vault mode
+  runner_profile: >-
+    shared-docker, the estate instance runners. They are registered untagged, so
+    runner-tags selects nothing today and a tag is not a permission boundary.
+    The export job needs disk for the whole OCI layout.
+  protected_ref_required: true
+validation:
+  evidence:
+    - source-reviewed
+    - yaml-parsed
+    - gitlab-linted
+    - integration-tested
+  verified_at: 2026/09/16
+  revision: '1.0.0-rc.2'
+  environment: >-
+    gitlab.example.com 18.9.1-ee, project 18, POST /api/v4/projects/<project-id>/ci/lint.
+    Executed on shared ref 1.0.0-rc.2 in: platform/k8s-gitops (61) 5723 (merge
+    request, list and dry-run mirror) and 5729 (main, list, real mirror of 32
+    references and real export). Every job the composition creates ran green for
+    its own source.
+  notes: >-
+    Three pipeline sources: a merge request, a schedule and a default-branch
+    push. A merge request resolves the list and inspects every reference without
+    writing to the registry, and exports nothing; the mode is carried by a rule
+    variable rather than the dry-run input because inputs are fixed at pipeline
+    creation. The schedule and the default-branch push mirror and export.
+    The graph is the composition's: container-mirror-skopeo consumes the list
+    job's artifact, container-export-skopeo consumes the same artifact and gates
+    on the mirror job with artifacts false. Neither producer is optional.
+    Linting this composition from a feature branch cannot produce a job list.
+    The CI Lint API resolves include:local at a non-default ref only with
+    dry_run true, and dry_run simulates a push to that ref, which this workflow
+    rejects. Its fixtures in tests/pipelines/container-mirror/ therefore prove
+    that every include resolves and every input validates, and the two-instance
+    fixture overrides run-rules to prove the job names. Evidence is
+    gitlab-linted only; no pipeline in this release has been executed.

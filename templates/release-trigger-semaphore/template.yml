@@ -1,0 +1,243 @@
+---
+# templates/release-trigger-semaphore/template.yml
+#
+# Start a Semaphore task template from a GitLab pipeline, authenticating through
+# the GitLab ID token -> Vault JWT login -> Semaphore API token chain. Replaces
+# the hidden job `.semaphore_trigger_base` in promote/semaphore-trigger.yml.
+#
+# What changed from that file:
+#   - It had no `rules:`, so any pipeline source could launch Ansible against the
+#     estate. The default `run-rules` refuses merge request pipelines and is
+#     manual elsewhere (sections 7.2, 10.2, 11.3).
+#   - `SEMAPHORE_TASK_DRYRUN` defaulted to false: the mutating mode was the
+#     default. The `dry-run` input defaults to true, so a consumer states that it
+#     means to change the estate.
+#   - Vault address, mount, role and KV path were hard coded; they are inputs
+#     defaulted from .ci/estate.yml auth.vault.
+#   - The task id was echoed and forgotten. It is recorded in
+#     trigger-result.json, and a response without one now fails the job.
+
+#### Public interface ####
+spec:
+  inputs:
+    instance:
+      type: string
+      description: Unique workload instance used in the job name.
+      regex: '^[a-z][a-z0-9-]{0,47}$'
+    stage:
+      type: string
+      description: Stage supplied by the owning composition.
+      default: deploy
+    project-name:
+      type: string
+      description: Semaphore project holding the task template.
+      regex: '^[A-Za-z0-9][A-Za-z0-9 ._-]{0,99}$'
+    template-name:
+      type: string
+      description: Semaphore task template to run.
+      regex: '^[A-Za-z0-9][A-Za-z0-9 ._-]{0,99}$'
+    dry-run:
+      type: boolean
+      description: >-
+        Run the template in Semaphore's dry-run mode. Defaults to true so that
+        changing the estate is a deliberate consumer decision.
+      default: true
+    debug:
+      type: boolean
+      description: Ask Semaphore for verbose task output.
+      default: false
+    semaphore-url:
+      type: string
+      description: Base URL of the Semaphore instance.
+      default: 'https://semaphore.example.com'
+    vault-address:
+      type: string
+      description: Vault address, from .ci/estate.yml auth.vault.address.
+      default: 'https://vault.example.com:8200'
+    vault-auth-path:
+      type: string
+      description: JWT auth mount, from .ci/estate.yml auth.vault.jwt_mount.
+      default: jwt
+    vault-role:
+      type: string
+      description: >-
+        Vault JWT role this job logs in as. The estate profile lists the roles
+        that exist; pick the least-privileged one that can read the KV path.
+      default: gitlab-ci
+    vault-secret-path:
+      type: string
+      description: >-
+        KV v2 API path holding the Semaphore API token, including the `data/`
+        segment.
+      default: 'kv/data/apps/semaphore/runtime'
+    vault-token-field:
+      type: string
+      description: Field at vault-secret-path holding the API token.
+      default: api_token_ci
+    id-token-audience:
+      type: string
+      description: Audience bound to the Vault JWT role.
+      default: 'https://vault.example.com:8200'
+    execution-image:
+      type: string
+      description: >-
+        Approved execution image pinned by digest. Needs a POSIX shell and the
+        package manager used to add curl and jq.
+      regex: '^.+@sha256:[0-9a-f]{64}$'
+      default: 'docker.io/alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc'
+    runner-tags:
+      type: array
+      description: Runner selection from the estate profile.
+      default: []
+    max-retries:
+      type: number
+      description: >-
+        How many times the runner may retry this job. The condition is
+        runner_system_failure only, so this retries infrastructure and never a
+        failed gate.
+      default: 1
+      options: [0, 1, 2]
+    run-rules:
+      type: array
+      description: >-
+        Job eligibility set by the composition. Launching a Semaphore task runs
+        Ansible against live hosts, so the default never fires on a merge request
+        pipeline and is manual everywhere else.
+      default:
+        - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+          when: never
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+          when: manual
+        - if: '$CI_COMMIT_TAG && $CI_COMMIT_REF_PROTECTED == "true"'
+          when: manual
+---
+
+#### Executable capability ####
+"$[[ inputs.instance ]]:release-trigger-semaphore":
+  stage: $[[ inputs.stage ]]
+  image:
+    name: $[[ inputs.execution-image ]]
+    entrypoint: ['']
+  tags: $[[ inputs.runner-tags ]]
+  id_tokens:
+    VAULT_ID_TOKEN:
+      aud: $[[ inputs.id-token-audience ]]
+  variables:
+    GIT_STRATEGY: none
+    CI_TPL_ARTIFACT_DIR: "$CI_PROJECT_DIR/.ci-artifacts/$[[ inputs.instance ]]/release-trigger-semaphore"
+    CI_TPL_SEMAPHORE_URL: $[[ inputs.semaphore-url ]]
+    CI_TPL_PROJECT_NAME: $[[ inputs.project-name ]]
+    CI_TPL_TEMPLATE_NAME: $[[ inputs.template-name ]]
+    CI_TPL_DRY_RUN: $[[ inputs.dry-run ]]
+    CI_TPL_DEBUG: $[[ inputs.debug ]]
+    CI_TPL_VAULT_ADDR: $[[ inputs.vault-address ]]
+    CI_TPL_VAULT_AUTH_PATH: $[[ inputs.vault-auth-path ]]
+    CI_TPL_VAULT_ROLE: $[[ inputs.vault-role ]]
+    CI_TPL_VAULT_SECRET_PATH: $[[ inputs.vault-secret-path ]]
+    CI_TPL_VAULT_TOKEN_FIELD: $[[ inputs.vault-token-field ]]
+  dependencies: []
+  before_script:
+    - apk add --no-cache curl jq
+  script:
+    - |
+      set -eu
+      umask 077
+      mkdir -p "$CI_TPL_ARTIFACT_DIR"
+      work=$(mktemp -d)
+      trap 'rm -rf "$work"' EXIT
+
+      echo "Vault JWT login at $CI_TPL_VAULT_ADDR (mount $CI_TPL_VAULT_AUTH_PATH, role $CI_TPL_VAULT_ROLE)"
+      jq -n --arg jwt "$VAULT_ID_TOKEN" --arg role "$CI_TPL_VAULT_ROLE" \
+        '{jwt: $jwt, role: $role}' > "$work/login.json"
+      curl --silent --show-error --fail --max-time 10 \
+        --data @"$work/login.json" \
+        "$CI_TPL_VAULT_ADDR/v1/auth/$CI_TPL_VAULT_AUTH_PATH/login" > "$work/login-response.json" \
+        || { echo 'ERROR: Vault JWT login failed'; exit 1; }
+      vault_token=$(jq -r '.auth.client_token // empty' < "$work/login-response.json")
+      [ -n "$vault_token" ] || { echo 'ERROR: Vault returned no client token'; exit 1; }
+
+      # Credentials reach curl through a private config file, never argv.
+      printf 'header = "X-Vault-Token: %s"\n' "$vault_token" > "$work/vault.curlrc"
+      curl --config "$work/vault.curlrc" --silent --show-error --fail --max-time 10 \
+        "$CI_TPL_VAULT_ADDR/v1/$CI_TPL_VAULT_SECRET_PATH" > "$work/secret.json" \
+        || { echo "ERROR: reading $CI_TPL_VAULT_SECRET_PATH failed"; exit 1; }
+      api_token=$(jq -r --arg f "$CI_TPL_VAULT_TOKEN_FIELD" '.data.data[$f] // empty' < "$work/secret.json")
+      [ -n "$api_token" ] \
+        || { echo "ERROR: $CI_TPL_VAULT_TOKEN_FIELD missing at $CI_TPL_VAULT_SECRET_PATH"; exit 1; }
+      printf 'header = "Authorization: Bearer %s"\n' "$api_token" > "$work/semaphore.curlrc"
+
+      echo "Resolving project '$CI_TPL_PROJECT_NAME'"
+      curl --config "$work/semaphore.curlrc" --silent --show-error --fail --max-time 10 \
+        "$CI_TPL_SEMAPHORE_URL/api/projects" > "$work/projects.json" \
+        || { echo 'ERROR: listing Semaphore projects failed'; exit 1; }
+      project_id=$(jq -r --arg n "$CI_TPL_PROJECT_NAME" \
+        '[.[] | select(.name == $n)] | first | .id // empty' < "$work/projects.json")
+      [ -n "$project_id" ] \
+        || { echo "ERROR: project '$CI_TPL_PROJECT_NAME' not found"; exit 1; }
+
+      echo "Resolving template '$CI_TPL_TEMPLATE_NAME'"
+      curl --config "$work/semaphore.curlrc" --silent --show-error --fail --max-time 10 \
+        "$CI_TPL_SEMAPHORE_URL/api/project/$project_id/templates" > "$work/templates.json" \
+        || { echo 'ERROR: listing Semaphore templates failed'; exit 1; }
+      template_id=$(jq -r --arg n "$CI_TPL_TEMPLATE_NAME" \
+        '[.[] | select(.name == $n)] | first | .id // empty' < "$work/templates.json")
+      [ -n "$template_id" ] \
+        || { echo "ERROR: template '$CI_TPL_TEMPLATE_NAME' not found in '$CI_TPL_PROJECT_NAME'"; exit 1; }
+
+      jq -n --argjson template "$template_id" --argjson project "$project_id" \
+        --argjson debug "$CI_TPL_DEBUG" --argjson dry "$CI_TPL_DRY_RUN" \
+        '{template_id: $template, project_id: $project, debug: $debug, dry_run: $dry}' \
+        > "$work/task.json"
+      echo "POST task (template_id=$template_id, project_id=$project_id, dry_run=$CI_TPL_DRY_RUN)"
+      curl --config "$work/semaphore.curlrc" --silent --show-error --fail --max-time 30 \
+        --request POST --header 'Content-Type: application/json' \
+        --data @"$work/task.json" \
+        "$CI_TPL_SEMAPHORE_URL/api/project/$project_id/tasks" > "$work/task-response.json" \
+        || { echo 'ERROR: Semaphore refused the task'; exit 1; }
+      task_id=$(jq -r '.id // empty' < "$work/task-response.json")
+      # An accepted POST that returns no task id started nothing. The old
+      # template printed "Triggered Semaphore task #null" and succeeded.
+      [ -n "$task_id" ] || { echo 'ERROR: Semaphore returned no task id'; exit 1; }
+
+      jq -n \
+        --arg url "$CI_TPL_SEMAPHORE_URL" \
+        --arg project "$CI_TPL_PROJECT_NAME" \
+        --arg template "$CI_TPL_TEMPLATE_NAME" \
+        --argjson project_id "$project_id" \
+        --argjson template_id "$template_id" \
+        --argjson task_id "$task_id" \
+        --argjson dry "$CI_TPL_DRY_RUN" \
+        --arg commit "$CI_COMMIT_SHA" \
+        --arg pipeline "$CI_PIPELINE_ID" \
+        --arg job_id "$CI_JOB_ID" \
+        --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        '{schema_version: 1, target: "semaphore", endpoint: $url, project: $project,
+          project_id: $project_id, template: $template, template_id: $template_id,
+          task_id: $task_id, dry_run: $dry, source_commit: $commit,
+          pipeline_id: $pipeline, job_id: $job_id, triggered_at: $at}' \
+        > "$CI_TPL_ARTIFACT_DIR/trigger-result.json"
+      echo "Started task #$task_id — $CI_TPL_SEMAPHORE_URL/project/$project_id/history/$task_id"
+  artifacts:
+    name: "$[[ inputs.instance ]]-release-trigger-semaphore-$CI_JOB_ID"
+    paths:
+      - .ci-artifacts/$[[ inputs.instance ]]/release-trigger-semaphore/
+    when: always
+    expire_in: 1 week
+  rules: $[[ inputs.run-rules ]]
+  allow_failure: false
+  interruptible: false
+  # Infrastructure only. Section 10.1 forbids weakening an outcome, and any
+  # condition other than runner_system_failure would retry a failed gate;
+  # tests/contracts/test_retry_policy.py fails the build on one.
+  retry:
+    max: $[[ inputs.max-retries ]]
+    when: [runner_system_failure]
+  # Insulation from the consumer's `default:` block (section 13.1). A component
+  # job runs in the image the component pins and the shell the component ships;
+  # a consumer's global image, before_script, after_script, cache, services,
+  # artifacts or hooks reaching it is a component running something nobody
+  # reviewed. Runner selection and timeouts are the consumer's to set, so those
+  # stay inherited. `retry` and `id_tokens` stay too: this component sets both
+  # itself, and a consumer-level definition is a deliberate estate choice.
+  inherit:
+    default: [tags, timeout, interruptible, retry, id_tokens]

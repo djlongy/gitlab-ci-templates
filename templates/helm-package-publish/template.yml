@@ -1,0 +1,437 @@
+---
+spec:
+  inputs:
+    instance:
+      type: string
+      description: Unique workload instance used in the job name.
+      regex: '^[a-z][a-z0-9-]{0,47}$'
+    stage:
+      type: string
+      description: Stage supplied by the owning composition. Publication belongs in publish.
+      default: publish
+    working-directory:
+      type: string
+      description: Directory the chart path is relative to, inside the checkout.
+      default: '.'
+    chart-path:
+      type: string
+      description: The one chart directory to package and publish, relative to working-directory.
+    chart-repository:
+      type: string
+      description: >-
+        OCI namespace to publish into, as <registry-host>/<project>, with no
+        chart name and no tag. helm derives the chart name and tag from
+        Chart.yaml. No default: the registry and project are estate facts and
+        belong in the consumer's configuration, not in shared code.
+      regex: '^[a-z0-9][a-z0-9.:-]*(/[a-z0-9][a-z0-9._-]*)+$'
+    registry-username-variable:
+      type: string
+      description: NAME of the CI variable holding the registry username. Never the value.
+      regex: '^[A-Z][A-Z0-9_]*$'
+      default: HARBOR_USER
+    registry-password-variable:
+      type: string
+      description: NAME of the CI variable holding the registry password. Never the value.
+      regex: '^[A-Z][A-Z0-9_]*$'
+      default: HARBOR_PASSWORD
+    allow-overwrite:
+      type: boolean
+      description: >-
+        Republish a chart version that already exists in the registry. Off by
+        default: a published version is immutable, and overwriting one changes
+        what an already-deployed reference resolves to.
+      default: false
+    execution-image:
+      type: string
+      description: Approved helm execution image, pinned by digest.
+      regex: '^.+@sha256:[0-9a-f]{64}$'
+      default: 'docker.io/alpine/helm@sha256:ed9dfc49d43d034df3f9880eb777caf0183e5156508672478b80412c63f3db4f'
+    runner-tags:
+      type: array
+      description: Runner selection from the estate profile.
+      default: []
+    max-retries:
+      type: number
+      description: >-
+        How many times the runner may retry this job. The condition is
+        runner_system_failure only, so this retries infrastructure and never a
+        failed gate.
+      default: 1
+      options: [0, 1, 2]
+    run-rules:
+      type: array
+      description: >-
+        Job eligibility set by the composition. The default publishes only from
+        a protected tag, because this job mutates a registry. The template it
+        replaces published on every default-branch push.
+      default:
+        - if: '$CI_COMMIT_TAG && $CI_COMMIT_REF_PROTECTED == "true"'
+---
+
+"$[[ inputs.instance ]]:helm-package-publish":
+  stage: $[[ inputs.stage ]]
+  image:
+    name: $[[ inputs.execution-image ]]
+    entrypoint: ['']
+  tags: $[[ inputs.runner-tags ]]
+  variables:
+    CI_TPL_WORKING_DIRECTORY: $[[ inputs.working-directory ]]
+    CI_TPL_CHART_PATH: $[[ inputs.chart-path ]]
+    CI_TPL_ARTIFACT_DIR: $CI_PROJECT_DIR/.ci-artifacts/$[[ inputs.instance ]]/helm-package-publish
+  dependencies: []
+  before_script:
+    - |
+      project_root=$(cd "$CI_PROJECT_DIR" && pwd -P)
+      cd "$CI_PROJECT_DIR/$CI_TPL_WORKING_DIRECTORY"
+      case "$(pwd -P)" in
+        "$project_root"|"$project_root"/*) ;;
+        *) echo 'ERROR: working-directory escapes the checkout'; exit 1 ;;
+      esac
+    - |
+      # BEGIN embed inline runtime/kubernetes/toolchain.sh
+      #!/bin/sh
+      # Shared shell for the helm and kubernetes validation components.
+      #
+      # It defines functions only; sourcing it runs nothing. The components embed it
+      # verbatim as the last before_script entry, so the functions are in scope for
+      # the script block that follows. tests/runtime/test_template_script_lockstep.py
+      # proves the embedded copy is byte-identical to this file.
+      #
+      # Why embedded rather than called as runtime/kubernetes/toolchain.sh: section 12
+      # of docs/gitlab-ci-agent-standard.md - `include:` imports YAML, not files, so a
+      # consumer job never has this repository checked out. The upgrade path is an
+      # execution image built from images/kubernetes/ shipping these tools already
+      # installed; until one exists and is published, the job fetches them.
+      #
+      # List-shaped inputs arrive as newline-separated strings in CI_TPL_ variables,
+      # because a GitLab `array` input cannot be interpolated into a variable value -
+      # the CI Lint API rejects it with "variable definition must be either a string
+      # or a hash". Every loop below sets IFS to a newline so a path may contain
+      # spaces, and skips empty lines.
+      set -e
+
+      # A newline, built rather than written. A literal newline here would be a
+      # continuation line, and this file is embedded into a YAML block scalar where
+      # every line picks up the block's indentation - the value would be a newline
+      # followed by six spaces, and IFS would then split on spaces too.
+      CI_TPL_NEWLINE=$(printf '\nx')
+      CI_TPL_NEWLINE=${CI_TPL_NEWLINE%x}
+
+      # Fetch a URL to a file. curl where present (alpine/helm has it), busybox wget
+      # otherwise (alpine has no curl). Both fail non-zero on an HTTP error.
+      ci_tpl_fetch() {
+        if command -v curl >/dev/null 2>&1; then
+          curl -fsSL --retry 3 -o "$2" "$1"
+        else
+          wget -q -O "$2" "$1"
+        fi
+      }
+
+      # Install a pinned release asset, verified twice: the release's checksum file
+      # must match a SHA-256 pinned in the component, and the asset must match the
+      # line for it inside that checksum file. Pinning only the asset hash would need
+      # one pin per architecture; pinning the checksum file covers every asset in the
+      # release with one constant. Section 12 requires an independently verified
+      # checksum for an unavoidable runtime download, and a failure on any mismatch.
+      #
+      # ci_tpl_install_tool <name> <asset-url> <checksums-url> <checksums-sha256> \
+      #                     <asset-filename> <archive-member> <bin-dir>
+      ci_tpl_install_tool() {
+        ci_tpl_tool_name=$1
+        ci_tpl_asset_url=$2
+        ci_tpl_checksums_url=$3
+        ci_tpl_checksums_sha256=$4
+        ci_tpl_asset_name=$5
+        ci_tpl_member=$6
+        ci_tpl_bin_dir=$7
+
+        ci_tpl_work=$(mktemp -d)
+        ci_tpl_fetch "$ci_tpl_checksums_url" "$ci_tpl_work/CHECKSUMS"
+        if ! echo "${ci_tpl_checksums_sha256}  ${ci_tpl_work}/CHECKSUMS" | sha256sum -c - >/dev/null 2>&1; then
+          echo "ERROR: the ${ci_tpl_tool_name} checksum file does not match its pinned SHA-256" >&2
+          echo "ERROR: expected ${ci_tpl_checksums_sha256}, got $(sha256sum "${ci_tpl_work}/CHECKSUMS" | cut -d' ' -f1)" >&2
+          return 1
+        fi
+
+        # The published format is "<sha256>  <filename>", sometimes "*<filename>".
+        ci_tpl_asset_sha256=$(awk -v n="$ci_tpl_asset_name" \
+          '$2 == n || $2 == "*" n {print $1}' "$ci_tpl_work/CHECKSUMS")
+        if [ -z "$ci_tpl_asset_sha256" ]; then
+          echo "ERROR: ${ci_tpl_asset_name} is not listed in the ${ci_tpl_tool_name} checksum file" >&2
+          return 1
+        fi
+
+        ci_tpl_fetch "$ci_tpl_asset_url" "$ci_tpl_work/$ci_tpl_asset_name"
+        if ! echo "${ci_tpl_asset_sha256}  ${ci_tpl_work}/${ci_tpl_asset_name}" | sha256sum -c - >/dev/null 2>&1; then
+          echo "ERROR: downloaded ${ci_tpl_asset_name} does not match its published checksum" >&2
+          return 1
+        fi
+
+        mkdir -p "$ci_tpl_bin_dir"
+        tar -xzf "$ci_tpl_work/$ci_tpl_asset_name" -C "$ci_tpl_bin_dir" "$ci_tpl_member"
+        chmod +x "$ci_tpl_bin_dir/$ci_tpl_member"
+        rm -rf "$ci_tpl_work"
+        echo "installed ${ci_tpl_tool_name} to ${ci_tpl_bin_dir}/${ci_tpl_member}"
+      }
+
+      # Fail when a path resolves outside the checkout. These paths come from
+      # component inputs; a ../ segment or a symlink must not let one of them read or
+      # write outside CI_PROJECT_DIR.
+      ci_tpl_require_inside_checkout() {
+        ci_tpl_root=$(cd "$CI_PROJECT_DIR" && pwd -P)
+        if ! ci_tpl_parent=$(cd "$(dirname -- "$1")" 2>/dev/null && pwd -P); then
+          echo "ERROR: '$1' has no existing parent directory" >&2
+          return 1
+        fi
+        ci_tpl_target="${ci_tpl_parent%/}/$(basename -- "$1")"
+        case "$ci_tpl_target" in
+          "$ci_tpl_root" | "$ci_tpl_root"/*) ;;
+          *)
+            echo "ERROR: '$1' resolves to '$ci_tpl_target', outside the checkout" >&2
+            return 1
+            ;;
+        esac
+      }
+
+      # Run kubeconform over one rendered manifest file. It exits 0 for a clean run,
+      # 1 for a validation failure and other codes for execution errors; every
+      # non-zero outcome fails the job, which is what section 10.1 requires. Missing
+      # schemas are rejected unless the component was explicitly configured to
+      # tolerate them: a CRD-backed resource with no schema is an unvalidated
+      # resource, not a passing one.
+      ci_tpl_kubeconform() {
+        ci_tpl_manifest=$1
+        set -- -strict -summary -output text \
+          -kubernetes-version "$CI_TPL_KUBERNETES_VERSION"
+        if [ "${CI_TPL_IGNORE_MISSING_SCHEMAS:-false}" = "true" ]; then
+          set -- "$@" -ignore-missing-schemas
+        fi
+        ci_tpl_saved_ifs=$IFS
+        IFS=$CI_TPL_NEWLINE
+        for ci_tpl_location in ${CI_TPL_SCHEMA_LOCATIONS:-}; do
+          [ -n "$ci_tpl_location" ] || continue
+          set -- "$@" -schema-location "$ci_tpl_location"
+        done
+        IFS=$ci_tpl_saved_ifs
+        echo "+ kubeconform $* ${ci_tpl_manifest}"
+        kubeconform "$@" "$ci_tpl_manifest"
+      }
+      # END embed
+    - |
+      # The destination, the credential names and the overwrite policy are
+      # assigned here from the interpolated inputs, not read from CI variables.
+      # Section 6.1: a reserved CI_TPL_ name can be overridden by a
+      # higher-precedence project or group variable, and these assignments
+      # overwrite any such override. Their input regexes keep the values
+      # shell-safe. This is also the fix for the precedence defect in
+      # build/helm-oci.yml, where job-level variables silently outranked the
+      # consumer's own.
+      CI_TPL_CHART_REPOSITORY='$[[ inputs.chart-repository ]]'
+      CI_TPL_REGISTRY_USERNAME_VARIABLE='$[[ inputs.registry-username-variable ]]'
+      CI_TPL_REGISTRY_PASSWORD_VARIABLE='$[[ inputs.registry-password-variable ]]'
+      CI_TPL_ALLOW_OVERWRITE='$[[ inputs.allow-overwrite ]]'
+      export CI_TPL_CHART_REPOSITORY CI_TPL_REGISTRY_USERNAME_VARIABLE
+      export CI_TPL_REGISTRY_PASSWORD_VARIABLE CI_TPL_ALLOW_OVERWRITE
+  script:
+    - |
+      # BEGIN embed inline runtime/helm/package_publish.sh
+      #!/bin/sh
+      # helm-package-publish: package one chart, push it to an OCI registry, and
+      # record the immutable identity of what was pushed in chart.json.
+      #
+      # Embedded verbatim as the script block of
+      # templates/helm-package-publish/template.yml;
+      # tests/runtime/test_template_script_lockstep.py proves the two copies match.
+      #
+      # Defects in build/helm-oci.yml this replaces, each with a test named after it
+      # in tests/runtime/helm/test_helm_package_publish.py:
+      #
+      #  1. It suppressed the exit status of `helm dependency update`, publishing a
+      #     chart whose dependencies failed to resolve. Section 11.4 forbids hiding
+      #     a packaging failure. Here `helm dependency build` runs against the
+      #     committed Chart.lock and its exit code stands.
+      #  2. `CHART_FILE=$(ls *.tgz | head -1)` pushes whatever archive happens to sort
+      #     first in the working directory. Here the archive is written to a
+      #     dedicated directory and its path is read from the line `helm package`
+      #     prints on stdout, so the chart pushed is the chart just packaged.
+      #  3. Registry credentials were optional: `if [ -n "$HARBOR_USER" ] ... login`
+      #     meant an unset variable skipped the login and the push then ran
+      #     unauthenticated. Section 10.1: credentials unavailable is a failure.
+      #  4. The push overwrote an existing chart version silently. The version is
+      #     checked in the registry first and an existing one is refused unless the
+      #     caller explicitly allowed the overwrite.
+      #  5. The registry and project were job-level `variables:`, which outrank a
+      #     consumer's top-level `variables:`, so the documented override never took
+      #     effect and two estate facts were baked into shared code. They are inputs
+      #     now, with no default.
+      set -e
+
+      : "${CI_TPL_CHART_PATH:?chart-path is required}"
+      : "${CI_TPL_CHART_REPOSITORY:?chart-repository is required}"
+      : "${CI_TPL_REGISTRY_USERNAME_VARIABLE:?registry-username-variable is required}"
+      : "${CI_TPL_REGISTRY_PASSWORD_VARIABLE:?registry-password-variable is required}"
+      : "${CI_TPL_ARTIFACT_DIR:?artifact directory is required}"
+
+      ci_tpl_require_inside_checkout "$CI_TPL_CHART_PATH"
+      if [ ! -f "$CI_TPL_CHART_PATH/Chart.yaml" ]; then
+        echo "ERROR: '${CI_TPL_CHART_PATH}' is not a chart directory: no Chart.yaml" >&2
+        exit 1
+      fi
+
+      # The registry host is the first path segment of the repository, and the chart
+      # is published under the rest of it. helm derives the final name from Chart.yaml,
+      # so chart-repository is the OCI namespace, never the full chart reference.
+      ci_tpl_registry=${CI_TPL_CHART_REPOSITORY%%/*}
+      if [ "$ci_tpl_registry" = "$CI_TPL_CHART_REPOSITORY" ]; then
+        echo "ERROR: chart-repository '${CI_TPL_CHART_REPOSITORY}' has no project path." >&2
+        echo "ERROR: expected <registry-host>/<project>, for example registry.example/charts." >&2
+        exit 1
+      fi
+
+      # Read the credentials by variable NAME. printenv, not eval: section 6.1
+      # forbids constructing a command from an input. printenv exits non-zero for an
+      # unset name, which is a missing credential rather than a script error.
+      ci_tpl_user=$(printenv "$CI_TPL_REGISTRY_USERNAME_VARIABLE") || ci_tpl_user=''
+      ci_tpl_password=$(printenv "$CI_TPL_REGISTRY_PASSWORD_VARIABLE") || ci_tpl_password=''
+      if [ -z "$ci_tpl_user" ] || [ -z "$ci_tpl_password" ]; then
+        echo "ERROR: registry credentials are unavailable." >&2
+        echo "ERROR: ${CI_TPL_REGISTRY_USERNAME_VARIABLE} and ${CI_TPL_REGISTRY_PASSWORD_VARIABLE}" >&2
+        echo "ERROR: must both be set as protected CI variables for this ref." >&2
+        exit 1
+      fi
+
+      # Chart identity comes from Chart.yaml, which is also what helm uses to name
+      # the archive and the OCI tag.
+      ci_tpl_chart_meta=$(helm show chart "$CI_TPL_CHART_PATH")
+      ci_tpl_name=$(printf '%s\n' "$ci_tpl_chart_meta" | awk '$1 == "name:" {print $2; exit}')
+      ci_tpl_version=$(printf '%s\n' "$ci_tpl_chart_meta" | awk '$1 == "version:" {print $2; exit}')
+      if [ -z "$ci_tpl_name" ] || [ -z "$ci_tpl_version" ]; then
+        echo "ERROR: could not read name and version from ${CI_TPL_CHART_PATH}/Chart.yaml" >&2
+        exit 1
+      fi
+      echo "chart ${ci_tpl_name} version ${ci_tpl_version}"
+
+      if grep -q '^dependencies:' "$CI_TPL_CHART_PATH/Chart.yaml"; then
+        if [ ! -f "$CI_TPL_CHART_PATH/Chart.lock" ]; then
+          echo "ERROR: '${CI_TPL_CHART_PATH}' declares dependencies but has no Chart.lock." >&2
+          echo "ERROR: run 'helm dependency update' and commit the lock file before publishing." >&2
+          exit 1
+        fi
+        echo "=== helm dependency build ==="
+        helm dependency build "$CI_TPL_CHART_PATH"
+      fi
+
+      # helm writes "Pushed:" and "Digest:" to stderr and the packaged path to
+      # stdout, measured against alpine/helm 3.16.3 on 2026/09/15. Redirecting the
+      # wrong stream is how a digest ends up empty, so both are captured
+      # deliberately and the result is checked rather than assumed.
+      echo "=== helm registry login ${ci_tpl_registry} ==="
+      printf '%s' "$ci_tpl_password" |
+        helm registry login "$ci_tpl_registry" --username "$ci_tpl_user" --password-stdin
+
+      if helm show chart "oci://${CI_TPL_CHART_REPOSITORY}/${ci_tpl_name}" \
+        --version "$ci_tpl_version" >/dev/null 2>&1; then
+        if [ "${CI_TPL_ALLOW_OVERWRITE:-false}" != "true" ]; then
+          echo "ERROR: ${CI_TPL_CHART_REPOSITORY}/${ci_tpl_name}:${ci_tpl_version} already exists." >&2
+          echo "ERROR: a published chart version is immutable. Bump the version in Chart.yaml," >&2
+          echo "ERROR: or set allow-overwrite for a registry where republishing is intended." >&2
+          exit 1
+        fi
+        echo "WARNING: overwriting existing ${ci_tpl_name}:${ci_tpl_version}, allow-overwrite is set"
+      fi
+
+      mkdir -p "$CI_TPL_ARTIFACT_DIR"
+      echo "=== helm package ==="
+      ci_tpl_package_output=$(helm package "$CI_TPL_CHART_PATH" --destination "$CI_TPL_ARTIFACT_DIR")
+      echo "$ci_tpl_package_output"
+      ci_tpl_archive=$(printf '%s\n' "$ci_tpl_package_output" |
+        sed -n 's/^Successfully packaged chart and saved it to: //p' | tail -1)
+      if [ -z "$ci_tpl_archive" ] || [ ! -f "$ci_tpl_archive" ]; then
+        echo "ERROR: helm package did not report an archive path; nothing to publish" >&2
+        exit 1
+      fi
+      echo "packaged ${ci_tpl_archive}"
+
+      echo "=== helm push ==="
+      ci_tpl_push_output=$(helm push "$ci_tpl_archive" "oci://${CI_TPL_CHART_REPOSITORY}" 2>&1)
+      echo "$ci_tpl_push_output"
+      ci_tpl_digest=$(printf '%s\n' "$ci_tpl_push_output" |
+        sed -n 's/^Digest: //p' | tail -1)
+      case "$ci_tpl_digest" in
+        sha256:*) ;;
+        *)
+          echo "ERROR: helm push reported no sha256 digest; the publication is unverified" >&2
+          exit 1
+          ;;
+      esac
+      if [ "${#ci_tpl_digest}" -ne 71 ]; then
+        echo "ERROR: '${ci_tpl_digest}' is not a sha256:<64 hex> digest" >&2
+        exit 1
+      fi
+
+      ci_tpl_archive_sha256=$(sha256sum "$ci_tpl_archive" | cut -d' ' -f1)
+      ci_tpl_reference="${CI_TPL_CHART_REPOSITORY}/${ci_tpl_name}@${ci_tpl_digest}"
+
+      # chart.json is the chart equivalent of image.json in section 9.1: the
+      # authoritative identity record a downstream job consumes, never a tag.
+      #
+      # printf rather than a heredoc: this file is embedded into a YAML block scalar,
+      # where every line gains the block's indentation, and an indented heredoc
+      # terminator never closes the heredoc.
+      printf '%s\n' \
+        '{' \
+        '  "schema_version": 1,' \
+        "  \"repository\": \"${CI_TPL_CHART_REPOSITORY}/${ci_tpl_name}\"," \
+        "  \"name\": \"${ci_tpl_name}\"," \
+        "  \"version\": \"${ci_tpl_version}\"," \
+        "  \"digest\": \"${ci_tpl_digest}\"," \
+        "  \"reference\": \"${ci_tpl_reference}\"," \
+        "  \"archive\": \"$(basename "$ci_tpl_archive")\"," \
+        "  \"archive_sha256\": \"${ci_tpl_archive_sha256}\"," \
+        "  \"source_commit\": \"${CI_COMMIT_SHA}\"," \
+        "  \"pipeline_id\": \"${CI_PIPELINE_ID}\"," \
+        "  \"job_id\": \"${CI_JOB_ID}\"," \
+        "  \"created_at\": \"$(date -u '+%Y-%m-%dT%H:%M:%SZ')\"" \
+        '}' >"${CI_TPL_ARTIFACT_DIR}/chart.json"
+
+      # The producer validates its own output before reporting success (section 9.4).
+      for ci_tpl_field in schema_version repository name version digest reference \
+        archive archive_sha256 source_commit pipeline_id job_id created_at; do
+        if ! grep -q "\"${ci_tpl_field}\":" "${CI_TPL_ARTIFACT_DIR}/chart.json"; then
+          echo "ERROR: chart.json is missing '${ci_tpl_field}'" >&2
+          exit 1
+        fi
+      done
+      if grep -q '": ""' "${CI_TPL_ARTIFACT_DIR}/chart.json"; then
+        echo "ERROR: chart.json contains an empty field:" >&2
+        grep -n '": ""' "${CI_TPL_ARTIFACT_DIR}/chart.json" >&2
+        exit 1
+      fi
+
+      echo "published ${ci_tpl_reference}"
+      cat "${CI_TPL_ARTIFACT_DIR}/chart.json"
+      # END embed
+  artifacts:
+    name: "$[[ inputs.instance ]]-helm-package-publish"
+    when: always
+    expire_in: 1 week
+    paths:
+      - .ci-artifacts/$[[ inputs.instance ]]/helm-package-publish/
+  rules: $[[ inputs.run-rules ]]
+  allow_failure: false
+  interruptible: false
+  # Infrastructure only. Section 10.1 forbids weakening an outcome, and any
+  # condition other than runner_system_failure would retry a failed gate;
+  # tests/contracts/test_retry_policy.py fails the build on one.
+  retry:
+    max: $[[ inputs.max-retries ]]
+    when: [runner_system_failure]
+  # Insulation from the consumer's `default:` block (section 13.1). A component
+  # job runs in the image the component pins and the shell the component ships;
+  # a consumer's global image, before_script, after_script, cache, services,
+  # artifacts or hooks reaching it is a component running something nobody
+  # reviewed. Runner selection and timeouts are the consumer's to set, so those
+  # stay inherited. `retry` and `id_tokens` stay too: this component sets both
+  # itself, and a consumer-level definition is a deliberate estate choice.
+  inherit:
+    default: [tags, timeout, interruptible, retry, id_tokens]

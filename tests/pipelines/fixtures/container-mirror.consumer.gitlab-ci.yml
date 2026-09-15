@@ -1,0 +1,51 @@
+---
+# A real consumer's .gitlab-ci.yml for pipelines/container-mirror.yml, taken
+# from the pipeline that exercises this composition and copied verbatim except
+# for `ref:`, the object-store address and the credential paths.
+#
+# Why a whole consumer file and not a minimal example: the one thing that breaks
+# a repin is an input this branch renamed, removed or made required. That
+# already happened once, when ca-chain-url became ca-bundle-url and every
+# consumer had to change shape. A fixture that sets only the inputs this
+# repository would choose never catches it.
+#
+# The tests beside this file resolve the include against the composition in THIS
+# tree and send the result to the CI Lint API, so a rename fails here rather
+# than in a consumer's next pipeline.
+#
+# Keep it in step with whatever consumer you consider canonical:
+#   GET /api/v4/projects/:id/repository/files/.gitlab-ci.yml?ref=main
+#
+# `ref:` is a placeholder rather than a tag because the fixture must resolve
+# against the working tree, not against a published release.
+
+include:
+  - project: 'platform/gitlab-ci-templates'
+    # renovate: datasource=gitlab-tags depName=platform/gitlab-ci-templates registryUrl=https://gitlab.example.com
+    ref: 'REPLACE_WITH_APPROVED_SHARED_CI_REF'
+    file: '/pipelines/container-mirror.yml'
+    inputs:
+      instance: lab
+      changes-paths:
+        - 'image-mirror/**/*'
+        # The pinned ref lives here, so a bump must run the pipeline that the
+        # bump changes. A Renovate MR would otherwise merge untested.
+        - '.gitlab-ci.yml'
+      config-file: image-mirror/rke2.yaml
+      extra-list-files: image-mirror/images.txt
+      repository-prefix: rke2
+      arch: linux-amd64
+      s3-endpoint: 'http://192.0.2.10:9010'
+      s3-bucket: lab-transfer
+      s3-prefix: image-diode/low-export
+      have-key: image-diode/have/blobs.txt
+      vault-addr: 'https://vault.example.com:8200'
+      vault-role: gitlab-ci
+      vault-kv-path: kv/apps/image-mirror/lab
+      vault-field-registry: quay_low_registry
+      vault-field-user: quay_low_user
+      vault-field-token: quay_low_token
+      vault-s3-kv-path: kv/apps/cnpg/lab
+      ca-bundle-url: 'https://vault.example.com:8200/v1/pki/ca_chain'
+      no-proxy: 'localhost,127.0.0.1,.example.internal,.example.com,192.0.2.0/24'
+      egress-proxy: "$EGRESS_PROXY"

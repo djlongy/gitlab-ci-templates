@@ -1,0 +1,557 @@
+---
+# Promote a tested, signed image from the candidate Harbor project to the
+# release project, by digest.
+#
+# Three things the predecessor did not do (audit 8.1):
+#
+#   * it promoted `repo:${BUILDKIT_TAG}`, so a manual button pressed up to its
+#     seven-day timeout later shipped whatever that tag pointed at by then;
+#   * it treated HTTP 201 as proof, with no destination verification;
+#   * it had no needs at all, so the promotion was reachable in any pipeline
+#     where the stage existed, whatever the scan, signing and readiness jobs
+#     had done. Section 8.8: stage names do not establish a gate chain.
+#
+# Nothing is rebuilt. Harbor mounts the existing manifest, so the digest is
+# preserved by construction and then read back and compared.
+
+#### Public interface ####
+spec:
+  inputs:
+    instance:
+      type: string
+      description: Unique workload instance used in the job name.
+      regex: '^[a-z][a-z0-9-]{0,47}$'
+    stage:
+      type: string
+      description: Stage supplied by the owning composition.
+      default: publish
+    execution-image:
+      type: string
+      description: Approved Python execution image pinned by digest.
+      default: 'docker.io/python@sha256:cd7c412d000912f29075a1b8803e43cb2f38bb67f104019df526df5ceaf30569'
+      regex: '^.+@sha256:[0-9a-f]{64}$'
+    runner-tags:
+      type: array
+      description: Runner selection from the estate profile.
+      default: []
+    max-retries:
+      type: number
+      description: >-
+        How many times the runner may retry this job. The condition is
+        runner_system_failure only, so this retries infrastructure and never a
+        failed gate.
+      default: 1
+      options: [0, 1, 2]
+    run-rules:
+      type: array
+      description: >-
+        Job eligibility set by the composition. The default requires a protected
+        tag and a manual action: a release publication is never automatic, and
+        an unprotected ref cannot reach the release project.
+      default:
+        - if: '$CI_COMMIT_TAG && $CI_COMMIT_REF_PROTECTED == "true"'
+          when: manual
+        - when: never
+    build-job:
+      type: string
+      description: >-
+        Exact name of the job whose image.json states the digest to promote.
+        The source is that digest, never a tag.
+    build-component:
+      type: string
+      description: Component name the build job writes its artifacts under.
+      default: container-build-buildkit
+    gate-jobs:
+      type: array
+      description: >-
+        Every gate that must pass before the release is published, as needs
+        entries with artifacts false: the image scan, the signing job and the
+        readiness gate. Empty by default because only the composition knows the
+        instance job names; a composition that leaves it empty publishes on the
+        build alone, which its own review should catch.
+      default: []
+    destination-project:
+      type: string
+      description: >-
+        Harbor project the release lands in, from .ci/estate.yml
+        registries.release.project. The source project is read from the image's
+        own repository, so a promotion into the project it came from is refused.
+      default: prod
+    destination-tags:
+      type: string
+      description: >-
+        Space-separated human-readable aliases applied to the promoted digest.
+        The deployment consumes the digest; these exist so the artifact is
+        findable and is not collected as untagged. A string rather than an array
+        because an array input renders into a script as JSON (["a", "b"]), which
+        a shell cannot iterate; each name is validated before use.
+      default: '$CI_COMMIT_TAG'
+    require-signatures:
+      type: string
+      description: >-
+        true refuses to promote a digest with no cosign signature beside it in
+        the candidate project.
+      default: 'true'
+      options: ['true', 'false']
+    environment:
+      type: string
+      description: >-
+        GitLab environment the release is published to, from .ci/estate.yml
+        environments. Protection and approvals are configured on that
+        environment, not in this template.
+      default: prod
+---
+"$[[ inputs.instance ]]:container-promote-harbor":
+  stage: $[[ inputs.stage ]]
+  image:
+    name: $[[ inputs.execution-image ]]
+    entrypoint: ['']
+  tags: $[[ inputs.runner-tags ]]
+  environment:
+    name: $[[ inputs.environment ]]
+  # One promotion of one instance at a time, so two pipelines cannot race the
+  # same repository into the release project.
+  resource_group: '$[[ inputs.instance ]]-$[[ inputs.destination-project ]]'
+  variables:
+    # The image identity arrives as an artifact from build-job and the promotion
+    # is a registry-to-registry copy, so this job never reads the checkout.
+    GIT_STRATEGY: none
+    CI_TPL_RUNTIME_DIR: /tmp/ci-runtime
+    CI_TPL_ARTIFACT_DIR: '.ci-artifacts/$[[ inputs.instance ]]/container-promote-harbor'
+    CI_TPL_IDENTITY_FILE: '.ci-artifacts/$[[ inputs.instance ]]/$[[ inputs.build-component ]]/image.json'
+    CI_TPL_DESTINATION_PROJECT: $[[ inputs.destination-project ]]
+    CI_TPL_DESTINATION_TAGS: $[[ inputs.destination-tags ]]
+    CI_TPL_REQUIRE_SIGNATURES: '$[[ inputs.require-signatures ]]'
+  needs:
+    - job: $[[ inputs.build-job ]]
+      artifacts: true
+    - $[[ inputs.gate-jobs ]]
+  before_script:
+    - |
+      # BEGIN embed dir $CI_TPL_RUNTIME_DIR runtime/httpjson.py runtime/promote/harbor.py
+      mkdir -p "$CI_TPL_RUNTIME_DIR" "$CI_TPL_RUNTIME_DIR/promote" || exit 1
+      cat > "$CI_TPL_RUNTIME_DIR/httpjson.py" <<'CI_TPL_EMBED_EOF' || exit 1
+      """Minimal JSON-over-HTTPS client shared by the runtime helpers.
+
+      The predecessor templates parsed API responses with `grep -o '"key":"[^"]*"'`,
+      which returns an empty string for a field the server never sent. An absent
+      `readiness` field then compared unequal to `"red"` and the release gate passed on
+      an empty response (audit 6.2). Everything here uses a real parser and treats a
+      response it cannot parse as a failure.
+
+      Only the standard library: runtime/<domain>/install.sh writes these helpers
+      into a job's runtime directory, and nothing is installed there.
+
+      Nothing in this module logs a header value or a request body. Credentials reach
+      it as arguments and stay there.
+      """
+
+      from __future__ import annotations
+
+      import json
+      import urllib.error
+      import urllib.request
+      from typing import Any
+
+
+      class HttpError(RuntimeError):
+          """The request could not be completed, which is never a passing result."""
+
+
+      class Response:
+          def __init__(self, status: int, body: bytes):
+              self.status = status
+              self.body = body
+
+          @property
+          def text(self) -> str:
+              return self.body.decode("utf-8", errors="replace")
+
+          def json(self) -> Any:
+              """Parsed body, or HttpError.
+
+              A body that is not JSON is a failure and not an empty result: the caller
+              asked an API a question and did not get an answer it can read.
+              """
+              try:
+                  return json.loads(self.body)
+              except (ValueError, UnicodeDecodeError) as error:
+                  raise HttpError(f"response body is not JSON: {error}") from error
+
+          def ok(self) -> bool:
+              return 200 <= self.status < 300
+
+
+      def request(
+          method: str,
+          url: str,
+          *,
+          headers: dict[str, str] | None = None,
+          body: bytes | None = None,
+          timeout: int = 30,
+      ) -> Response:
+          """Perform one HTTPS request and return its status and body.
+
+          An HTTP error status is returned, not raised: callers decide which codes are
+          expected. Only a transport-level failure raises, because that is a question
+          that never reached the server.
+          """
+          if not url.startswith("https://"):
+              # TLS is not optional, and neither is a maintained trust bundle
+              # (section 10.2). A plaintext endpoint is a configuration error.
+              raise HttpError(f"refusing a non-HTTPS request to {url}")
+
+          req = urllib.request.Request(url, data=body, method=method, headers=headers or {})
+          try:
+              with urllib.request.urlopen(req, timeout=timeout) as response:
+                  return Response(response.status, response.read())
+          except urllib.error.HTTPError as error:
+              return Response(error.code, error.read())
+          except urllib.error.URLError as error:
+              raise HttpError(f"{method} {url} could not be completed: {error.reason}") from error
+          except TimeoutError as error:
+              raise HttpError(f"{method} {url} timed out after {timeout}s") from error
+
+
+      def get_json(url: str, **kwargs: Any) -> Any:
+          response = request("GET", url, **kwargs)
+          if not response.ok():
+              raise HttpError(f"GET {url} returned HTTP {response.status}: {response.text[:300]}")
+          return response.json()
+      CI_TPL_EMBED_EOF
+      cat > "$CI_TPL_RUNTIME_DIR/promote/harbor.py" <<'CI_TPL_EMBED_EOF' || exit 1
+      """Promote an image between Harbor projects by digest, then prove it arrived.
+
+          harbor.py promote --identity image.json --destination-project prod
+                            --username-variable HARBOR_USER
+                            --password-variable HARBOR_PASSWORD
+                            --output promotion-result.json [--tag v1 ...]
+
+      Three defects in `promote/harbor-promote.yml` shaped this (audit 8.1):
+
+        * it promoted `repo:${BUILDKIT_TAG}` — whatever that tag pointed at when the
+          manual button was pressed, up to the job's seven-day timeout later. Section
+          11.1: "A tag can be a human-readable alias; deployment consumes the
+          immutable identity." Here the source is always `repo@sha256:...` read from
+          the builder's own identity record.
+        * success was `HTTP 201` and nothing else. Section 11.1 requires the
+          destination digest to be verified after the copy, so the destination is
+          read back and compared.
+        * cosign signatures and attestations are separate tagged artifacts that a
+          manifest copy does not carry. They are now copied explicitly, and their
+          absence fails the promotion unless the caller opted out.
+
+      Nothing is rebuilt: Harbor mounts the existing manifest, so the digest is
+      preserved by construction and then checked rather than assumed.
+      """
+
+      from __future__ import annotations
+
+      import argparse
+      import base64
+      import json
+      import os
+      import sys
+      import time
+      import urllib.parse
+      from pathlib import Path
+
+      sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+      from httpjson import HttpError, request  # noqa: E402
+
+
+      class PromotionFailure(RuntimeError):
+          """The image was not promoted, or cannot be proven to have been."""
+
+
+      def now() -> str:
+          return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+      def read_identity(path: Path) -> dict:
+          if not path.is_file():
+              raise PromotionFailure(f"image identity record not found: {path}")
+          try:
+              identity = json.loads(path.read_text())
+          except ValueError as error:
+              raise PromotionFailure(f"{path} is not valid JSON: {error}") from error
+
+          repository = identity.get("repository", "")
+          digest = identity.get("digest", "")
+          if not isinstance(digest, str) or not digest.startswith("sha256:") or len(digest) != 71:
+              raise PromotionFailure(
+                  f"{path} carries no sha256 digest. Promotion by tag is what this "
+                  "component exists to prevent."
+              )
+          if identity.get("reference") != f"{repository}@{digest}":
+              raise PromotionFailure(f"{path} is inconsistent: reference is not repository@digest")
+          if repository.count("/") < 2:
+              raise PromotionFailure(
+                  f"repository {repository!r} is not <registry>/<project>/<path>, so the "
+                  "source project cannot be identified"
+              )
+          return identity
+
+
+      def split_repository(repository: str) -> tuple[str, str, str]:
+          """registry, harbor project, repository path below the project."""
+          registry, project, repo_path = repository.split("/", 2)
+          return registry, project, repo_path
+
+
+      def encode_repository(repo_path: str) -> str:
+          """Harbor expects the repository name double-encoded inside the path."""
+          return urllib.parse.quote(urllib.parse.quote(repo_path, safe=""), safe="")
+
+
+      class Harbor:
+          def __init__(self, registry: str, username: str, password: str, timeout: int):
+              self.base = f"https://{registry}/api/v2.0"
+              credential = base64.b64encode(f"{username}:{password}".encode()).decode("ascii")
+              self.headers = {"Authorization": f"Basic {credential}"}
+              self.timeout = timeout
+
+          def artifact(self, project: str, repo_path: str, reference: str):
+              return request(
+                  "GET",
+                  f"{self.base}/projects/{project}/repositories/"
+                  f"{encode_repository(repo_path)}/artifacts/{urllib.parse.quote(reference, safe='')}",
+                  headers=self.headers,
+                  timeout=self.timeout,
+              )
+
+          def copy(self, destination_project: str, repo_path: str, source: str):
+              url = (
+                  f"{self.base}/projects/{destination_project}/repositories/"
+                  f"{encode_repository(repo_path)}/artifacts?from={urllib.parse.quote(source, safe='')}"
+              )
+              return request("POST", url, headers=self.headers, timeout=self.timeout)
+
+          def tag(self, project: str, repo_path: str, digest: str, name: str):
+              url = (
+                  f"{self.base}/projects/{project}/repositories/"
+                  f"{encode_repository(repo_path)}/artifacts/{digest}/tags"
+              )
+              return request(
+                  "POST",
+                  url,
+                  headers={**self.headers, "Content-Type": "application/json"},
+                  body=json.dumps({"name": name}).encode(),
+                  timeout=self.timeout,
+              )
+
+
+      def referrer_tags(digest: str) -> list[str]:
+          """The tags cosign uses for an image's signature and attestations."""
+          stem = digest.replace(":", "-")
+          return [f"{stem}.sig", f"{stem}.att"]
+
+
+      def copy_artifact(harbor: Harbor, source_project: str, destination_project: str,
+                        repo_path: str, reference: str) -> None:
+          response = harbor.copy(destination_project, repo_path, f"{source_project}/{repo_path}@{reference}"
+                                 if reference.startswith("sha256:")
+                                 else f"{source_project}/{repo_path}:{reference}")
+          # 201 is a fresh copy; 409 means the destination already holds this exact
+          # artifact, which is the same end state for an idempotent promotion.
+          if response.status not in (201, 409):
+              raise PromotionFailure(
+                  f"Harbor refused to copy {reference} into {destination_project}: "
+                  f"HTTP {response.status}: {response.text[:300]}"
+              )
+
+
+      def promote(args: argparse.Namespace) -> int:
+          username = os.environ.get(args.username_variable, "")
+          password = os.environ.get(args.password_variable, "")
+          if not username or not password:
+              raise PromotionFailure(
+                  f"{args.username_variable} and {args.password_variable} must both be "
+                  "set as masked CI variables; this component never takes a credential "
+                  "as an input."
+              )
+
+          identity = read_identity(Path(args.identity))
+          registry, source_project, repo_path = split_repository(identity["repository"])
+          digest = identity["digest"]
+          destination_project = args.destination_project
+
+          if destination_project == source_project:
+              raise PromotionFailure(
+                  f"source and destination project are both {source_project!r}; that is "
+                  "not a promotion"
+              )
+
+          harbor = Harbor(registry, username, password, args.request_timeout)
+
+          source = harbor.artifact(source_project, repo_path, digest)
+          if source.status != 200:
+              raise PromotionFailure(
+                  f"{registry}/{source_project}/{repo_path}@{digest} is not in the "
+                  f"candidate project: HTTP {source.status}"
+              )
+
+          copied_referrers = []
+          missing_referrers = []
+          for tag in referrer_tags(digest):
+              found = harbor.artifact(source_project, repo_path, tag)
+              if found.status == 200:
+                  copy_artifact(harbor, source_project, destination_project, repo_path, tag)
+                  copied_referrers.append(tag)
+              else:
+                  missing_referrers.append(tag)
+
+          if args.require_signatures and f"{digest.replace(':', '-')}.sig" in missing_referrers:
+              raise PromotionFailure(
+                  f"no cosign signature ({digest.replace(':', '-')}.sig) exists beside "
+                  f"{digest} in {source_project}; refusing to promote an unsigned image"
+              )
+
+          copy_artifact(harbor, source_project, destination_project, repo_path, digest)
+
+          # Verify rather than trust: the copy reporting success is not the same as
+          # the destination holding this digest.
+          destination = harbor.artifact(destination_project, repo_path, digest)
+          if destination.status != 200:
+              raise PromotionFailure(
+                  f"after the copy, {destination_project}/{repo_path}@{digest} could not "
+                  f"be read back: HTTP {destination.status}"
+              )
+          destination_digest = destination.json().get("digest")
+          if destination_digest != digest:
+              raise PromotionFailure(
+                  f"the destination holds {destination_digest}, not the promoted "
+                  f"{digest}; the copy did not preserve the identity"
+              )
+
+          applied_tags = []
+          for tag in args.tag:
+              if not tag:
+                  continue
+              response = harbor.tag(destination_project, repo_path, digest, tag)
+              if response.status not in (201, 409):
+                  raise PromotionFailure(
+                      f"could not apply tag {tag!r} in {destination_project}: "
+                      f"HTTP {response.status}: {response.text[:300]}"
+                  )
+              applied_tags.append(tag)
+
+          output = Path(args.output)
+          output.parent.mkdir(parents=True, exist_ok=True)
+          output.write_text(
+              json.dumps(
+                  {
+                      "schema_version": 1,
+                      "status": "promoted",
+                      "registry": registry,
+                      "repository_path": repo_path,
+                      "source_project": source_project,
+                      "destination_project": destination_project,
+                      "digest": digest,
+                      "source_reference": identity["reference"],
+                      "destination_reference": f"{registry}/{destination_project}/{repo_path}@{digest}",
+                      "verified_destination_digest": destination_digest,
+                      "referrers_copied": copied_referrers,
+                      "referrers_absent": missing_referrers,
+                      "tags_applied": applied_tags,
+                      "source_commit": identity.get("source_commit", ""),
+                      "created_at": now(),
+                  },
+                  indent=2,
+                  sort_keys=True,
+              )
+              + "\n"
+          )
+
+          print(
+              f"promoted {digest} into {destination_project}/{repo_path}; "
+              f"referrers copied: {copied_referrers or 'none'}"
+          )
+          return 0
+
+
+      def build_parser() -> argparse.ArgumentParser:
+          parser = argparse.ArgumentParser(description=__doc__)
+          sub = parser.add_subparsers(dest="command", required=True)
+
+          promote_parser = sub.add_parser("promote", help="copy a digest into the release project")
+          promote_parser.add_argument("--identity", required=True)
+          promote_parser.add_argument("--destination-project", required=True)
+          promote_parser.add_argument("--username-variable", required=True)
+          promote_parser.add_argument("--password-variable", required=True)
+          promote_parser.add_argument("--output", required=True)
+          promote_parser.add_argument("--tag", action="append", default=[])
+          promote_parser.add_argument("--require-signatures", default="true")
+          promote_parser.add_argument("--request-timeout", type=int, default=60)
+          promote_parser.set_defaults(handler=promote)
+
+          return parser
+
+
+      def main(argv: list[str] | None = None) -> int:
+          args = build_parser().parse_args(argv)
+          if isinstance(getattr(args, "require_signatures", None), str):
+              args.require_signatures = args.require_signatures.lower() == "true"
+          try:
+              return args.handler(args)
+          except (PromotionFailure, HttpError) as error:
+              print(f"ERROR: {error}", file=sys.stderr)
+              return 1
+
+
+      if __name__ == "__main__":
+          raise SystemExit(main())
+      CI_TPL_EMBED_EOF
+      # END embed
+  script:
+    - |
+      mkdir -p "$CI_TPL_ARTIFACT_DIR" || exit 1
+      set -- promote \
+        --identity "$CI_TPL_IDENTITY_FILE" \
+        --destination-project "$CI_TPL_DESTINATION_PROJECT" \
+        --username-variable HARBOR_USER \
+        --password-variable HARBOR_PASSWORD \
+        --require-signatures "$CI_TPL_REQUIRE_SIGNATURES" \
+        --output "$CI_TPL_ARTIFACT_DIR/promotion-result.json"
+      # Deliberate word splitting over a space-separated list. Every name is
+      # checked against the characters a tag may contain before it is passed
+      # on, and each then becomes a single quoted argument.
+      for CI_TPL_TAG in $CI_TPL_DESTINATION_TAGS; do
+        case "$CI_TPL_TAG" in
+          '') continue ;;
+          *[!A-Za-z0-9._-]*)
+            echo "ERROR: '$CI_TPL_TAG' is not a valid tag name" >&2
+            exit 1 ;;
+        esac
+        set -- "$@" --tag "$CI_TPL_TAG"
+      done
+      python3 "$CI_TPL_RUNTIME_DIR/promote/harbor.py" "$@" || exit 1
+  artifacts:
+    name: '$[[ inputs.instance ]]-container-promote-harbor-$CI_JOB_ID'
+    paths:
+      - '.ci-artifacts/$[[ inputs.instance ]]/container-promote-harbor/'
+    when: always
+    # .ci/estate.yml retention.evidence. release_records is unresolved there, so
+    # this follows the evidence retention until an owner sets one.
+    expire_in: 1 week
+  rules: $[[ inputs.run-rules ]]
+  # Manual jobs default to allow_failure: true in GitLab. A failed release
+  # publication is not a success, so it is set explicitly.
+  allow_failure: false
+  interruptible: false
+  # Infrastructure only. Section 10.1 forbids weakening an outcome, and any
+  # condition other than runner_system_failure would retry a failed gate;
+  # tests/contracts/test_retry_policy.py fails the build on one.
+  retry:
+    max: $[[ inputs.max-retries ]]
+    when: [runner_system_failure]
+  # Insulation from the consumer's `default:` block (section 13.1). A component
+  # job runs in the image the component pins and the shell the component ships;
+  # a consumer's global image, before_script, after_script, cache, services,
+  # artifacts or hooks reaching it is a component running something nobody
+  # reviewed. Runner selection and timeouts are the consumer's to set, so those
+  # stay inherited. `retry` and `id_tokens` stay too: this component sets both
+  # itself, and a consumer-level definition is a deliberate estate choice.
+  inherit:
+    default: [tags, timeout, interruptible, retry, id_tokens]

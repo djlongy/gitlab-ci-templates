@@ -1,0 +1,95 @@
+---
+name: security-filesystem-trivy
+kind: component
+status: released
+introduced_in: 1.0.0
+minimum_gitlab: '18.9'
+# Retry policy: the `max-retries` input (0, 1 or 2, default 1) sets `retry: max`,
+# and `retry: when` is `runner_system_failure` and nothing else. A job killed by
+# its runner runs again; a failed gate never does.
+emitted_jobs:
+  - pattern: '{instance}:security-filesystem-trivy'
+    stage: verify
+    blocking: true
+outputs:
+  - path: .ci-artifacts/{instance}/security-filesystem-trivy/trivy-fs.json
+    producer: '{instance}:security-filesystem-trivy'
+    format: trivy JSON
+    subject_identity: source commit CI_COMMIT_SHA under the declared working directory
+    retention: 1 week
+  - path: .ci-artifacts/{instance}/security-filesystem-trivy/trivy-fs.sarif
+    producer: '{instance}:security-filesystem-trivy'
+    format: SARIF 2.1.0, converted from trivy-fs.json
+    retention: 1 week
+  - path: .ci-artifacts/{instance}/security-filesystem-trivy/trivy-fs-table.txt
+    producer: '{instance}:security-filesystem-trivy'
+    format: human-readable table of the gated severities
+    retention: 1 week
+  - path: .ci-artifacts/{instance}/security-filesystem-trivy/trivy-version.json
+    producer: '{instance}:security-filesystem-trivy'
+    format: trivy version JSON, the vulnerability database snapshot evidence
+    retention: 1 week
+  - path: .ci-artifacts/{instance}/security-filesystem-trivy/severities.txt
+    producer: '{instance}:security-filesystem-trivy'
+    format: one line per finding
+    retention: 1 week
+  - path: .ci-artifacts/{instance}/security-filesystem-trivy/scan-result.json
+    producer: '{instance}:security-filesystem-trivy'
+    format: JSON
+    schema: section 9.2 scan-result, schema_version 1
+    subject_identity: project path and commit SHA of the scanned source
+    retention: 1 week
+required_secrets: []
+runtime_image:
+  reference: 'docker.io/aquasec/trivy@sha256:bcc376de8d77cfe086a917230e818dc9f8528e3c852f7b1aff648949b6258d1c'
+  pinning: digest
+  tool_versions:
+    trivy: 0.69.3
+trust:
+  privileged: false
+  network_egress:
+    - registry.example.com
+    - the trivy vulnerability database and check bundle sources
+  runner_profile: shared-docker
+  protected_ref_required: false
+validation:
+  evidence:
+    - source-reviewed
+    - yaml-parsed
+    - gitlab-linted
+    - runtime-tested
+    - integration-tested
+  verified_at: 2026/09/16
+  revision: '1.0.0-rc.2'
+  environment: >-
+    gitlab.example.com 18.9.1-ee, project 18, POST /api/v4/projects/<project-id>/ci/lint.
+    Executed on shared ref 1.0.0-rc.2 in: platform/demo-app (56) 5734 and 5745;
+    platform/terraform-hypervisor-roles (22) 5735 for both instances;
+    platform/terraform-dns (16) 5736 (merge request) and 5744 (main) for
+    both instances.
+  notes: >-
+    Scope. Filesystem scanning of dependencies, secrets and IaC
+    misconfiguration. It is not image scanning and not complete SAST coverage;
+    section 9.2 treats those as separate capabilities and this contract does not
+    claim them.
+    Failure semantics. `blocking` (the default, matching current estate
+    behaviour) fails the job on a finding at or above severity-threshold;
+    advisory records it and succeeds. An execution failure fails the job in BOTH
+    modes. The gate runs as `trivy convert --exit-code 13` over the saved JSON,
+    so a finding returns 13 and can never be confused with trivy's generic error
+    code 1; the previous template's TRIVY_EXIT_CODE=0 advisory mode made
+    findings and crashes both exit 0. Database freshness is recorded separately
+    from the scanner version, from `trivy version --format json` after the scan:
+    an absent snapshot fails the job, because a scan with no vulnerability
+    database reports nothing and reads as clean. The `vuln` scanner must
+    therefore stay in the scanners input. One scan produces every rendering;
+    re-scanning per format would gate on a different scan from the one published
+    as evidence. ignore-unfixed defaults to false, which keeps unfixed findings
+    gating as they do today; security-filesystem-grype defaults the same input
+    to true for the same preserve-current-behaviour reason, so the two are
+    interchangeable in threshold meaning but not in that default. SARIF is a
+    plain artifact, not `reports: sast:` (section 10.3, estate report mode
+    artifact-only).
+    Evidence: unit tests in tests/runtime/scan/, the scan/convert/gate sequence
+    and exit code 13 measured against the pinned image on 2026/09/15, CI Lint
+    through tests/pipelines/. No pipeline has executed this component.

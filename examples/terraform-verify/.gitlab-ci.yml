@@ -1,0 +1,25 @@
+---
+# examples/terraform-verify/.gitlab-ci.yml
+#
+# A Terraform repository that is verified here and deployed somewhere else.
+#
+# Two roots, so two includes with distinct instances. Each emits its own
+# network:* and dns:* jobs and writes under its own .ci-artifacts/<instance>/
+# directory, which is what the instance mechanism is for.
+#
+# This pipeline holds no state credentials and produces no plan. A green run
+# means the configuration is formatted, valid and free of the misconfigurations
+# Trivy checks for. It does not mean a change is safe to apply.
+include:
+  - project: 'platform/gitlab-ci-templates'
+    ref: 'REPLACE_WITH_APPROVED_SHARED_CI_REF'
+    file: '/pipelines/terraform-verify.yml'
+    inputs:
+      instance: network
+      working-directory: 'infrastructure/network'
+  - project: 'platform/gitlab-ci-templates'
+    ref: 'REPLACE_WITH_APPROVED_SHARED_CI_REF'
+    file: '/pipelines/terraform-verify.yml'
+    inputs:
+      instance: dns
+      working-directory: 'infrastructure/dns'

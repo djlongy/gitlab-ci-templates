@@ -1,0 +1,61 @@
+---
+# terraform-deploy-two-roots/.ci/project.yml
+#
+# The record of what this project adopted from the shared CI repository.
+# Contract: docs/gitlab-ci-agent-standard.md section 4, schema
+# tests/contracts/project.schema.json, field guide docs/reference/project-yml.md.
+#
+# Metadata, not GitLab configuration: nothing reads this at pipeline time. It
+# exists so the next reader can see which composition is in use, under which
+# instance names, and what was decided on the way in. The project path below is
+# illustrative, as is everything else in examples/.
+schema_version: 1
+project: demo/terraform-roles
+shared_ci:
+  project: platform/gitlab-ci-templates
+  ref: REPLACE_WITH_APPROVED_SHARED_CI_REF
+workload:
+  name: terraform-deploy
+  adoption: composition
+compositions:
+  - file: /pipelines/terraform-deploy.yml
+    instances:
+      - roles-dev
+    inputs:
+      instance: roles-dev
+      working-directory: roles
+      environment: dev
+      state-id: roles-dev
+      var-file: envs/dev.tfvars
+      changes-filter: 'on'
+      changes-paths:
+        - roles/**/*
+      apply-mode: automatic
+  - file: /pipelines/terraform-deploy.yml
+    instances:
+      - roles-prod
+    inputs:
+      instance: roles-prod
+      working-directory: roles
+      environment: prod
+      state-id: roles-prod
+      var-file: envs/prod.tfvars
+      changes-filter: 'on'
+      changes-paths:
+        - roles/**/*
+      apply-mode: automatic
+      apply-gate-jobs:
+        - job: roles-dev:terraform-apply
+          artifacts: false
+environments:
+  - name: dev
+    state_id: roles-dev
+    deployment_mode: direct
+  - name: prod
+    state_id: roles-prod
+    deployment_mode: direct
+notes: 'Both applies are automatic, which is an owner decision and not the composition''s
+  default: a merge to the default branch applies to dev and then, only if that succeeded,
+  to prod. The ordering is apply-gate-jobs, because both applies sit in the same stage and
+  the stage graph cannot express it. Each instance is filtered to the paths it owns, so a
+  change elsewhere in the repository plans neither root.'

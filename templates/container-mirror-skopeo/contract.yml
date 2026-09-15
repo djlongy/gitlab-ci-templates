@@ -1,0 +1,102 @@
+---
+name: container-mirror-skopeo
+kind: component
+status: released
+introduced_in: 1.0.0
+minimum_gitlab: '18.9'
+# Retry policy: the `max-retries` input (0, 1 or 2, default 1) sets `retry: max`,
+# and `retry: when` is `runner_system_failure` and nothing else. A job killed by
+# its runner runs again; a failed gate never does.
+emitted_jobs:
+  - pattern: '{instance}:container-mirror-skopeo'
+    stage: publish
+    blocking: true
+outputs:
+  - path: .ci-artifacts/{instance}/container-mirror-skopeo/digests.txt
+    producer: '{instance}:container-mirror-skopeo'
+    format: >-
+      One line per reference, the destination reference and its sha256 digest,
+      tab separated. In dry-run mode the digest is the upstream one, because
+      nothing was written.
+    subject_identity: >-
+      repository@sha256 digest, read back from the destination registry after
+      the copy rather than taken from the source.
+    retention: 30 days
+required_secrets:
+  - name: REGISTRY_USER
+    kind: ci-variable
+    scope: >-
+      Robot account with push on the destination repository prefix. Used unless
+      vault-addr is set; mask it.
+  - name: REGISTRY_PASSWORD
+    kind: ci-variable
+    scope: Robot account token for the above. Used unless vault-addr is set.
+  - name: VAULT_JWT
+    kind: id-token
+    audience: The vault-addr input.
+    role: The vault-role input.
+    scope: >-
+      Vault mode only, selected by a non-empty vault-addr. Reads vault-kv-path
+      for the registry host, the robot name and the robot token. Every field
+      name is an input; no default names a site's KV layout.
+runtime_image:
+  reference: 'docker.io/alpine@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d'
+  pinning: digest
+  tool_versions:
+    alpine: '3.21'
+trust:
+  privileged: false
+  network_egress:
+    - every source registry named in the list files
+    - the destination registry named by the registry input
+    - the vault-addr host, in Vault mode
+    - the ca-bundle-url host, when set
+  runner_profile: >-
+    Any unprivileged Docker executor with outbound HTTPS. skopeo copies between
+    registries over the API; no image is pulled into a local daemon and no
+    daemon is needed.
+  protected_ref_required: true
+validation:
+  evidence:
+    - source-reviewed
+    - yaml-parsed
+    - gitlab-linted
+    - runtime-tested
+    - integration-tested
+  verified_at: 2026/09/16
+  revision: '1.0.0-rc.2'
+  environment: >-
+    gitlab.example.com 18.9.1-ee, project 18, POST /api/v4/projects/<project-id>/ci/lint.
+    Executed on shared ref 1.0.0-rc.2 in: platform/k8s-gitops (61) 5723 as a dry
+    run over 32 references and 5729 as a real mirror writing digests.txt, job
+    47773.
+  notes: >-
+    Failure semantics: neither credential source configured; vault-addr set
+    without vault-role or vault-kv-path; a Vault login that returns no token; a
+    list file that is absent, absolute or traverses out of the checkout; an
+    empty assembled reference set; a copy or inspect that fails three rounds,
+    naming the reference; a pinned digest the registry does not hold, which
+    takes the same path as `manifest unknown`; and fewer digests recorded than
+    references listed. Every one of those ends the job.
+    CI_TPL_DRY_RUN decides whether anything is written and is guarded at run
+    time, because a project or group CI variable outranks a job variable. It
+    must be exactly true or false, and true only when CI_PIPELINE_SOURCE is
+    merge_request_event. Anything else exits 1 naming the variable, so a mirror
+    that writes nothing cannot report success.
+    Copies use --format oci, not --preserve-digests: container-export-skopeo
+    stores these manifests in an OCI layout, which takes OCI media types only,
+    and a preserved docker v2 manifest is one the receiving side cannot read.
+    skopeo cannot parse a tag and a digest in one reference, so a pinned entry
+    is fetched as repo@digest and its tag only names the copy.
+    No credential reaches a command line. The registry token is written by
+    python into a mode-0600 docker auth file passed as --dest-authfile, the
+    Vault JWT is posted from a mode-0600 file, and curl reads the Vault token
+    from a mode-0600 --config file. Only lengths are printed.
+    Evidence: the shape this component had at tag 0.2.0 was integration-tested
+    by platform/k8s-gitops. That claim is deliberately NOT carried here. The job's
+    shell now comes from runtime/mirror/, the credential handling changed, and
+    nothing in this release has been executed. runtime-tested:
+    tests/runtime/mirror/test_registry.py drives the copy this template embeds.
+    Limitation: list-files is a validated space-separated string, not an array.
+    GitLab rejects an array input interpolated into a variables value, and
+    offers no join function, so an array cannot reach the shell at all.

@@ -1,0 +1,100 @@
+---
+# Contract for the ansible-check component. Schema: tests/contracts/contract.schema.json.
+# The inputs are not restated here; the catalogue generator reads them from the
+# spec header of template.yml.
+name: ansible-check
+kind: component
+status: experimental
+introduced_in: 1.0.0
+minimum_gitlab: '18.9'
+
+# Retry policy: the `max-retries` input (0, 1 or 2, default 1) sets `retry: max`,
+# and `retry: when` is `runner_system_failure` and nothing else. A job killed by
+# its runner runs again; a failed gate never does.
+emitted_jobs:
+  - pattern: '{instance}:ansible-check'
+    stage: plan
+    # ansible-playbook's exit code is the job's. A failed task, an unreachable
+    # host or a module that errors in check mode fails the job.
+    blocking: true
+
+# Section 9 defines a plan artifact contract for Terraform, not for Ansible, and
+# check mode produces nothing equivalent: there is no saved artefact that a later
+# apply consumes. The result is the job log. A deploy component must therefore
+# treat this job as a gate, `needs` it with `artifacts: false`, and re-derive its
+# own changes rather than replaying anything from here.
+outputs: []
+
+required_secrets:
+  - name: ANSIBLE_VAULT_PASSWORD
+    kind: ci-variable
+    scope: >-
+      Needed only when the play reads Ansible Vault encrypted variable files.
+      The component takes the variable NAME through the vault-password-secret
+      input; this entry records the name platform/infrastructure uses today. It must be a
+      masked variable and not a file type variable, since the job reads its
+      value.
+    protected_ref_required: true
+  - name: ANSIBLE_PRIVATE_KEY_FILE
+    kind: file-variable
+    scope: >-
+      SSH credential for the managed hosts. The component does not manage key
+      material: a file type CI variable of this name sets the variable to the
+      path of the file the runner wrote, which is exactly what Ansible expects,
+      so no handling is needed and none is added. Scope the variable to protected
+      refs so an untrusted merge request pipeline cannot reach the fleet with it.
+    protected_ref_required: true
+
+runtime_image:
+  # The estate execution environment, built from ansible/execution/Containerfile
+  # in the infrastructure repository and published by that repository, not this one.
+  reference: >-
+    registry.example.com/shared/base/ansible-ee@sha256:64703d0cec04567ef5b5108b755528ad911db3a6ebb5dfa90d20cabc145d3c9b
+  pinning: digest
+  tool_versions:
+    ansible-core: 2.18.x
+    collections: ansible.posix, ansible.utils, community.general, community.crypto, community.hashi_vault
+
+trust:
+  privileged: false
+  # This is the only one of the three ansible components that leaves the runner.
+  # It opens SSH sessions to every host the play targets, so the runner needs
+  # routes to the managed networks and the estate needs to accept that the job's
+  # credential reaches them.
+  network_egress:
+    - registry.example.com
+    - managed hosts on tcp/22 for the selected inventory
+  runner_profile: linux/amd64 docker executor, unprivileged, routed to the managed networks
+  protected_ref_required: true
+
+validation:
+  evidence:
+    - source-reviewed
+    - yaml-parsed
+    - gitlab-linted
+    - runtime-tested
+  verified_at: 2026/09/15
+  environment: gitlab.example.com 18.9.1-ee, project 18
+  notes: >-
+    Check mode is PARTIAL PREDICTIVE COVERAGE, not a deployment plan. A module
+    without check support reports nothing rather than no change; a task gated on
+    a skipped task's result is not evaluated; anything depending on state the
+    run did not create predicts wrongly. A green check is not evidence the
+    deploy will succeed and must not be the only gate in front of one.
+    gitlab-linted through the CI Lint API by
+    tests/pipelines/test_ansible_components.py, including that the shipped
+    run-rules create no job on an ordinary push. The job shell is behaviour
+    tested by tests/runtime/ansible/, with ansible-playbook stubbed: that covers
+    the checkout escape check, the path validation, the required inventory, the
+    host key checking assertion, the vault password handling and the exact
+    argument list. runtime-tested covers the tool invocation only: the pinned
+    image was run by hand on 2026/09/15 with the argument list this job builds,
+    against a one host local inventory. The run exited 0, reported the task as
+    changed, and the file the task would have created did not exist afterwards,
+    which is the property --check is there for. Nothing has been run against a
+    real remote inventory and nothing was executed by a GitLab runner, so this
+    is neither integration-tested nor evidence about SSH reachability from a
+    runner. Status: experimental, because no consumer pipeline has run any
+    ansible component. platform/infrastructure is the only consumer and its ansible jobs
+    sit in a stage behind a preflight that went red, so they were skipped rather
+    than run.

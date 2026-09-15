@@ -1,0 +1,31 @@
+---
+# examples/container-buildkit/.gitlab-ci.yml
+#
+# The whole .gitlab-ci.yml of a project that builds one image from a Dockerfile
+# and releases it. A consumer pipeline is an include with a project, a ref, a
+# file and inputs. Nothing else: no stages, no scripts, no jobs disabled.
+#
+# `instance` names the workload. With `api` here the pipeline creates
+# api:security-secrets-gitleaks, api:security-sast-semgrep,
+# api:security-filesystem-trivy, api:quality-dependency-lockfiles,
+# api:container-build-buildkit, api:security-sbom-syft,
+# api:security-image-trivy, api:container-sign-attest-cosign and, on a protected
+# tag, api:container-promote-harbor.
+#
+# `ref` must be a protected release tag or a full commit SHA. .ci/estate.yml
+# records shared_ci.approved_ref as unresolved because no release tag exists
+# yet; put the approved one here, never a branch name.
+#
+# A Dockerfile to start from is in examples/Dockerfile.
+include:
+  - project: 'platform/gitlab-ci-templates'
+    ref: 'REPLACE_WITH_APPROVED_SHARED_CI_REF'
+    file: '/pipelines/container-buildkit.yml'
+    inputs:
+      instance: api
+      image-repository: 'registry.example.com/dev/platform/api'
+      dockerfile: 'Dockerfile'
+      semgrep-rules: 'ci/semgrep-rules.yml'
+      lockfiles: 'go.sum'
+      tags:
+        - '$CI_COMMIT_SHORT_SHA'

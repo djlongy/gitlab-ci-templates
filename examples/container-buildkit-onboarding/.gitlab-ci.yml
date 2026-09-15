@@ -1,0 +1,29 @@
+---
+# examples/container-buildkit-onboarding/.gitlab-ci.yml
+#
+# THE SAME PIPELINE WITH ONE GATE RELAXED, FOR A PROJECT BEING ONBOARDED.
+#
+# `sast-policy-mode: advisory` records Semgrep findings instead of failing on
+# them. It is here so that adopting the pipeline does not require clearing a
+# backlog of existing SAST findings first, and it is a temporary state: a
+# project that ships releases on this configuration is shipping them without a
+# SAST gate.
+#
+# What advisory does NOT do: it still fails when Semgrep cannot run, when its
+# rules cannot be loaded, or when the report is missing or malformed. An
+# unrunnable scanner is an error, not a clean result.
+#
+# What is NOT relaxed, and must not be: secret detection, the filesystem scan,
+# the lockfile check and the image scan all stay blocking, and the signature and
+# promotion gates are unchanged. Use examples/container-buildkit/ once the SAST
+# backlog is cleared.
+include:
+  - project: 'platform/gitlab-ci-templates'
+    ref: 'REPLACE_WITH_APPROVED_SHARED_CI_REF'
+    file: '/pipelines/container-buildkit.yml'
+    inputs:
+      instance: api
+      image-repository: 'registry.example.com/dev/platform/api'
+      semgrep-rules: 'ci/semgrep-rules.yml'
+      lockfiles: 'go.sum'
+      sast-policy-mode: advisory

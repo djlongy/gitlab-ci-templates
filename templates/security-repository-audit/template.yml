@@ -1,0 +1,1049 @@
+---
+# templates/security-repository-audit/template.yml
+#
+# Scan a named set of OTHER repositories: clone each one, look for leaked
+# secrets, and optionally run the Terraform static and state checks over them.
+# Replaces security/group-scan.yml and the three jobs in
+# security/terraform-audit.yml.
+#
+# Section 11.6 governs: "obtain an explicit repository set and scan it ... A
+# failure to clone an in-scope repository must report incomplete coverage and
+# fail the required audit; scanning zero repositories is not success." Both old
+# files failed that rule in the same way — a clone that did not happen printed
+# SKIP or WARN and the job exited 0 — which is what runtime/audit/ now enforces,
+# with the tests in tests/runtime/audit/ pinning it.
+#
+# Three more things changed:
+#   - security/terraform-audit.yml uploaded `repos/` — three complete cloned
+#     repositories, state files included — as a pipeline artifact, and then
+#     scanned that artifact for leaked secrets. The clones stay in the job here
+#     and only the evidence records are published (section 9.4).
+#   - The scanners ran from `scripts/` in whatever checkout the job happened to
+#     have. They are vendored into this template and checksummed (section 12).
+#   - `.group-scan-base` carried a dead `wget` of an arm64 gitleaks tarball with
+#     `|| true`. It is gone.
+#
+# Two instances cover what the two old files did: one over the group with
+# secrets scanning, one over the Terraform repositories with the Terraform
+# checks. See pipelines/repository-secret-audit.yml.
+
+#### Public interface ####
+spec:
+  inputs:
+    instance:
+      type: string
+      description: Unique workload instance used in the job name.
+      regex: '^[a-z][a-z0-9-]{0,47}$'
+    stage:
+      type: string
+      description: >-
+        Stage supplied by the owning composition. Section 7.1 places audits in
+        verify.
+      default: verify
+    repositories:
+      type: string
+      description: >-
+        Explicit repository set: whitespace-separated full paths, e.g.
+        "platform/terraform-modules platform/terraform-dns". Mutually exclusive
+        with group-path. A GitLab array input cannot be carried into a job
+        variable — the CI Lint API rejects "variable definition must be either a
+        string or a hash" — so the set is a string here and the composition
+        documents the same shape.
+      default: ''
+    group-path:
+      type: string
+      description: >-
+        Alternative to repositories: the full path of a group whose projects,
+        including subgroups, are the set. Resolved through the API at job time,
+        and a listing that fails or returns nothing fails the audit.
+      default: ''
+    scan-secrets:
+      type: boolean
+      description: Run gitleaks over every cloned repository.
+      default: true
+    scan-terraform:
+      type: boolean
+      description: >-
+        Run the Terraform anti-pattern audit and the state secret scan over
+        every cloned repository.
+      default: false
+    clone-depth:
+      type: number
+      description: >-
+        git clone depth. 1 scans the current tree only; 0 clones full history,
+        which is what a secret introduced and later deleted needs.
+      default: 1
+    api-token-variable:
+      type: string
+      description: >-
+        Name of the CI variable holding the token used to list and clone the
+        repository set. The NAME, never the value (section 6.1). It needs
+        read_api when group-path is used, and read_repository either way.
+      regex: '^[A-Z][A-Z0-9_]*$'
+      default: GROUP_SCAN_TOKEN
+    execution-image:
+      type: string
+      description: >-
+        Approved execution image pinned by digest, carrying the gitleaks binary.
+        The Terraform checks need bash, jq, git and curl, which the job adds.
+      regex: '^.+@sha256:[0-9a-f]{64}$'
+      default: 'docker.io/zricethezav/gitleaks@sha256:0e99e8821643ea5b235718642b93bb32486af9c8162c8b8731f7cbdc951a7f46'
+    runner-tags:
+      type: array
+      description: Runner selection from the estate profile.
+      default: []
+    max-retries:
+      type: number
+      description: >-
+        How many times the runner may retry this job. The condition is
+        runner_system_failure only, so this retries infrastructure and never a
+        failed gate.
+      default: 1
+      options: [0, 1, 2]
+    run-rules:
+      type: array
+      description: >-
+        Job eligibility set by the composition. The default preserves the two
+        sources the old audits ran on: a schedule, and a manually started web
+        pipeline.
+      default:
+        - if: '$CI_PIPELINE_SOURCE == "schedule"'
+        - if: '$CI_PIPELINE_SOURCE == "web"'
+---
+
+#### Executable capability ####
+"$[[ inputs.instance ]]:security-repository-audit":
+  stage: $[[ inputs.stage ]]
+  image:
+    name: $[[ inputs.execution-image ]]
+    entrypoint: ['']
+  tags: $[[ inputs.runner-tags ]]
+  variables:
+    # The audit reads other repositories; this project's own checkout is not
+    # the subject and is not needed.
+    GIT_STRATEGY: none
+    CI_TPL_ARTIFACT_DIR: "$CI_PROJECT_DIR/.ci-artifacts/$[[ inputs.instance ]]/security-repository-audit"
+    CI_TPL_RUNTIME_DIR: /tmp/ci-tpl-runtime/security-repository-audit
+    CI_TPL_REPOS_DIR: /tmp/ci-tpl-audit-repositories
+    CI_TPL_REPOSITORIES: $[[ inputs.repositories ]]
+    CI_TPL_GROUP_PATH: $[[ inputs.group-path ]]
+    CI_TPL_SCAN_SECRETS: $[[ inputs.scan-secrets ]]
+    CI_TPL_SCAN_TERRAFORM: $[[ inputs.scan-terraform ]]
+    CI_TPL_CLONE_DEPTH: $[[ inputs.clone-depth ]]
+    CI_TPL_API_TOKEN_VARIABLE: $[[ inputs.api-token-variable ]]
+    CI_TPL_API_URL: "$CI_API_V4_URL"
+    CI_TPL_SERVER_URL: "$CI_SERVER_URL"
+  dependencies: []
+  before_script:
+    - apk add --no-cache bash curl jq git
+    - |
+      set -eu
+      # BEGIN embed dir $CI_TPL_RUNTIME_DIR runtime/audit/clone-repositories.sh runtime/audit/gitleaks-scan.sh runtime/audit/audit-secrets.sh runtime/audit/scan-state.sh
+      mkdir -p "$CI_TPL_RUNTIME_DIR" || exit 1
+      cat > "$CI_TPL_RUNTIME_DIR/clone-repositories.sh" <<'CI_TPL_EMBED_EOF' || exit 1
+      #!/usr/bin/env bash
+      # clone-repositories.sh — resolve an audit's repository set, clone all of it, and
+      # record the coverage it actually achieved.
+      #
+      # Section 11.6 is the reason this script exists rather than a loop in a job:
+      # "A failure to clone an in-scope repository must report incomplete coverage and
+      # fail the required audit; scanning zero repositories is not success." The two
+      # templates this replaces (security/group-scan.yml, security/terraform-audit.yml)
+      # both printed "SKIP: Could not clone ..." and exited 0, so a token that had lost
+      # access to every project produced a green fleet-wide audit that read nothing.
+      #
+      # Usage:
+      #   clone-repositories.sh <destination-directory>
+      #
+      # Environment:
+      #   CI_TPL_REPOSITORIES   whitespace-separated full paths (group/name). Explicit
+      #                         set; mutually exclusive with CI_TPL_GROUP_PATH.
+      #   CI_TPL_GROUP_PATH     full path of a group whose projects are the set,
+      #                         including subgroups. Resolved through the API.
+      #   CI_TPL_API_URL        API v4 root, e.g. https://git.example/api/v4
+      #   CI_TPL_SERVER_URL     server root used to build clone URLs
+      #   CI_TPL_AUDIT_TOKEN    token value with read_api and read_repository
+      #   CI_TPL_COVERAGE_FILE  path of the coverage record to write
+      #   CI_TPL_CLONE_DEPTH    git clone depth (default 1; 0 clones full history)
+      #
+      # Exit codes — the audit's failure semantics, tested in tests/runtime/audit/:
+      #   0  every in-scope repository cloned
+      #   1  usage error (no destination, both or neither selector, missing tool)
+      #   2  a repository in scope failed to clone: coverage is incomplete
+      #   3  the repository set could not be resolved, or resolved to nothing
+
+      set -euo pipefail
+
+      destination="${1:?usage: clone-repositories.sh <destination-directory>}"
+
+      repositories="${CI_TPL_REPOSITORIES:-}"
+      group_path="${CI_TPL_GROUP_PATH:-}"
+      api_url="${CI_TPL_API_URL:-}"
+      server_url="${CI_TPL_SERVER_URL:-}"
+      token="${CI_TPL_AUDIT_TOKEN:-}"
+      coverage_file="${CI_TPL_COVERAGE_FILE:-}"
+      clone_depth="${CI_TPL_CLONE_DEPTH:-1}"
+
+      die() { echo "clone-repositories: $2" >&2; exit "$1"; }
+
+      for tool in git curl jq; do
+        command -v "$tool" >/dev/null 2>&1 || die 1 "$tool is not on PATH"
+      done
+
+      if [ -n "$repositories" ] && [ -n "$group_path" ]; then
+        die 1 "set CI_TPL_REPOSITORIES or CI_TPL_GROUP_PATH, not both"
+      fi
+      if [ -z "$repositories" ] && [ -z "$group_path" ]; then
+        die 1 "set CI_TPL_REPOSITORIES or CI_TPL_GROUP_PATH"
+      fi
+      [ -n "$coverage_file" ] || die 1 "CI_TPL_COVERAGE_FILE is not set"
+      [ -n "$server_url" ] || die 1 "CI_TPL_SERVER_URL is not set"
+
+      # ---------------------------------------------------------------- resolve set
+      source_kind=explicit
+      if [ -n "$group_path" ]; then
+        source_kind=group
+        [ -n "$api_url" ] || die 1 "CI_TPL_API_URL is not set"
+        [ -n "$token" ] || die 1 "CI_TPL_AUDIT_TOKEN is not set for a group listing"
+
+        encoded=$(printf '%s' "$group_path" | sed 's|/|%2F|g')
+        page=1
+        resolved=""
+        while [ "$page" -le 20 ]; do
+          body=$(curl -fsS --max-time 60 -H "PRIVATE-TOKEN: $token" \
+            "$api_url/groups/$encoded/projects?per_page=100&include_subgroups=true&archived=false&page=$page") \
+            || die 3 "listing projects of group '$group_path' failed (page $page)"
+          printf '%s' "$body" | jq -e 'type == "array"' >/dev/null 2>&1 \
+            || die 3 "unexpected response listing group '$group_path'"
+          names=$(printf '%s' "$body" | jq -r '.[].path_with_namespace')
+          [ -n "$names" ] || break
+          resolved="${resolved}${names}"$'\n'
+          page=$((page + 1))
+        done
+        repositories="$resolved"
+      fi
+
+      set -- $repositories
+      [ "$#" -gt 0 ] || die 3 "the repository set is empty; scanning nothing is not a pass"
+
+      # ---------------------------------------------------------------------- clone
+      mkdir -p "$destination"
+
+      if [ -n "$token" ]; then
+        # The token goes in a private credential file rather than the clone URL: a URL
+        # carrying it is echoed back by git on any error, and lands in the job log.
+        credentials="$destination/.git-credentials"
+        host=${server_url#*://}
+        scheme=${server_url%%://*}
+        umask 077
+        printf '%s://oauth2:%s@%s\n' "$scheme" "$token" "${host%%/*}" >"$credentials"
+        export GIT_CONFIG_GLOBAL="$destination/.gitconfig"
+        git config --global credential.helper "store --file=$credentials"
+      fi
+
+      depth_args=""
+      [ "$clone_depth" -gt 0 ] 2>/dev/null && depth_args="--depth $clone_depth"
+
+      failed=0
+      entries=""
+      for path in "$@"; do
+        target="$destination/$(printf '%s' "$path" | tr '/' '_')"
+        echo "--- cloning $path"
+        # shellcheck disable=SC2086  # depth_args is a deliberate word-split of our own value
+        if git clone --quiet $depth_args "$server_url/$path.git" "$target"; then
+          outcome=cloned
+        else
+          outcome=failed
+          failed=$((failed + 1))
+          echo "clone-repositories: FAILED to clone $path" >&2
+        fi
+        entries="${entries}${path} ${outcome}"$'\n'
+      done
+
+      # ------------------------------------------------------------------- coverage
+      mkdir -p "$(dirname "$coverage_file")"
+      printf '%s' "$entries" | jq -R -s --arg source "$source_kind" \
+        --arg group "$group_path" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+        split("\n") | map(select(length > 0) | split(" ")) as $rows |
+        {
+          schema_version: 1,
+          source: $source,
+          group_path: (if $group == "" then null else $group end),
+          generated_at: $at,
+          in_scope: ($rows | length),
+          cloned: ($rows | map(select(.[1] == "cloned")) | length),
+          repositories: ($rows | map({path: .[0], outcome: .[1]}))
+        }' >"$coverage_file"
+
+      echo "coverage record: $coverage_file"
+      if [ "$failed" -gt 0 ]; then
+        die 2 "$failed of $# repositories failed to clone; coverage is incomplete"
+      fi
+      echo "clone-repositories: $# of $# repositories cloned"
+      CI_TPL_EMBED_EOF
+      chmod +x "$CI_TPL_RUNTIME_DIR/clone-repositories.sh" || exit 1
+      cat > "$CI_TPL_RUNTIME_DIR/gitleaks-scan.sh" <<'CI_TPL_EMBED_EOF' || exit 1
+      #!/usr/bin/env bash
+      # gitleaks-scan.sh — scan every cloned repository and tell findings apart from
+      # execution failures.
+      #
+      # Section 10.1 requires the two to be distinguishable: a blocking finding fails
+      # the job, and so does a scanner that crashed, timed out or produced no parsable
+      # report. security/group-scan.yml conflated them — it read gitleaks' exit status
+      # as "leaks: yes/no", so a gitleaks that failed to start counted as a repository
+      # with leaks, and a repository that never cloned counted as nothing at all.
+      #
+      # Usage:
+      #   gitleaks-scan.sh <repositories-directory> <reports-directory>
+      #
+      # Environment:
+      #   CI_TPL_GITLEAKS_ARGS  extra arguments passed to `gitleaks detect`
+      #
+      # Exit codes:
+      #   0  every repository scanned, no findings
+      #   1  at least one repository has findings
+      #   2  a scan did not complete: missing tool, non-finding exit status, or a
+      #      report that is absent or unparsable
+      #   3  usage error, or no repository to scan
+
+      set -euo pipefail
+
+      repositories="${1:?usage: gitleaks-scan.sh <repositories-directory> <reports-directory>}"
+      reports="${2:?usage: gitleaks-scan.sh <repositories-directory> <reports-directory>}"
+
+      [ -d "$repositories" ] || { echo "gitleaks-scan: $repositories is not a directory" >&2; exit 3; }
+      for tool in gitleaks jq; do
+        command -v "$tool" >/dev/null 2>&1 || { echo "gitleaks-scan: $tool is not on PATH" >&2; exit 2; }
+      done
+      mkdir -p "$reports"
+
+      findings=0
+      errors=0
+      scanned=0
+
+      for repository in "$repositories"/*; do
+        [ -d "$repository" ] || continue
+        name=$(basename "$repository")
+        case "$name" in .*) continue ;; esac
+        report="$reports/$name.json"
+        scanned=$((scanned + 1))
+
+        echo "--- gitleaks: $name"
+        status=0
+        gitleaks detect \
+          --source "$repository" \
+          --report-format json \
+          --report-path "$report" \
+          --redact \
+          --no-banner \
+          ${CI_TPL_GITLEAKS_ARGS:-} || status=$?
+
+        # A report that cannot be parsed means the scan did not complete, whatever
+        # the exit status said.
+        if [ ! -s "$report" ] || ! jq -e 'type == "array"' "$report" >/dev/null 2>&1; then
+          echo "gitleaks-scan: $name produced no parsable report (exit $status)" >&2
+          errors=$((errors + 1))
+          continue
+        fi
+
+        count=$(jq 'length' "$report")
+        case "$status" in
+          0)
+            if [ "$count" -ne 0 ]; then
+              # Documented exit code 1 means findings; 0 with findings in the report
+              # is a contradiction, so the result is not trusted.
+              echo "gitleaks-scan: $name reported $count finding(s) with exit 0" >&2
+              errors=$((errors + 1))
+            else
+              echo "    clean"
+            fi
+            ;;
+          1)
+            echo "    $count finding(s)"
+            findings=$((findings + count))
+            ;;
+          *)
+            echo "gitleaks-scan: $name failed to scan (exit $status)" >&2
+            errors=$((errors + 1))
+            ;;
+        esac
+      done
+
+      echo "gitleaks-scan: $scanned repositories, $findings finding(s), $errors error(s)"
+      [ "$scanned" -gt 0 ] || { echo "gitleaks-scan: nothing was scanned" >&2; exit 3; }
+      [ "$errors" -eq 0 ] || exit 2
+      [ "$findings" -eq 0 ] || exit 1
+      exit 0
+      CI_TPL_EMBED_EOF
+      chmod +x "$CI_TPL_RUNTIME_DIR/gitleaks-scan.sh" || exit 1
+      cat > "$CI_TPL_RUNTIME_DIR/audit-secrets.sh" <<'CI_TPL_EMBED_EOF' || exit 1
+      #!/usr/bin/env bash
+      # audit-secrets.sh — Static analysis of Terraform files for security anti-patterns.
+      # Scans all repos under TERRAFORM_BASE_PATH for known issues.
+      # Exit code: 0 = all checks pass, 1 = one or more checks failed.
+      #
+      # Usage:
+      #   export TERRAFORM_BASE_PATH="/path/to/repos"
+      #   runtime/audit/audit-secrets.sh
+      #
+      # Or pass repos as arguments:
+      #   runtime/audit/audit-secrets.sh terraform-cloudflare terraform-hypervisor-vms terraform-modules
+
+      set -euo pipefail
+
+      TERRAFORM_BASE_PATH="${TERRAFORM_BASE_PATH:?TERRAFORM_BASE_PATH must be set}"
+
+      if [[ $# -gt 0 ]]; then
+        REPOS=("$@")
+      else
+        REPOS=("terraform-cloudflare" "terraform-hypervisor-vms" "terraform-modules")
+      fi
+
+      FAILURES=0
+      CHECKS_RUN=0
+
+      RED='\033[0;31m'
+      GREEN='\033[0;32m'
+      YELLOW='\033[0;33m'
+      NC='\033[0m'
+
+      pass() {
+        echo -e "  ${GREEN}PASS${NC}: $1"
+      }
+
+      fail() {
+        FAILURES=$((FAILURES + 1))
+        echo -e "  ${RED}FAIL${NC}: $1"
+      }
+
+      warn() {
+        echo -e "  ${YELLOW}WARN${NC}: $1"
+      }
+
+      # Run one search step and let an error stop the audit.
+      #
+      # grep exits 0 when it matched, 1 when it did not, and 2 or more when it could
+      # not look: an unreadable file, a directory where a file was expected, a pattern
+      # it refused. awk has no "did not match" code at all, so for awk any non-zero
+      # status is an error. Every search below was written `... 2>/dev/null || true`,
+      # which collapsed all of those into "no hits" and printed PASS. A repository
+      # this script could not read was reported as a repository with no findings,
+      # which is the one answer an audit must never give.
+      #
+      # Errors are fatal rather than counted as a FAIL: a failed check says the code
+      # is wrong, and this says the audit did not run. Those are different answers and
+      # the caller has to be able to tell them apart.
+      #
+      # Pipelines stay outside this wrapper: filters downstream of a search read stdin
+      # and cannot hit the error cases above, and passing a pipeline through here
+      # would mean eval.
+      search() {
+        local status=0 threshold=1 out
+        if [[ "$1" == "grep" ]]; then threshold=2; fi
+        out=$("$@") || status=$?
+        if (( status >= threshold )); then
+          echo "ERROR: $1 exited ${status}: this search did not complete, so nothing here is a clean result" >&2
+          echo "ERROR:   command: $*" >&2
+          exit 2
+        fi
+        printf '%s' "$out"
+      }
+
+      # The file list is part of the verdict: a repository whose tree could not be
+      # walked contributes no files and no findings, which reads as clean.
+      collect_tf_files() {
+        local root=$1 status=0 listing
+        listing=$(mktemp)
+        find "$root" -name '*.tf' -type f -not -path '*/.terraform/*' -print0 > "$listing" || status=$?
+        if (( status != 0 )); then
+          rm -f "$listing"
+          echo "ERROR: find exited ${status} walking ${root}; an incomplete file list is not a clean audit" >&2
+          exit 2
+        fi
+        while IFS= read -r -d '' found; do
+          TF_FILES+=("$found")
+        done < "$listing"
+        rm -f "$listing"
+      }
+
+      # Collect all .tf files across repos
+      TF_FILES=()
+      for repo in "${REPOS[@]}"; do
+        repo_path="${TERRAFORM_BASE_PATH}/${repo}"
+        if [[ ! -d "$repo_path" ]]; then
+          warn "Repository not found: ${repo_path}"
+          continue
+        fi
+        collect_tf_files "$repo_path"
+      done
+
+      if [[ ${#TF_FILES[@]} -eq 0 ]]; then
+        echo "ERROR: No .tf files found under ${TERRAFORM_BASE_PATH}"
+        exit 1
+      fi
+
+      echo "Scanning ${#TF_FILES[@]} Terraform files across ${#REPOS[@]} repos"
+      echo "Base path: ${TERRAFORM_BASE_PATH}"
+      echo ""
+
+      # ─── Check 1: Non-ephemeral vault_kv_secret_v2 data sources ───────────────────
+      # Related findings: F-03, C-01, C-02, C-03
+      # Severity: CRITICAL
+      # Vault reads that contain actual secrets must use ephemeral blocks to prevent
+      # state persistence. However, non-secret identifiers (account IDs, zone IDs,
+      # project IDs, etc.) that must persist to state-managed resource attributes are
+      # allowed to use data sources. Mark these with a trailing comment:
+      #   data "vault_kv_secret_v2" "ids" { ... }  # audit:non-secret
+      echo "CHECK 1: Non-ephemeral Vault reads [F-03, C-01, C-02, C-03]"
+      CHECKS_RUN=$((CHECKS_RUN + 1))
+      CHECK1_HITS=""
+      for f in "${TF_FILES[@]}"; do
+        # Flag files containing data "vault_kv_secret_v2" that lack the audit:non-secret annotation
+        RESULT=$(search awk '
+          /data "vault_kv_secret_v2"/ {
+            if ($0 !~ /audit:non-secret/) {
+              print FILENAME ":" NR ": " $0
+            }
+          }
+        ' "$f")
+        [[ -n "$RESULT" ]] && CHECK1_HITS="${CHECK1_HITS}${RESULT}"$'\n'
+      done
+      CHECK1_HITS=$(echo "$CHECK1_HITS" | sed '/^$/d')
+      if [[ -n "$CHECK1_HITS" ]]; then
+        fail "Found non-ephemeral vault_kv_secret_v2 data sources (must use ephemeral blocks or add '# audit:non-secret' comment):"
+        echo "$CHECK1_HITS" | while read -r line; do echo "    $line"; done
+      else
+        pass "No unexempted non-ephemeral vault_kv_secret_v2 data sources found"
+      fi
+
+      # ─── Check 2: vault_secrets module usage ──────────────────────────────────────
+      # Related findings: F-03, C-01, M-02
+      # Severity: CRITICAL
+      # Module outputs always persist to state. Use direct ephemeral blocks instead.
+      echo "CHECK 2: Vault secrets module usage [F-03, C-01, M-02]"
+      CHECKS_RUN=$((CHECKS_RUN + 1))
+      HITS=$(search grep -rln 'module "vault_secrets"' "${TF_FILES[@]}")
+      if [[ -n "$HITS" ]]; then
+        fail "Found vault_secrets module references (must use direct ephemeral blocks):"
+        echo "$HITS" | while read -r f; do echo "    $f"; done
+      else
+        pass "No vault_secrets module references found in consumer repos"
+      fi
+
+      # ─── Check 3: Hardcoded secrets/tokens ────────────────────────────────────────
+      # Related findings: CRIT-01, F-04, F-07
+      # Severity: CRITICAL
+      # Scans both .tf and .md files for common token patterns.
+      echo "CHECK 3: Hardcoded secrets and tokens [CRIT-01, F-04, F-07]"
+      CHECKS_RUN=$((CHECKS_RUN + 1))
+      SECRET_PATTERNS='(gldt-[A-Za-z0-9_-]{20,}|glpat-[A-Za-z0-9_-]{20,}|hvs\.[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9]{20,}|AKIA[A-Z0-9]{16}|bearer [A-Za-z0-9_-]{20,})'
+      HITS=""
+      for repo in "${REPOS[@]}"; do
+        repo_path="${TERRAFORM_BASE_PATH}/${repo}"
+        [[ -d "$repo_path" ]] || continue
+        REPO_RAW=$(search grep -rlE "$SECRET_PATTERNS" "$repo_path" \
+          --include='*.tf' --include='*.md' --include='*.yml' --include='*.yaml' \
+          --include='*.tfvars' --include='*.tfvars.example')
+        REPO_HITS=""
+        if [[ -n "$REPO_RAW" ]]; then
+          REPO_HITS=$(printf '%s\n' "$REPO_RAW" | grep -v '/.terraform/' || true)
+        fi
+        [[ -n "$REPO_HITS" ]] && HITS="${HITS}${REPO_HITS}"$'\n'
+      done
+      HITS=$(echo "$HITS" | sed '/^$/d')
+      if [[ -n "$HITS" ]]; then
+        fail "Found potential hardcoded secrets:"
+        echo "$HITS" | while read -r f; do echo "    $f"; done
+      else
+        pass "No hardcoded secrets detected"
+      fi
+
+      # ─── Check 4: Missing sensitive = true on password/secret/token/key vars ──────
+      # Related findings: F-01, M-04, LOW-01
+      # Severity: HIGH
+      # All variables containing credentials must be marked sensitive to prevent
+      # exposure in plan output and CI logs.
+      echo "CHECK 4: Variables missing sensitive = true [F-01, M-04, LOW-01]"
+      CHECKS_RUN=$((CHECKS_RUN + 1))
+      CHECK4_RESULT=""
+      for f in "${TF_FILES[@]}"; do
+        RESULT=$(search awk '
+          /^variable "[^"]*(_password|_secret|_token|_key|api_key|api_token)[^"]*"/ {
+            varname = $0; has_sensitive = 0; brace_count = 0; in_block = 1; next
+          }
+          in_block && /{/ { brace_count++ }
+          in_block && /}/ {
+            brace_count--
+            if (brace_count <= 0) {
+              if (!has_sensitive) { gsub(/^[ \t]+/, "", varname); print FILENAME ": " varname }
+              in_block = 0
+            }
+          }
+          in_block && /sensitive/ && /=/ && /true/ { has_sensitive = 1 }
+        ' "$f")
+        [[ -n "$RESULT" ]] && CHECK4_RESULT="${CHECK4_RESULT}${RESULT}"$'\n'
+      done
+      CHECK4_RESULT=$(echo "$CHECK4_RESULT" | sed '/^$/d')
+      if [[ -n "$CHECK4_RESULT" ]]; then
+        fail "Variables missing sensitive = true:"
+        echo "$CHECK4_RESULT" | while read -r line; do echo "    $line"; done
+      else
+        pass "All password/secret/token/key variables have sensitive = true"
+      fi
+
+      # ─── Check 5: Local state backends ───────────────────────────────────────────
+      # Related findings: F-02, F-12
+      # Severity: CRITICAL
+      # Local state backends write secrets to disk in plaintext.
+      echo "CHECK 5: Local state backends [F-02, F-12]"
+      CHECKS_RUN=$((CHECKS_RUN + 1))
+      HITS=$(search grep -rln 'backend "local"' "${TF_FILES[@]}")
+      if [[ -n "$HITS" ]]; then
+        fail "Found local state backends (must use remote backend):"
+        echo "$HITS" | while read -r f; do echo "    $f"; done
+      else
+        pass "No local state backends found"
+      fi
+
+      # ─── Check 6: allow_unverified_ssl defaults ──────────────────────────────────
+      # Related findings: HIGH-02, H-03
+      # Severity: HIGH
+      # Insecure TLS defaults enable MITM credential interception.
+      echo "CHECK 6: allow_unverified_ssl defaults [HIGH-02, H-03]"
+      CHECKS_RUN=$((CHECKS_RUN + 1))
+      HITS=""
+      for f in "${TF_FILES[@]}"; do
+        RESULT=$(search awk '
+          /allow_unverified_ssl/ && /default\s*=\s*true/ {
+            print FILENAME ":" NR ": " $0
+          }
+        ' "$f")
+        [[ -n "$RESULT" ]] && HITS="${HITS}${RESULT}"$'\n'
+      done
+      HITS=$(echo "$HITS" | sed '/^$/d')
+      if [[ -n "$HITS" ]]; then
+        fail "Found allow_unverified_ssl defaulting to true:"
+        echo "$HITS" | while read -r line; do echo "    $line"; done
+      else
+        pass "No allow_unverified_ssl defaults to true"
+      fi
+
+      # ─── Check 7: SSH private key file leaks ─────────────────────────────────────
+      # Related findings: H-02
+      # Severity: HIGH
+      # Private keys loaded via file() are embedded in state by the provisioner.
+      echo "CHECK 7: SSH private key file() usage [H-02]"
+      CHECKS_RUN=$((CHECKS_RUN + 1))
+      HITS=""
+      for f in "${TF_FILES[@]}"; do
+        # grep the file then filter out comments (lines starting with # or //)
+        RAW=$(search grep -n 'private_key\s*=\s*file(' "$f")
+        RESULT=""
+        if [[ -n "$RAW" ]]; then
+          RESULT=$(printf '%s\n' "$RAW" | grep -v '^\s*[0-9]*:\s*#' | grep -v '^\s*[0-9]*:\s*//' | sed "s|^|$f:|" || true)
+        fi
+        [[ -n "$RESULT" ]] && HITS="${HITS}${RESULT}"$'\n'
+      done
+      HITS=$(echo "$HITS" | sed '/^$/d')
+      if [[ -n "$HITS" ]]; then
+        fail "Found private_key loaded via file() (leaks key material to state):"
+        echo "$HITS" | while read -r line; do echo "    $line"; done
+      else
+        pass "No private_key file() patterns found"
+      fi
+
+      # ─── Check 8: Unpinned provider versions ─────────────────────────────────────
+      # Related findings: MED-01, MED-02, MED-03
+      # Severity: MEDIUM
+      # Unpinned providers allow supply-chain attacks via malicious provider versions.
+      echo "CHECK 8: Unpinned provider versions [MED-01, MED-02, MED-03]"
+      CHECKS_RUN=$((CHECKS_RUN + 1))
+      HITS=""
+      for f in "${TF_FILES[@]}"; do
+        RESULT=$(search awk '
+          /required_providers/ { in_rp = 1; rp_depth = 0; next }
+          in_rp && /{/ { rp_depth++ }
+          in_rp && /}/ { rp_depth--; if (rp_depth <= 0) in_rp = 0; next }
+          in_rp && /source\s*=/ {
+            source_line = NR; has_version = 0
+            # Look for version in the same provider block
+          }
+          in_rp && /version\s*=/ { has_version = 1 }
+          in_rp && /}/ && source_line && !has_version {
+            print FILENAME ":" source_line ": provider missing version constraint"
+            source_line = 0; has_version = 0
+          }
+        ' "$f")
+        [[ -n "$RESULT" ]] && HITS="${HITS}${RESULT}"$'\n'
+      done
+      HITS=$(echo "$HITS" | sed '/^$/d')
+      if [[ -n "$HITS" ]]; then
+        fail "Found unpinned provider versions:"
+        echo "$HITS" | while read -r line; do echo "    $line"; done
+      else
+        pass "All providers have version constraints"
+      fi
+
+      # ─── Check 9: .terraform.lock.hcl in .gitignore ─────────────────────────────
+      # Related findings: F-11, M-03
+      # Severity: LOW
+      # Lock files must be committed for reproducible builds and supply-chain integrity.
+      echo "CHECK 9: Lock file exclusion from git [F-11, M-03]"
+      CHECKS_RUN=$((CHECKS_RUN + 1))
+      CHECK9_HITS=""
+      for repo in "${REPOS[@]}"; do
+        gitignore="${TERRAFORM_BASE_PATH}/${repo}/.gitignore"
+        if [[ -f "$gitignore" ]]; then
+          # Assigned first, then tested: `search` exits from a subshell, and inside a
+          # test the exit would be swallowed and read as "no match".
+          LOCK_HIT=$(search grep -n '\.terraform\.lock\.hcl' "$gitignore")
+          if [[ -n "$LOCK_HIT" ]]; then
+            CHECK9_HITS="${CHECK9_HITS}${gitignore}"$'\n'
+          fi
+        fi
+      done
+      CHECK9_HITS=$(echo "$CHECK9_HITS" | sed '/^$/d')
+      if [[ -n "$CHECK9_HITS" ]]; then
+        fail "Found .terraform.lock.hcl excluded in .gitignore:"
+        echo "$CHECK9_HITS" | while read -r f; do echo "    $f"; done
+      else
+        pass "Lock files not excluded from git"
+      fi
+
+      # ─── Check 10: Hardcoded vault addresses ─────────────────────────────────────
+      # Related findings: H-01
+      # Severity: HIGH
+      # Vault addresses should be parameterized to avoid topology leaks and enable
+      # environment portability.
+      echo "CHECK 10: Hardcoded Vault addresses [H-01]"
+      CHECKS_RUN=$((CHECKS_RUN + 1))
+      HITS=""
+      for f in "${TF_FILES[@]}"; do
+        # Match vault provider address blocks only — exclude backend URLs and lock/unlock addresses
+        RAW=$(search grep -n 'address\s*=\s*"https\?://[^"]*vault[^"]*"' "$f")
+        RESULT=""
+        if [[ -n "$RAW" ]]; then
+          RESULT=$(printf '%s\n' "$RAW" \
+            | grep -v 'var\.' \
+            | grep -v 'lock_address' \
+            | grep -v 'unlock_address' \
+            | grep -v '/api/v4/projects/' \
+            | sed "s|^|$f:|" || true)
+        fi
+        [[ -n "$RESULT" ]] && HITS="${HITS}${RESULT}"$'\n'
+      done
+      HITS=$(echo "$HITS" | sed '/^$/d')
+      if [[ -n "$HITS" ]]; then
+        fail "Found hardcoded Vault addresses (should use variables):"
+        echo "$HITS" | while read -r line; do echo "    $line"; done
+      else
+        pass "No hardcoded Vault addresses found"
+      fi
+
+      # ─── Check 11: Provider blocks inside child modules ─────────────────────────
+      # Related findings: HIGH-01
+      # Severity: HIGH
+      # Provider configuration in child modules forces credentials through module
+      # variables, which always persist to state.
+      echo "CHECK 11: Provider blocks in child modules [HIGH-01]"
+      CHECKS_RUN=$((CHECKS_RUN + 1))
+      HITS=""
+      for repo in "${REPOS[@]}"; do
+        repo_path="${TERRAFORM_BASE_PATH}/${repo}"
+        [[ -d "$repo_path" ]] || continue
+        # Only check inside modules/ directories (child modules, not root modules)
+        MODULE_FILES=$(mktemp)
+        FIND_STATUS=0
+        find "$repo_path" -path '*/modules/*' -name '*.tf' -type f -not -path '*/.terraform/*' -print0 \
+          > "$MODULE_FILES" || FIND_STATUS=$?
+        if (( FIND_STATUS != 0 )); then
+          rm -f "$MODULE_FILES"
+          echo "ERROR: find exited ${FIND_STATUS} walking ${repo_path}; an incomplete file list is not a clean audit" >&2
+          exit 2
+        fi
+        while IFS= read -r -d '' f; do
+          RAW=$(search grep -n '^provider "' "$f")
+          RESULT=""
+          if [[ -n "$RAW" ]]; then
+            RESULT=$(printf '%s\n' "$RAW" | sed "s|^|$f:|")
+          fi
+          [[ -n "$RESULT" ]] && HITS="${HITS}${RESULT}"$'\n'
+        done < "$MODULE_FILES"
+        rm -f "$MODULE_FILES"
+      done
+      HITS=$(echo "$HITS" | sed '/^$/d')
+      if [[ -n "$HITS" ]]; then
+        fail "Found provider blocks inside child modules (anti-pattern):"
+        echo "$HITS" | while read -r line; do echo "    $line"; done
+      else
+        pass "No provider blocks in child modules"
+      fi
+
+      # ─── Check 12: Default credentials in example files ─────────────────────────
+      # Related findings: M-01
+      # Severity: MEDIUM
+      # Example files should never contain real or commonly-known passwords.
+      echo "CHECK 12: Default credentials in example files [M-01]"
+      CHECKS_RUN=$((CHECKS_RUN + 1))
+      HITS=""
+      for repo in "${REPOS[@]}"; do
+        repo_path="${TERRAFORM_BASE_PATH}/${repo}"
+        [[ -d "$repo_path" ]] || continue
+        REPO_HITS=$(search grep -rln 'Welcome1!\|P@ssw0rd\|password123\|changeme\|admin123' "$repo_path" \
+          --include='*.example' --include='*.sample' --include='*.tfvars.example')
+        [[ -n "$REPO_HITS" ]] && HITS="${HITS}${REPO_HITS}"$'\n'
+      done
+      HITS=$(echo "$HITS" | sed '/^$/d')
+      if [[ -n "$HITS" ]]; then
+        fail "Found default/known credentials in example files:"
+        echo "$HITS" | while read -r f; do echo "    $f"; done
+      else
+        pass "No default credentials in example files"
+      fi
+
+      # ─── Summary ─────────────────────────────────────────────────────────────────
+      echo ""
+      echo "════════════════════════════════════════"
+      CHECKS_PASSED=$((CHECKS_RUN - FAILURES))
+      echo "Results: ${CHECKS_PASSED}/${CHECKS_RUN} checks passed, ${FAILURES} failed"
+      echo "════════════════════════════════════════"
+
+      if [[ $FAILURES -gt 0 ]]; then
+        echo -e "${RED}AUDIT FAILED${NC}"
+        exit 1
+      else
+        echo -e "${GREEN}AUDIT PASSED${NC}"
+        exit 0
+      fi
+      CI_TPL_EMBED_EOF
+      chmod +x "$CI_TPL_RUNTIME_DIR/audit-secrets.sh" || exit 1
+      cat > "$CI_TPL_RUNTIME_DIR/scan-state.sh" <<'CI_TPL_EMBED_EOF' || exit 1
+      #!/usr/bin/env bash
+      # scan-state.sh — Scan Terraform state files for leaked secrets.
+      # Parses .tfstate JSON and checks for high-entropy strings and known token patterns.
+      # Exit code: 0 = clean, 1 = potential secrets found.
+      #
+      # Usage:
+      #   export TERRAFORM_BASE_PATH="/path/to/repos"
+      #   runtime/audit/scan-state.sh
+      #
+      # Or pass repos as arguments:
+      #   runtime/audit/scan-state.sh terraform-cloudflare terraform-hypervisor-vms
+
+      set -euo pipefail
+
+      TERRAFORM_BASE_PATH="${TERRAFORM_BASE_PATH:?TERRAFORM_BASE_PATH must be set}"
+
+      if [[ $# -gt 0 ]]; then
+        REPOS=("$@")
+      else
+        REPOS=("terraform-cloudflare" "terraform-hypervisor-vms" "terraform-modules")
+      fi
+
+      FAILURES=0
+
+      RED='\033[0;31m'
+      GREEN='\033[0;32m'
+      NC='\033[0m'
+
+      if ! command -v jq &>/dev/null; then
+        echo "ERROR: jq is required but not installed"
+        exit 1
+      fi
+
+      # Collect state files
+      STATE_FILES=()
+      for repo in "${REPOS[@]}"; do
+        repo_path="${TERRAFORM_BASE_PATH}/${repo}"
+        [[ -d "$repo_path" ]] || continue
+        while IFS= read -r -d '' f; do
+          STATE_FILES+=("$f")
+        done < <(find "$repo_path" -name '*.tfstate' -type f -not -path '*/.terraform/*' -print0 2>/dev/null)
+      done
+
+      if [[ ${#STATE_FILES[@]} -eq 0 ]]; then
+        echo "No .tfstate files found under ${TERRAFORM_BASE_PATH}"
+        echo -e "${GREEN}SCAN PASSED${NC} (no state files to scan)"
+        exit 0
+      fi
+
+      echo "Scanning ${#STATE_FILES[@]} state files"
+      echo ""
+
+      # Sensitive attribute names to check for plaintext values
+      SENSITIVE_ATTRS=(
+        "password"
+        "secret"
+        "token"
+        "private_key"
+        "api_key"
+        "api_token"
+        "credentials"
+        "access_key"
+        "secret_key"
+        "connection_string"
+      )
+
+      for state_file in "${STATE_FILES[@]}"; do
+        echo "Scanning: ${state_file}"
+
+        # Check 1: Look for sensitive attributes with non-null, non-empty values
+        for attr in "${SENSITIVE_ATTRS[@]}"; do
+          HITS=$(jq -r "
+            .. | objects |
+            to_entries[] |
+            select(.key | test(\"${attr}\"; \"i\")) |
+            select(.value != null and .value != \"\" and (.value | type) == \"string\" and (.value | length) > 3) |
+            \"  attribute: \\(.key) = \\(.value | .[0:8])...\"
+          " "$state_file" 2>/dev/null || true)
+
+          if [[ -n "$HITS" ]]; then
+            echo -e "  ${RED}FAIL${NC}: Found '${attr}' values in state:"
+            echo "$HITS" | head -20
+            FAILURES=$((FAILURES + 1))
+          fi
+        done
+
+        # Check 2: Look for known secret token patterns
+        HIGH_ENTROPY=$(jq -r '
+          [.. | strings | select(length > 20 and length < 500)] |
+          unique[] |
+          select(test("^[A-Za-z0-9+/=_-]{20,}$")) |
+          select(test("(gldt-|glpat-|hvs\\.|sk-|AKIA|-----BEGIN)"))
+        ' "$state_file" 2>/dev/null || true)
+
+        if [[ -n "$HIGH_ENTROPY" ]]; then
+          COUNT=$(echo "$HIGH_ENTROPY" | wc -l | tr -d ' ')
+          echo -e "  ${RED}FAIL${NC}: Found ${COUNT} potential secret pattern(s) in state"
+          echo "$HIGH_ENTROPY" | head -5 | while read -r val; do
+            echo "    ${val:0:12}..."
+          done
+          FAILURES=$((FAILURES + 1))
+        fi
+
+        # Check 3: Verify outputs are not leaking secrets
+        OUTPUT_SECRETS=$(jq -r '
+          .outputs // {} | to_entries[] |
+          select(.key | test("password|secret|token|key|credential"; "i")) |
+          select(.value.sensitive != true) |
+          "  output \"\(.key)\" is not marked sensitive"
+        ' "$state_file" 2>/dev/null || true)
+
+        if [[ -n "$OUTPUT_SECRETS" ]]; then
+          echo -e "  ${RED}FAIL${NC}: Outputs with secret names not marked sensitive:"
+          echo "$OUTPUT_SECRETS"
+          FAILURES=$((FAILURES + 1))
+        fi
+      done
+
+      # Summary
+      echo ""
+      echo "════════════════════════════════════════"
+      if [[ $FAILURES -gt 0 ]]; then
+        echo -e "${RED}STATE SCAN FAILED${NC}: ${FAILURES} issue(s) found"
+        echo "Action required: Rotate any exposed credentials and re-apply with ephemeral blocks"
+        exit 1
+      else
+        echo -e "${GREEN}STATE SCAN PASSED${NC}: No secrets detected in state files"
+        exit 0
+      fi
+      CI_TPL_EMBED_EOF
+      chmod +x "$CI_TPL_RUNTIME_DIR/scan-state.sh" || exit 1
+      # END embed
+  script:
+    - |
+      set -eu
+      mkdir -p "$CI_TPL_ARTIFACT_DIR"
+      if [ "$CI_TPL_SCAN_SECRETS" != "true" ] && [ "$CI_TPL_SCAN_TERRAFORM" != "true" ]; then
+        echo 'ERROR: neither scan-secrets nor scan-terraform is enabled; this audit would check nothing'
+        exit 1
+      fi
+
+      # The token arrives under the name the consumer declared, so the value is
+      # never an input. printenv reads it by name without eval.
+      CI_TPL_AUDIT_TOKEN=$(printenv "$CI_TPL_API_TOKEN_VARIABLE") || CI_TPL_AUDIT_TOKEN=""
+      export CI_TPL_AUDIT_TOKEN
+      if [ -n "$CI_TPL_GROUP_PATH" ] && [ -z "$CI_TPL_AUDIT_TOKEN" ]; then
+        echo "ERROR: $CI_TPL_API_TOKEN_VARIABLE is empty; a group listing cannot be made"
+        exit 1
+      fi
+
+      export CI_TPL_COVERAGE_FILE="$CI_TPL_ARTIFACT_DIR/audit-coverage.json"
+      bash "$CI_TPL_RUNTIME_DIR/clone-repositories.sh" "$CI_TPL_REPOS_DIR"
+
+      secrets_outcome=skipped
+      terraform_outcome=skipped
+      failures=0
+
+      if [ "$CI_TPL_SCAN_SECRETS" = "true" ]; then
+        status=0
+        bash "$CI_TPL_RUNTIME_DIR/gitleaks-scan.sh" \
+          "$CI_TPL_REPOS_DIR" "$CI_TPL_ARTIFACT_DIR/gitleaks" || status=$?
+        case "$status" in
+          0) secrets_outcome=clean ;;
+          1) secrets_outcome=findings; failures=$((failures + 1)) ;;
+          *) secrets_outcome=error; failures=$((failures + 1)) ;;
+        esac
+      fi
+
+      if [ "$CI_TPL_SCAN_TERRAFORM" = "true" ]; then
+        set -- $(cd "$CI_TPL_REPOS_DIR" && ls -1)
+        export TERRAFORM_BASE_PATH="$CI_TPL_REPOS_DIR"
+        terraform_outcome=clean
+        # Output goes to a file and is printed afterwards. Piping into tee
+        # would hand the `if` tee's exit status instead of the scanner's.
+        if ! bash "$CI_TPL_RUNTIME_DIR/audit-secrets.sh" "$@" \
+             > "$CI_TPL_ARTIFACT_DIR/terraform-audit.log" 2>&1; then
+          terraform_outcome=findings
+          failures=$((failures + 1))
+        fi
+        cat "$CI_TPL_ARTIFACT_DIR/terraform-audit.log"
+        if ! bash "$CI_TPL_RUNTIME_DIR/scan-state.sh" "$@" \
+             > "$CI_TPL_ARTIFACT_DIR/terraform-state-scan.log" 2>&1; then
+          terraform_outcome=findings
+          failures=$((failures + 1))
+        fi
+        cat "$CI_TPL_ARTIFACT_DIR/terraform-state-scan.log"
+      fi
+
+      jq -n \
+        --slurpfile coverage "$CI_TPL_COVERAGE_FILE" \
+        --arg secrets "$secrets_outcome" \
+        --arg terraform "$terraform_outcome" \
+        --arg commit "$CI_COMMIT_SHA" \
+        --arg pipeline "$CI_PIPELINE_ID" \
+        --arg job_id "$CI_JOB_ID" \
+        --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        '{schema_version: 1, subject: "repository-set",
+          coverage: $coverage[0],
+          scanners: {secrets: $secrets, terraform: $terraform},
+          policy_mode: "blocking",
+          source_commit: $commit, pipeline_id: $pipeline, job_id: $job_id,
+          completed_at: $at}' > "$CI_TPL_ARTIFACT_DIR/scan-result.json"
+
+      echo "secrets: $secrets_outcome, terraform: $terraform_outcome"
+      [ "$failures" -eq 0 ]
+  artifacts:
+    name: "$[[ inputs.instance ]]-security-repository-audit-$CI_JOB_ID"
+    paths:
+      - .ci-artifacts/$[[ inputs.instance ]]/security-repository-audit/
+    when: always
+    expire_in: 1 week
+  rules: $[[ inputs.run-rules ]]
+  allow_failure: false
+  interruptible: false
+  # Infrastructure only. Section 10.1 forbids weakening an outcome, and any
+  # condition other than runner_system_failure would retry a failed gate;
+  # tests/contracts/test_retry_policy.py fails the build on one.
+  retry:
+    max: $[[ inputs.max-retries ]]
+    when: [runner_system_failure]
+  # Insulation from the consumer's `default:` block (section 13.1). A component
+  # job runs in the image the component pins and the shell the component ships;
+  # a consumer's global image, before_script, after_script, cache, services,
+  # artifacts or hooks reaching it is a component running something nobody
+  # reviewed. Runner selection and timeouts are the consumer's to set, so those
+  # stay inherited. `retry` and `id_tokens` stay too: this component sets both
+  # itself, and a consumer-level definition is a deliberate estate choice.
+  inherit:
+    default: [tags, timeout, interruptible, retry, id_tokens]

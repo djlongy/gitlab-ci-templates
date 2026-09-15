@@ -1,0 +1,73 @@
+---
+name: security-image-grype
+kind: component
+status: experimental
+introduced_in: 1.0.0
+minimum_gitlab: '18.9'
+# Retry policy: the `max-retries` input (0, 1 or 2, default 1) sets `retry: max`,
+# and `retry: when` is `runner_system_failure` and nothing else. A job killed by
+# its runner runs again; a failed gate never does.
+emitted_jobs:
+  - pattern: '{instance}:security-image-grype'
+    stage: scan
+    blocking: true
+outputs:
+  - path: .ci-artifacts/{instance}/security-image-grype/grype-image.json
+    producer: '{instance}:security-image-grype'
+    format: Grype native JSON
+    subject_identity: >-
+      The image reference in the SBOM's subject.json, checked against the
+      build's image.json before the scan starts.
+    retention: 1 week
+  - path: .ci-artifacts/{instance}/security-image-grype/grype-image.sarif
+    producer: '{instance}:security-image-grype'
+    format: SARIF 2.1.0. Artifact only; not declared as reports:sast.
+    retention: 1 week
+  - path: .ci-artifacts/{instance}/security-image-grype/scan-result.json
+    producer: '{instance}:security-image-grype'
+    format: JSON
+    schema: >-
+      schema_version 1; status, subject, scanner, database.updated_at, counts by
+      severity, policy mode and threshold, unfixed treatment, exceptions, report
+      hashes, created_at.
+    subject_identity: repository@sha256 digest.
+    retention: 1 week
+  - path: .ci-artifacts/{instance}/security-image-grype/severities.txt
+    producer: '{instance}:security-image-grype'
+    format: One finding severity per line, from grype's template output.
+    retention: 1 week
+required_secrets: []
+runtime_image:
+  reference: 'docker.io/anchore/grype@sha256:a3166cb9ec689737c4c7099c78dbd3728ca22db73d5a99c9a0b582e42d5b0926'
+  pinning: digest
+  tool_versions:
+    grype: v0.118.0
+trust:
+  privileged: false
+  network_egress:
+    - grype.anchore.io
+  runner_profile: >-
+    Any unprivileged Docker executor. The image runs as uid 65532; it reads the
+    SBOM from artifacts and never pulls the image itself, so it needs no
+    registry credential.
+  protected_ref_required: false
+validation:
+  evidence:
+    - source-reviewed
+    - yaml-parsed
+    - gitlab-linted
+    - runtime-tested
+  verified_at: 2026/09/15
+  environment: gitlab.example.com 18.9.1-ee, project 18
+  notes: >-
+    Scans the authoritative SBOM only; there is no image-scanning mode and no
+    file-existence fallback. Failure semantics match security-image-trivy, plus:
+    an SBOM whose subject does not match the build's image.json fails before the
+    scan, and a failed `grype db update` fails the job rather than producing an
+    empty report. gitlab-linted through the CI Lint API; no job ran.
+    runtime-tested: the scan wrapper has unit tests, and grype's db update, db
+    status, three-output SBOM scan, --only-fixed and version extraction were
+    executed against the pinned image digest on 2026/09/15. Status:
+    experimental, because no consumer pipeline has run this component on
+    1.0.0-rc.2. `released` in this repository means a consumer job executed
+    green, not that the component looks finished.

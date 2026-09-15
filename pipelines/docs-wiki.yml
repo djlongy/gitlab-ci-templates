@@ -1,0 +1,102 @@
+---
+# pipelines/docs-wiki.yml
+#
+# Two-way mirror between a repository's documentation folder and its GitLab
+# wiki, as a whole pipeline.
+#
+#   verify -> docs-wiki-sync
+#
+# Section 7.1 puts wiki sync in verify. It is the only job here, so a project
+# that also has its own checks includes templates/docs-wiki-sync/template.yml
+# directly instead of this composition: two root compositions cannot be merged,
+# because each owns `workflow:` and `stages:`.
+#
+# Pipeline intent is explicit (section 11.6). Three sources run the sync and no
+# others:
+#
+#   push     the default branch changed, so the wiki is regenerated from it
+#   trigger  the wiki-page-event webhook calls the trigger API after a wiki edit
+#   schedule the safety net that catches an edit the webhook missed
+#
+# What this composition deliberately does NOT do is suppress a consumer's other
+# jobs on trigger and schedule. The template it replaces shipped a
+# `.not_for_wiki_sync` rules fragment that did exactly that, and it cost one
+# consumer its scheduled pipelines. A project that wants its own jobs to skip
+# wiki-triggered pipelines says so in its own rules.
+#
+# The runtime is vendored into the component at this revision, not cloned from a
+# moving branch at job time. Pinning the include therefore pins the code that
+# runs.
+#
+# Source exclusions come from the repository's own mkdocs.yml: `exclude_docs`
+# and `not_in_nav` decide which files reach the wiki. `mkdocs-config` names that
+# file when it is not the repository root mkdocs.yml, and an empty value means
+# the root one when it exists and no filtering otherwise.
+
+#### Consumer interface ####
+spec:
+  inputs:
+    instance:
+      type: string
+      description: >-
+        Repository identifier. The job is `<instance>:docs-wiki-sync`.
+      regex: '^[a-z][a-z0-9-]{0,47}$'
+      default: docs
+    working-directory:
+      type: string
+      description: >-
+        Documentation folder, relative to the consumer checkout. This is the
+        source of truth the wiki is regenerated from.
+      default: 'docs'
+    mkdocs-config:
+      type: string
+      description: >-
+        mkdocs.yml whose exclude_docs and not_in_nav lists decide what is
+        excluded from the wiki, relative to the consumer checkout. Empty means
+        the repository root mkdocs.yml when one exists, and no filtering
+        otherwise.
+      default: ''
+    runner-tags:
+      type: array
+      description: Approved runner selection from the estate profile.
+      default: []
+    execution-image:
+      type: string
+      description: >-
+        Approved Python execution image pinned by digest. Needs python3, pip,
+        git, tar, base64 and sha256sum.
+      regex: '^.+@sha256:[0-9a-f]{64}$'
+      default: 'docker.io/python@sha256:cd7c412d000912f29075a1b8803e43cb2f38bb67f104019df526df5ceaf30569'
+---
+
+#### Pipeline ownership ####
+# No merge request rule: a merge request has nothing to publish to the wiki, and
+# a sync from an unmerged branch would overwrite the wiki with content that is
+# not on the default branch.
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - if: '$CI_PIPELINE_SOURCE == "trigger" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - if: '$CI_PIPELINE_SOURCE == "schedule" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - when: never
+
+stages:
+  - verify
+
+#### Components at the same shared-CI revision ####
+include:
+  # WIKI_TOKEN is required by every rule: without it the job cannot clone or
+  # push the wiki, and a run that skipped is better evidence than one that
+  # failed halfway through a regeneration.
+  - local: '/templates/docs-wiki-sync/template.yml'
+    inputs:
+      instance: $[[ inputs.instance ]]
+      stage: verify
+      working-directory: $[[ inputs.working-directory ]]
+      mkdocs-config: $[[ inputs.mkdocs-config ]]
+      execution-image: $[[ inputs.execution-image ]]
+      runner-tags: $[[ inputs.runner-tags ]]
+      run-rules:
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $WIKI_TOKEN'
+        - if: '$CI_PIPELINE_SOURCE == "trigger" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $WIKI_TOKEN'
+        - if: '$CI_PIPELINE_SOURCE == "schedule" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $WIKI_TOKEN'

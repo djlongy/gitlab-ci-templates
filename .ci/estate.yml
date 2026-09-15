@@ -1,0 +1,350 @@
+---
+# EXAMPLE estate profile.
+#
+# Contract: docs/gitlab-ci-agent-standard.md section 4. This is the file you
+# replace when you fork this repository: it is what every later agent reads
+# instead of rediscovering your estate. The values below describe a fictional
+# estate so the shape and the schema are runnable out of the box. Nothing here
+# is a fact about your GitLab, your runners or your registry.
+#
+# Non-secret facts only. Secret and variable NAMES are recorded here; secret
+# VALUES never are.
+#
+# `unresolved` means the fact was not verified. It is not a placeholder to be
+# filled in by guessing: resolve it by measuring the estate, or leave it.
+# Every `unresolved` carries a one-line reason.
+
+schema_version: 1
+
+gitlab:
+  host: gitlab.example.com
+  version: 18.9.1-ee
+  # The licence API was not readable with the token this example estate holds.
+  # It imports SARIF into SonarQube instead of reading it in GitLab, which
+  # suggests the tier is not Ultimate, but that is inference and this field
+  # records verified facts only.
+  tier: unresolved
+  verified_at: 2026/09/15
+  capabilities:
+    components: true
+    inputs: true
+    # The next three all depend on the licence tier; see gitlab.tier above.
+    native_sarif: unresolved
+    policy_enforcement: unresolved
+    deployment_approvals: unresolved
+
+shared_ci:
+  project: platform/gitlab-ci-templates
+  # The numeric id of the shared-CI project on your own GitLab. The CI Lint API
+  # is project-scoped, so the lint harness needs it; set GITLAB_PROJECT_ID to
+  # override it without editing this file.
+  project_id: 1
+  # The 1.0.0 tag, cut on the final commit of this release and protected by the
+  # project's `1.*` protected-tag rule, so only a Maintainer can create or move
+  # one. It is written here as the release is prepared: the tag does not exist
+  # until that commit is on `main`, and a consumer that repins before then gets
+  # "ref does not exist" from its include, not a silently wrong pipeline.
+  #
+  # Section 14.2 forbids `main`: a moving ref is not an approved ref.
+  approved_ref: 1.0.0
+  verified_at: 2026/09/16
+
+runners:
+  shared-docker:
+    description: >-
+      Instance runners, offered to every project on gitlab.example.com. Both are
+      registered untagged, so a consumer cannot select a runner by tag.
+    # Hosts, ids and status read from the GitLab runners API on 2026/09/15.
+    hosts:
+      - name: runners-01.example.com
+        runner_id: 7
+        status: online
+      - name: runners-02.example.com
+        runner_id: 8
+        status: stale
+    # The four fields below are the configuration-management defaults that
+    # registered these runners. Per-host overrides set only the runner name and
+    # the secret field holding its token, so the defaults apply.
+    tags: []
+    run_untagged: true
+    executor: docker
+    privileged: false
+    default_job_image: alpine:latest
+    concurrent: 4
+    # Nothing in the runner configuration states a CPU architecture.
+    architecture: unresolved
+    # Nothing in the runner configuration pins a gitlab-runner version.
+    runner_version: unresolved
+    # No trust classification for these runners has been recorded anywhere.
+    trust_level: unresolved
+    # The host firewall opens no inbound application port (ssh and the metrics
+    # exporter only). What they may reach outbound is not enumerated.
+    network_access: unresolved
+
+# Approved execution images per section 4. The list is not repeated here: every
+# component records the image it runs in its own contract.yml, digest-pinned,
+# and the catalogue generator copies that into .ci/catalog.yml under
+# `runtime_image`. That file is generated from the contracts, so it cannot drift
+# from them, and a second hand-maintained list here could.
+# tests/contracts/test_estate.py asserts that every `runtime_image` in the
+# catalogue is pinned by digest.
+#
+# This was `unresolved` while the old templates pinned their tools by tag
+# (aquasec/trivy:0.69.3, semgrep/semgrep:1.79.0, hashicorp/terraform:1.11),
+# which section 1 forbids. The components replacing them pin by digest.
+images:
+  source_of_truth: .ci/catalog.yml, field runtime_image, generated from each component's
+    contract.yml
+  # Everything else is a third-party image. `mirror_prefix` is the approved pull
+  # path for them: a reference that names any other registry is not approved
+  # here whatever its digest says. This repository ships `docker.io/`, the
+  # upstream. If your estate fronts Docker Hub with a pull-through cache, set
+  # the prefix to that cache and every digest below still resolves — a
+  # pull-through cache serves the upstream manifest unchanged, so the digest is
+  # the same image either way.
+  mirror_prefix: docker.io/
+  estate_built:
+    ansible-ee:
+      # An execution environment this estate builds and publishes itself, as
+      # opposed to one pulled from a public registry. Digest as recorded by
+      # templates/ansible-syntax/contract.yml.
+      reference: registry.example.com/shared/base/ansible-ee@sha256:64703d0cec04567ef5b5108b755528ad911db3a6ebb5dfa90d20cabc145d3c9b
+      pinning: digest
+      # It does NOT contain ansible-lint; templates/ansible-lint runs a public
+      # image for that, which is why that component ships as experimental.
+      tool_versions:
+        ansible-core: 2.18.x
+        collections: ansible.posix, ansible.utils, community.general, community.crypto,
+          community.hashi_vault
+
+registries:
+  # templates/container-promote-harbor refuses any source project other than
+  # `dev` and copies the manifest into `prod`; README.md documents the same
+  # promotion.
+  candidate:
+    endpoint: registry.example.com
+    project: dev
+  release:
+    endpoint: registry.example.com
+    project: prod
+
+auth:
+  vault:
+    address: https://vault.example.com:8200
+    jwt_mount: jwt
+    bound_issuer: https://gitlab.example.com
+    roles:
+      - gitlab-ci
+      - gitlab-ci-dev
+      - gitlab-ci-platform
+      - gitlab-ci-prod
+      - gitlab-ci-terraform
+    # id_token variable names, audiences and default roles the components
+    # declare. Names only. Every component now mints VAULT_ID_TOKEN; the second
+    # variable name the old flat templates used, VAULT_JWT, is gone with them.
+    #
+    # The audience and the role are component INPUTS, so a composition can bind
+    # a least-privilege identity. What is recorded here is each component's
+    # default, which is what a consumer gets if it passes neither.
+    id_tokens:
+      - variable: VAULT_ID_TOKEN
+        audience: https://vault.example.com:8200
+        role: gitlab-ci
+        declared_by:
+          - templates/container-sign-attest-cosign/template.yml
+          - templates/release-trigger-jenkins/template.yml
+          - templates/release-trigger-semaphore/template.yml
+      - variable: VAULT_ID_TOKEN
+        audience: https://vault.example.com:8200
+        role: gitlab-ci-terraform
+        declared_by:
+          - templates/terraform-plan/template.yml
+          - templates/terraform-apply/template.yml
+  harbor:
+    # Group-level CI variables, per README.md. Robot account, not a human.
+    credential_variables:
+      - HARBOR_USER
+      - HARBOR_PASSWORD
+  sonarqube:
+    host: sonarqube.example.com
+    credential_variables:
+      - SONAR_TOKEN
+      - SONAR_HOST_URL
+
+terraform:
+  engine: terraform
+  # hashicorp/terraform 1.11, in the four terraform components' pinned
+  # execution images. The digests are in .ci/catalog.yml.
+  version: "1.11"
+  backend:
+    type: http
+    description: GitLab-managed Terraform state over the HTTP backend.
+    address: /api/v4/projects/<project-id>/terraform/state/<state-name>
+    locking: gitlab-http-backend
+    credential_variables:
+      - TF_HTTP_USERNAME
+      - TF_HTTP_PASSWORD
+
+kubernetes:
+  deployment_mode: gitops
+  # No template in this repo deploys to Kubernetes. CI publishes an artifact and
+  # a controller reconciles it.
+  controllers:
+    - name: argocd
+      repositories:
+        - platform-gitops
+        - workloads-gitops
+    - name: flux
+      repositories:
+        - cluster-gitops
+
+security:
+  # Scanners write SARIF as job artifacts; templates/quality-sonarqube imports
+  # the reports of the jobs named in its sarif-report-jobs input with
+  # sonar.sarifReportPaths. GitLab renders none of it on this tier.
+  # See docs/SAST_TO_SONARQUBE.md.
+  report_mode: artifact-only
+  sarif_sink: sonarqube.example.com
+  defaults:
+    # Recorded as the components implement them today, not as they arguably
+    # should be. Every value below is a component input default, read from
+    # templates/<name>/template.yml, or a container composition's override
+    # where the composition passes one.
+    #
+    # `blocking` is the EFFECTIVE behaviour. It is now the component's
+    # policy-mode input rather than a guess about what a script does with an
+    # exit code: `blocking` fails the job on findings, `advisory` records them
+    # and passes. Both fail on an execution error, a missing scanner database
+    # and malformed or missing evidence, so no mode is a silent pass.
+    #
+    # `allow_failure` is false everywhere. No component ships it, and section
+    # 10.1 forbids it on a scan path.
+    required_scanners:
+      - name: security-secrets-gitleaks
+        template: templates/security-secrets-gitleaks/template.yml
+        stage: verify
+        allow_failure: false
+        blocking: true
+        # gitleaks has no severity scale: any detected secret fails the job.
+        blocking_severity: any
+      - name: security-sast-semgrep
+        template: templates/security-sast-semgrep/template.yml
+        stage: verify
+        allow_failure: false
+        # The component defaults to advisory so a project with a backlog can
+        # onboard. The container compositions pass sast-policy-mode, which
+        # defaults to blocking, so a release pipeline gates.
+        blocking: true
+        component_default_policy_mode: advisory
+        blocking_severity: high
+      - name: security-filesystem-trivy
+        template: templates/security-filesystem-trivy/template.yml
+        stage: verify
+        allow_failure: false
+        blocking: true
+        blocking_severity: high
+        scanners: vuln,secret,misconfig
+      - name: quality-dependency-lockfiles
+        template: templates/quality-dependency-lockfiles/template.yml
+        stage: verify
+        allow_failure: false
+        blocking: true
+        # Presence and pinning check, not a severity gate. The lockfile set is
+        # a required input: nothing is inferred from the checkout, because the
+        # template this replaces detected languages from root marker files and
+        # passed a monorepo whose services were never looked at.
+        blocking_severity: not-applicable
+      - name: security-image-trivy
+        template: templates/security-image-trivy/template.yml
+        stage: scan
+        allow_failure: false
+        blocking: true
+        blocking_severity: high
+        scanners: vuln
+      - name: security-sbom-syft
+        template: templates/security-sbom-syft/template.yml
+        stage: scan
+        allow_failure: false
+        # Produces the authoritative SBOM and its subject record. It is not a
+        # findings gate; it fails when it cannot produce complete evidence.
+        blocking: true
+        blocking_severity: not-applicable
+    optional_scanners:
+      # In no composition's default path. A consumer opts in, or a composition
+      # input turns it on.
+      - name: quality-sonarqube
+        template: templates/quality-sonarqube/template.yml
+        stage: verify
+        allow_failure: false
+        # Advisory by default: the gate result is waited on and read back
+        # either way, and only policy-mode decides whether a failed gate fails
+        # the job. A missing named SARIF report fails it in both modes.
+        blocking: false
+        component_default_policy_mode: advisory
+        blocking_severity: none
+      - name: security-filesystem-grype
+        template: templates/security-filesystem-grype/template.yml
+        stage: verify
+        allow_failure: false
+        blocking: true
+        blocking_severity: high
+      - name: security-image-grype
+        template: templates/security-image-grype/template.yml
+        stage: scan
+        allow_failure: false
+        blocking: true
+        blocking_severity: high
+      - name: security-sbom-upload-dtrack
+        template: templates/security-sbom-upload-dtrack/template.yml
+        stage: scan
+        allow_failure: false
+        # Establishes that the SBOM was ingested and analysed, not that the
+        # project passes Dependency-Track policy: policy-violation evaluation
+        # is not implemented. A rejected upload, a missing processing token or
+        # an analysis still running at analysis-timeout all fail the job. The
+        # container compositions pass wait-for-analysis true.
+        blocking: true
+        blocking_severity: not-applicable
+    unfixed_vulnerabilities:
+      # Each component's ignore-unfixed input default.
+      # A CVE with no fix available does not fail the filesystem grype scan.
+      security-filesystem-grype: ignored
+      # The other three gate on unfixed findings.
+      security-filesystem-trivy: gated
+      security-image-trivy: gated
+      security-image-grype: gated
+    # No exception process exists yet. .ci/exceptions.yml is the record once one
+    # does; today it is empty and enforces nothing.
+    exception_policy: unresolved
+
+retention:
+  # Organisation defaults from the standard, to confirm with the owner.
+  plans: 7 days
+  max_deployable_plan_age: 24 hours
+  # Security scan artifacts expire in 1 week; set per job in security/*.yml.
+  evidence: 1 week
+  # No release-record retention is configured anywhere.
+  release_records: unresolved
+
+environments:
+  # The environment names THIS estate uses. Record the names you actually have,
+  # not a conventional set: a component input that names an environment resolves
+  # against this list, so an aspirational name here is a broken pipeline later.
+  - name: dev
+    description: Development. The candidate project in the release registry.
+    # No GitLab environment object exists for this name yet, so no protection
+    # rules or approvers are configured.
+    protected: unresolved
+    approvers: unresolved
+  - name: staging
+    description: Pre-production verification.
+    # No GitLab environment object exists for this name yet, so no protection
+    # rules or approvers are configured.
+    protected: unresolved
+    approvers: unresolved
+  - name: prod
+    description: Production. The release project in the release registry.
+    # No GitLab environment object exists for this name yet, so no protection
+    # rules or approvers are configured.
+    protected: unresolved
+    approvers: unresolved

@@ -1,0 +1,71 @@
+---
+name: container-list-rke2
+kind: component
+status: released
+introduced_in: 1.0.0
+minimum_gitlab: '18.9'
+# Retry policy: the `max-retries` input (0, 1 or 2, default 1) sets `retry: max`,
+# and `retry: when` is `runner_system_failure` and nothing else. A job killed by
+# its runner runs again; a failed gate never does.
+emitted_jobs:
+  - pattern: '{instance}:container-list-rke2'
+    stage: verify
+    blocking: true
+outputs:
+  - path: .ci-artifacts/{instance}/container-list-rke2/images.txt
+    producer: '{instance}:container-list-rke2'
+    format: >-
+      One upstream reference per line, `registry/repo:tag` or
+      `registry/repo:tag@sha256:...`, sorted and deduplicated across every list
+      named in the release manifest. Empty when config-file is empty, which is
+      how a consumer that keeps its own reference file uses the mirror without
+      pinning an RKE2 release.
+    subject_identity: >-
+      The release manifest's version and architecture, which name the upstream
+      lists the references were read from.
+    retention: 30 days
+required_secrets: []
+runtime_image:
+  reference: 'docker.io/alpine@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d'
+  pinning: digest
+  tool_versions:
+    alpine: '3.21'
+trust:
+  privileged: false
+  network_egress:
+    - github.com
+  runner_profile: >-
+    Any unprivileged Docker executor with outbound HTTPS, directly or through
+    the egress-proxy input. It reads the consumer checkout and one release
+    download root; it authenticates to nothing.
+  protected_ref_required: false
+validation:
+  evidence:
+    - source-reviewed
+    - yaml-parsed
+    - gitlab-linted
+    - runtime-tested
+    - integration-tested
+  verified_at: 2026/09/16
+  revision: '1.0.0-rc.2'
+  environment: >-
+    gitlab.example.com 18.9.1-ee, project 18, POST /api/v4/projects/<project-id>/ci/lint.
+    Executed on shared ref 1.0.0-rc.2 in: platform/k8s-gitops (61) 5723 (merge
+    request) and 5729 (main), job 47772, resolving 32 image references.
+  notes: >-
+    Failure semantics: a config-file that is not there, that resolves outside
+    the checkout, or that declares no version, no arch or no lists; a release
+    list the download root will not serve (curl --fail); and a release that
+    resolves to no reference at all. The last one used to be a green job
+    writing an empty artifact, which the mirror then read as nothing to do.
+    An empty config-file is the one documented way to write an empty list, and
+    it makes no network call.
+    Introduced as 0.1.0 under tags that predate the standard. Re-declared here
+    as 1.0.0 because the interface a consumer gets in this release is the one
+    described above, not the one 0.2.0 shipped: the execution image now
+    defaults to the estate mirror, the artifact archive carries a name, and the
+    job's shell is embedded from runtime/mirror/.
+    runtime-tested: tests/runtime/mirror/test_release_list.py covers the
+    manifest parser, tests/runtime/mirror/test_registry.py the egress block as
+    this template embeds it. gitlab-linted through the CI Lint API; no pipeline
+    has run.

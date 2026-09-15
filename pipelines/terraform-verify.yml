@@ -1,0 +1,119 @@
+---
+# pipelines/terraform-verify.yml
+#
+# Verification only, for a Terraform root that this pipeline never deploys.
+# Section 13.3 is the shape; `security-filesystem-trivy` is added because
+# section 11.2 names an IaC configuration scan as part of the default Terraform
+# component family and no dedicated IaC component exists yet.
+#
+# What this composition is NOT: it holds no state credentials, produces no plan
+# and applies nothing. Do not present a green run of it as infrastructure
+# security or as evidence that a change is safe to apply. Use
+# pipelines/terraform-deploy.yml for that, which adds the plan and the controls
+# around it.
+#
+# `terraform validate` runs `terraform init -backend=false`, which still reaches
+# the provider mirror. Offline is not implied.
+#
+# For several roots in one repository, include this file once per root with a
+# distinct `instance` and `working-directory`. Two instances never collide:
+# every job name and every artifact path carries the instance.
+
+#### Consumer interface ####
+spec:
+  inputs:
+    instance:
+      type: string
+      description: >-
+        Terraform root identifier. Jobs are named `<instance>:terraform-fmt`,
+        `<instance>:terraform-validate` and
+        `<instance>:security-filesystem-trivy`.
+      regex: '^[a-z][a-z0-9-]{0,47}$'
+    working-directory:
+      type: string
+      description: Terraform root in the consumer checkout.
+      default: '.'
+    scan-severity:
+      type: string
+      description: Lowest severity that fails the configuration scan.
+      options: ['critical', 'high', 'medium', 'low']
+      default: 'high'
+    scan-policy-mode:
+      type: string
+      description: >-
+        `blocking` fails on a finding at or above the threshold. `advisory`
+        records findings and still fails when the scanner could not run at all.
+      options: ['blocking', 'advisory']
+      default: 'blocking'
+    runner-tags:
+      type: array
+      description: Approved runner selection from the estate profile.
+      default: []
+    terraform-image:
+      type: string
+      description: Approved Terraform execution image pinned by digest.
+      regex: '^.+@sha256:[0-9a-f]{64}$'
+      default: 'docker.io/hashicorp/terraform@sha256:5820b87995595425074f881500a037b0ccd41158d0d9b44d78f5f120612f2d3d'
+    trivy-image:
+      type: string
+      description: Approved Trivy image pinned by digest.
+      regex: '^.+@sha256:[0-9a-f]{64}$'
+      default: 'docker.io/aquasec/trivy@sha256:bcc376de8d77cfe086a917230e818dc9f8528e3c852f7b1aff648949b6258d1c'
+---
+
+#### Pipeline ownership ####
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG'
+    - when: never
+
+stages:
+  - verify
+
+#### Components at the same shared-CI revision ####
+include:
+  - local: '/templates/terraform-fmt/template.yml'
+    inputs:
+      instance: $[[ inputs.instance ]]
+      stage: verify
+      working-directory: $[[ inputs.working-directory ]]
+      execution-image: $[[ inputs.terraform-image ]]
+      runner-tags: $[[ inputs.runner-tags ]]
+      run-rules:
+        - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG'
+
+  - local: '/templates/terraform-validate/template.yml'
+    inputs:
+      instance: $[[ inputs.instance ]]
+      stage: verify
+      working-directory: $[[ inputs.working-directory ]]
+      execution-image: $[[ inputs.terraform-image ]]
+      runner-tags: $[[ inputs.runner-tags ]]
+      run-rules:
+        - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG'
+
+  # misconfig is what makes this an IaC scan; vuln and secret come with it and
+  # cost nothing extra over the same checkout.
+  - local: '/templates/security-filesystem-trivy/template.yml'
+    inputs:
+      instance: $[[ inputs.instance ]]
+      stage: verify
+      working-directory: $[[ inputs.working-directory ]]
+      execution-image: $[[ inputs.trivy-image ]]
+      runner-tags: $[[ inputs.runner-tags ]]
+      severity-threshold: $[[ inputs.scan-severity ]]
+      scanners: 'vuln,secret,misconfig'
+      ignore-unfixed: false
+      policy-mode: $[[ inputs.scan-policy-mode ]]
+      run-rules:
+        - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+        - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG'

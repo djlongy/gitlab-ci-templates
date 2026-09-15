@@ -1,0 +1,122 @@
+---
+name: container-export-skopeo
+kind: component
+status: released
+introduced_in: 1.0.0
+minimum_gitlab: '18.9'
+# Retry policy: the `max-retries` input (0, 1 or 2, default 1) sets `retry: max`,
+# and `retry: when` is `runner_system_failure` and nothing else. A job killed by
+# its runner runs again; a failed gate never does.
+emitted_jobs:
+  - pattern: '{instance}:container-export-skopeo'
+    stage: publish
+    blocking: true
+outputs:
+  - path: .ci-artifacts/{instance}/container-export-skopeo/manifest.json
+    producer: '{instance}:container-export-skopeo'
+    format: >-
+      A transfer stamp and one entry per image, each carrying the reference, the
+      manifest digest, the config digest and every layer digest. Layers are
+      listed even when the blob was left out of the archive, which is what lets
+      the receiving side prove completeness against its own store.
+    subject_identity: >-
+      repository@sha256 manifest digest, read out of the OCI layout skopeo
+      wrote with --preserve-digests.
+    retention: 30 days
+  - path: 's3://{s3-bucket}/{s3-prefix}/transfer-{stamp}.tar'
+    producer: '{instance}:container-export-skopeo'
+    format: >-
+      tar of an OCI image layout whose reference names are
+      `<repository-prefix>/<path>:<tag>`, plus manifest.json, minus the blobs
+      named by have-key.
+    subject_identity: >-
+      The transfer stamp, which is also the `transfer` field of the
+      manifest.json inside the archive.
+    retention: owned by the receiving side, not by CI
+required_secrets:
+  - name: REGISTRY_USER
+    kind: ci-variable
+    scope: >-
+      Robot account with pull on the mirrored repository prefix. Used unless
+      vault-addr is set; mask it.
+  - name: REGISTRY_PASSWORD
+    kind: ci-variable
+    scope: Robot account token for the above. Used unless vault-addr is set.
+  - name: AWS_ACCESS_KEY_ID
+    kind: ci-variable
+    scope: >-
+      Object-store key with read on have-key and write on the transfer prefix.
+      Used unless vault-addr is set.
+  - name: AWS_SECRET_ACCESS_KEY
+    kind: ci-variable
+    scope: Object-store secret for the above. Used unless vault-addr is set.
+  - name: VAULT_JWT
+    kind: id-token
+    audience: The vault-addr input.
+    role: The vault-role input.
+    scope: >-
+      Vault mode only. One login reads both vault-kv-path (registry host, robot
+      name, robot token) and vault-s3-kv-path (access key, secret key). Every
+      field name is an input; no default names a site's KV layout.
+runtime_image:
+  reference: 'docker.io/alpine@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d'
+  pinning: digest
+  tool_versions:
+    alpine: '3.21'
+trust:
+  privileged: false
+  network_egress:
+    - the source registry named by the registry input
+    - the s3-endpoint host
+    - the vault-addr host, in Vault mode
+    - the ca-bundle-url host, when set
+  runner_profile: >-
+    Any unprivileged Docker executor with disk for the whole layout; the RKE2
+    set is roughly 1.4 GB uncompressed. List the S3 host in no-proxy by name:
+    botocore does not read CIDR entries, so a bare network range sends every
+    object-store call through the proxy.
+  protected_ref_required: true
+validation:
+  evidence:
+    - source-reviewed
+    - yaml-parsed
+    - gitlab-linted
+    - runtime-tested
+    - integration-tested
+  verified_at: 2026/09/16
+  revision: '1.0.0-rc.2'
+  environment: >-
+    gitlab.example.com 18.9.1-ee, project 18, POST /api/v4/projects/<project-id>/ci/lint.
+    Executed on shared ref 1.0.0-rc.2 in: platform/k8s-gitops (61) 5729, job
+    47774: a real export tar written to s3://lab-transfer/image-diode/low-export/.
+    Not created on the merge-request pipeline 5723, where the mirror runs as a
+    dry run.
+  notes: >-
+    Producers: list-job supplies the reference list and is consumed with
+    artifacts true; mirror-job is a gate consumed with artifacts false, so
+    nothing is exported unless the mirror succeeded. Neither is optional, and
+    neither is implied by a shared stage.
+    Failure semantics: either credential source incomplete; vault-addr set
+    without vault-role, vault-kv-path or vault-s3-kv-path; a Vault login that
+    returns no token; a list file that is absent, absolute or traverses out of
+    the checkout; an empty assembled reference set; a reference the OCI layout
+    does not carry, or a manifest blob that is not on disk, which now names the
+    reference instead of raising a KeyError; and have-key unreadable for any
+    reason other than NoSuchKey, which exits 2. The archive is uploaded only
+    after manifest.json is written.
+    have-key is read with s3api get-object, not head-object: some S3 gateways
+    answer HeadObject with HTTP 400, which reads as "no object" and would
+    silently send the full set every run. A genuine NoSuchKey means send
+    everything.
+    Copies out of the registry use --preserve-digests, so the layout, the source
+    registry and the receiving registry all report the same digest. That holds
+    only because container-mirror-skopeo wrote OCI manifests.
+    No credential reaches a command line; see container-mirror-skopeo.
+    Evidence: the shape this component had at tag 0.2.0 was integration-tested
+    by platform/k8s-gitops. That claim is deliberately NOT carried here, because
+    the job's shell now comes from runtime/mirror/ and nothing in this release
+    has been executed. runtime-tested: tests/runtime/mirror/ covers the transfer
+    description and the shared shell as this template embeds it.
+    Limitations: list-files is a validated space-separated string for the same
+    reason as in container-mirror-skopeo; the component uploads one object, and
+    a receiving side that needs it split is responsible for splitting it.
