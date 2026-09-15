@@ -239,7 +239,7 @@ def test_no_input_carries_a_secret(component: str):
 
 # Variables a job may set unprefixed: they configure the runner rather than
 # carrying the component's own state, which is what CI_TPL_ reserves.
-RUNNER_VARIABLES = {"GIT_STRATEGY"}
+RUNNER_VARIABLES = {"GIT_STRATEGY", "FF_DISABLE_UMASK_FOR_DOCKER_EXECUTOR"}
 
 
 @pytest.mark.parametrize("component", COMPONENTS)

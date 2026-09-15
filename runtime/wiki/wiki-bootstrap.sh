@@ -118,7 +118,8 @@ still yours to do, once:
   - $branch is a protected branch (the group WIKI_TOKEN variable is protected)
   - the group CI variable WIKI_TOKEN is visible to this project
   - $project has a docs folder with at least an index.md, and .gitlab-ci.yml includes
-    /docs/wiki-sync.yml from $templates
+    /pipelines/docs-wiki.yml from $templates, or /templates/docs-wiki-sync/template.yml
+    when the project runs checks of its own and owns its stages: and workflow:
 prove it: edit a wiki page in the UI, then watch the pipeline at
   https://$host/$project/-/pipelines
 EOF

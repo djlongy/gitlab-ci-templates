@@ -40,6 +40,58 @@ combinations:
       server. Nothing else in this release has been proven to reach a report
       sink.
 
+runner_behaviour:
+  # Not a combination row: nothing here was earned by a green pipeline. These
+  # are measured facts about how a docker-executor runner treats the build
+  # directory, recorded so the next agent does not rediscover them from a
+  # failing consumer.
+  - subject: build directory ownership under the docker executor
+    gitlab: 18.9.1-ee
+    executor: docker
+    measured_at: 2026/09/16
+    finding: >-
+      The executor's default is `umask 0000`, so files the helper creates are
+      group-writable and a job running as any uid can use them. It does not
+      change the OWNERSHIP of anything an earlier root process created, so a
+      non-root execution image fails on a build directory a root sibling job,
+      a root cache restore or a carried git object store already wrote.
+      Observed on a documentation consumer across four jobs in two main
+      pipelines: quality-sonarqube raised
+      java.nio.file.AccessDeniedException on
+      /builds/<project>/.git/objects/4c after docs-wiki-sync ran as root in
+      the same concurrency slot. The same configuration is green in a
+      different slot, so this is invisible to a single run. On a second
+      consumer the project root itself was the unwritable thing rather than
+      one directory under it: mkdir /builds/<project>/.ci-tpl: Permission
+      denied, slot concurrent-0, no cache restored.
+    response: >-
+      1.0.1 sets FF_DISABLE_UMASK_FOR_DOCKER_EXECUTOR on every component job.
+      The runner then reads the image's uid and gid with `id -u` and `id -g`
+      and takes ownership of the build directory for them after updating
+      sources, restoring cache and downloading artifacts. Read in the runner
+      source, executors/docker/docker_command.go: changeFilesOwnership is
+      called from requestBuildContainer, so it runs once when the build
+      container is created, after every predefined stage and before the job
+      script, and it chowns FullProjectDir() and TmpProjectDir() recursively
+      with `chown -RP`. It returns without acting when the image's user is
+      root. Two cases it does not cover, neither of them this defect: anything
+      written into the build directory by a root process DURING the job, and a
+      resumed environment whose build container already exists. Not yet
+      exercised by a consumer pipeline: no component's evidence label changes
+      for it.
+  - subject: execution image user, every image the components pin
+    measured_at: 2026/09/16
+    finding: >-
+      Read with `crane config <image@digest> | jq .config.User` and confirmed in
+      the image with `docker run --entrypoint id`. Of the 18 distinct images,
+      two run as a non-root uid: sonarsource/sonar-scanner-cli at uid 1000
+      (scanner-cli) and anchore/grype at uid 65532 (nonroot). Every one of the
+      18 carries the POSIX `id` utility, which the feature flag above requires.
+    response: >-
+      The flag is unconditional rather than keyed on the image, because
+      execution-image is a consumer input on all 36 components and a default
+      that is root says nothing about what a job runs in.
+
 # Evidence held per component and composition, as of 1.0.0.
 #
 # Section 14.1's labels are cumulative and not interchangeable. Every entry

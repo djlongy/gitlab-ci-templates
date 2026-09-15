@@ -42,6 +42,9 @@ TOOL_VARIABLES = {
     "DOCKER_CERT_PATH", "KO_DOCKER_REPO", "KO_DEFAULTBASEIMAGE", "GOFLAGS",
     "CGO_ENABLED",
 }
+# Runner feature flags, which configure the runner rather than the tool or the
+# component. See tests/contracts/test_build_directory_ownership.py.
+RUNNER_VARIABLES = {"FF_DISABLE_UMASK_FOR_DOCKER_EXECUTOR"}
 # Section 13.1's working-directory guard, quoted exactly so a component that
 # paraphrases it is caught.
 ESCAPE_GUARD = """project_root=$(cd "$CI_PROJECT_DIR" && pwd -P)
@@ -207,7 +210,7 @@ def test_job_variables_are_reserved_or_tool_defined(component: str):
     unexpected = {
         name
         for name in job["variables"]
-        if not name.startswith("CI_TPL_") and name not in TOOL_VARIABLES
+        if not name.startswith("CI_TPL_") and name not in TOOL_VARIABLES | RUNNER_VARIABLES
     }
     assert unexpected == set()
 
