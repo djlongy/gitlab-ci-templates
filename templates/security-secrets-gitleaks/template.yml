@@ -64,6 +64,11 @@ spec:
     entrypoint: ['']
   tags: $[[ inputs.runner-tags ]]
   variables:
+    # Non-root execution images own their build directory: the runner reads the
+    # image's uid and gid and chowns it, instead of relying on umask 0000.
+    # Without it, a job running as a non-root uid died on .git/objects that a
+    # root job had written into the same concurrency slot.
+    FF_DISABLE_UMASK_FOR_DOCKER_EXECUTOR: 'true'
     CI_TPL_WORKING_DIRECTORY: $[[ inputs.working-directory ]]
     CI_TPL_ARTIFACT_DIR: '.ci-artifacts/$[[ inputs.instance ]]/security-secrets-gitleaks'
     CI_TPL_POLICY_MODE: $[[ inputs.policy-mode ]]
@@ -493,7 +498,7 @@ spec:
       # The status is captured rather than left to the pipeline. A clean report
       # is `[]`, grep matches nothing and exits 1, and the runner's
       # `set -eo pipefail` killed the job there, before the gate ran and before
-      # scan-result.json was written: platform/cluster-gitops MR !7 pipeline 5663 exited
+      # scan-result.json was written: a consumer's merge-request pipeline exited
       # 1 on "no leaks found". Exit 1 is no match and 2 or more is a real read
       # failure, which must still fail rather than count as zero findings.
       set +e

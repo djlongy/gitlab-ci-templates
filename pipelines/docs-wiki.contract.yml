@@ -41,11 +41,10 @@ validation:
   verified_at: 2026/09/16
   revision: '1.0.0-rc.2'
   environment: >-
-    gitlab.example.com 18.9.1-ee, project 18, POST /api/v4/projects/<project-id>/ci/lint.
-    Executed on shared ref 1.0.0-rc.2 in: platform/wiki-tpl-flat (79) 5726,
-    platform/wiki-tpl-nested (80) 5727, platform/wiki-tpl-odd (81) 5728, and
-    platform/docs-site (70) 5737 (push) and 5740 (schedule). Every job the
-    composition creates ran green, on the push and the schedule sources.
+    gitlab.example.com 18.9.1-ee, POST /api/v4/projects/:id/ci/lint. Executed on shared
+    ref 1.0.0-rc.2 by consumer pipelines on the originating estate, 2026/09: three
+    wiki-sync consumers and a documentation consumer. Every job the composition creates
+    ran green, on the push and the schedule sources.
   notes: 'Three pipeline sources and no others: a default-branch push, the wiki-page-event
     webhook that calls the trigger API, and the schedule that is the safety net. WIKI_TOKEN
     is required by every rule, so a project without it skips the job rather than failing partway

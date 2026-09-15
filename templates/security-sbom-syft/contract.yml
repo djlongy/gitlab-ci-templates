@@ -58,13 +58,12 @@ validation:
   verified_at: 2026/09/15
   environment: gitlab.example.com 18.9.1-ee, project 18
   notes: >-
-    gitlab-linted: the merged configuration was compiled through the CI Lint API
-    with defaults, with two instances, and with the producer removed. No job
-    ran. runtime-tested: runtime/scan/scan.sh has unit tests for the identity,
-    subject and completeness checks, and the syft invocation, its two output
-    flags and the version extraction were executed against the pinned image
-    digest on 2026/09/15. The component's own job has never been executed in CI.
-    Status: experimental, because no consumer pipeline has run this component on
-    1.0.0-rc.2. `released` in this repository means a consumer job executed
-    green, not that the component looks finished. platform/demo-app's build source
-    is tags-only, so no image existed to describe.
+    gitlab-linted: the merged configuration was compiled through the CI Lint API with
+    defaults, with two instances, and with the producer removed. No job ran.
+    runtime-tested: runtime/scan/scan.sh has unit tests for the identity, subject and
+    completeness checks, and the syft invocation, its two output flags and the version
+    extraction were executed against the pinned image digest on 2026/09/15. The
+    component's own job has never been executed in CI. Status: experimental, because no
+    consumer pipeline has run this component on 1.0.0-rc.2. `released` in this
+    repository means a consumer job executed green, not that the component looks
+    finished. a consumer's build source is tags-only, so no image existed to describe.

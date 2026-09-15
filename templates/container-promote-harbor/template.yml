@@ -113,6 +113,11 @@ spec:
   # same repository into the release project.
   resource_group: '$[[ inputs.instance ]]-$[[ inputs.destination-project ]]'
   variables:
+    # Non-root execution images own their build directory: the runner reads the
+    # image's uid and gid and chowns it, instead of relying on umask 0000.
+    # Without it, a job running as a non-root uid died on .git/objects that a
+    # root job had written into the same concurrency slot.
+    FF_DISABLE_UMASK_FOR_DOCKER_EXECUTOR: 'true'
     # The image identity arrives as an artifact from build-job and the promotion
     # is a registry-to-registry copy, so this job never reads the checkout.
     GIT_STRATEGY: none

@@ -87,11 +87,11 @@ validation:
   verified_at: 2026/09/16
   revision: '1.0.0-rc.2'
   environment: >-
-    gitlab.example.com 18.9.1-ee, project 18, POST /api/v4/projects/<project-id>/ci/lint.
-    Executed on shared ref 1.0.0-rc.2 in: platform/terraform-dns (16) main
-    pipeline 5744, jobs 47852 and 47853, both instances green: the GitLab http
-    backend initialised, state refreshed, "No changes", and plan-metadata.json
-    written. No plan has yet been consumed by terraform-apply in a pipeline.
+    gitlab.example.com 18.9.1-ee, POST /api/v4/projects/:id/ci/lint. Executed on shared
+    ref 1.0.0-rc.2 by consumer pipelines on the originating estate, 2026/09: one
+    consumer's default-branch pipeline, both instances green: the GitLab http backend
+    initialised, state refreshed, "No changes", and plan-metadata.json written. No plan
+    has yet been consumed by terraform-apply in a pipeline.
   notes: >-
     runtime-tested covers tfguard.sh in tests/runtime/terraform/, including a
     run in the pinned image under busybox. gitlab-linted covers the merged

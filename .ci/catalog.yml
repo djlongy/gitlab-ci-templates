@@ -107,8 +107,8 @@ components:
         kind: ci-variable
         scope: Needed only when the play reads Ansible Vault encrypted variable files. The
           component takes the variable NAME through the vault-password-secret input; this
-          entry records the name platform/infrastructure uses today. It must be a masked variable
-          and not a file type variable, since the job reads its value.
+          entry records the name one consumer uses today. It must be a masked variable and
+          not a file type variable, since the job reads its value.
         protected_ref_required: true
       - name: ANSIBLE_PRIVATE_KEY_FILE
         kind: file-variable
@@ -155,8 +155,8 @@ components:
         been run against a real remote inventory and nothing was executed by a GitLab runner,
         so this is neither integration-tested nor evidence about SSH reachability from a runner.
         Status: experimental, because no consumer pipeline has run any ansible component.
-        platform/infrastructure is the only consumer and its ansible jobs sit in a stage behind
-        a preflight that went red, so they were skipped rather than run.'
+        a consumer is the only consumer and its ansible jobs sit in a stage behind a preflight
+        that went red, so they were skipped rather than run.'
   - name: ansible-lint
     kind: component
     path: templates/ansible-lint/template.yml
@@ -245,7 +245,7 @@ components:
         kind: ci-variable
         scope: Needed only when the tree contains Ansible Vault encrypted files, because ansible-lint
           runs a syntax check that has to decrypt them. The component takes the variable NAME
-          through the vault-password-secret input; this entry records the name platform/infrastructure
+          through the vault-password-secret input; this entry records the name one consumer
           uses today. It must be a masked variable and not a file type variable, since the
           job reads its value.
         protected_ref_required: true
@@ -286,9 +286,8 @@ components:
         suppressed by `-f codeclimate`, which is why the SARIF is the report this component
         keeps. Nothing here was executed by a GitLab runner, so this is not integration-tested.
         Status: experimental, because no consumer pipeline has run any ansible component.
-        platform/infrastructure merge-request pipelines 5747 and 5750 created example-unprotected:ansible-lint
-        and skipped it: its stage sits behind a preflight that failed. A skipped job is not
-        evidence.'
+        a consumer created example-unprotected:ansible-lint and skipped it: its stage sits
+        behind a preflight that failed. A skipped job is not evidence.'
   - name: ansible-syntax
     kind: component
     path: templates/ansible-syntax/template.yml
@@ -374,8 +373,8 @@ components:
         kind: ci-variable
         scope: Needed only when the play reads Ansible Vault encrypted variable files. The
           component takes the variable NAME through the vault-password-secret input; this
-          entry records the name platform/infrastructure uses today. It must be a masked variable
-          and not a file type variable, since the job reads its value. A merge request pipeline
+          entry records the name one consumer uses today. It must be a masked variable and
+          not a file type variable, since the job reads its value. A merge request pipeline
           on an unprotected branch does not receive a protected variable, so a tree with vaulted
           group_vars fails the syntax check there. That is a credential scoping decision for
           the consumer, not something this component papers over.
@@ -409,7 +408,7 @@ components:
         executed by a GitLab runner, so this is not integration-tested. The image tag was
         resolved to this digest with `crane digest` on 2026/09/15; `:latest` moves, the digest
         does not. Status: experimental, because no consumer pipeline has run any ansible component;
-        platform/infrastructure''s ansible jobs were skipped behind a red preflight.'
+        a consumer''s ansible jobs were skipped behind a red preflight.'
   - name: container-build-buildkit
     kind: component
     path: templates/container-build-buildkit/template.yml
@@ -1048,10 +1047,11 @@ components:
         - integration-tested
       verified_at: 2026/09/16
       revision: 1.0.0-rc.2
-      environment: 'gitlab.example.com 18.9.1-ee, project 18, POST /api/v4/projects/<project-id>/ci/lint.
-        Executed on shared ref 1.0.0-rc.2 in: platform/k8s-gitops (61) 5729, job 47774: a
-        real export tar written to s3://lab-transfer/image-diode/low-export/. Not created
-        on the merge-request pipeline 5723, where the mirror runs as a dry run.'
+      environment: 'gitlab.example.com 18.9.1-ee, POST /api/v4/projects/:id/ci/lint. Executed
+        on shared ref 1.0.0-rc.2 by consumer pipelines on the originating estate, 2026/09:
+        a real export tar written to s3://lab-transfer/image-diode/low-export/ on a default-branch
+        pipeline. The merge-request pipeline creates no export, because the mirror runs there
+        as a dry run.'
       notes: 'Producers: list-job supplies the reference list and is consumed with artifacts
         true; mirror-job is a gate consumed with artifacts false, so nothing is exported unless
         the mirror succeeded. Neither is optional, and neither is implied by a shared stage.
@@ -1067,7 +1067,7 @@ components:
         out of the registry use --preserve-digests, so the layout, the source registry and
         the receiving registry all report the same digest. That holds only because container-mirror-skopeo
         wrote OCI manifests. No credential reaches a command line; see container-mirror-skopeo.
-        Evidence: the shape this component had at tag 0.2.0 was integration-tested by platform/k8s-gitops.
+        Evidence: the shape this component had at tag 0.2.0 was integration-tested by a consumer.
         That claim is deliberately NOT carried here, because the job''s shell now comes from
         runtime/mirror/ and nothing in this release has been executed. runtime-tested: tests/runtime/mirror/
         covers the transfer description and the shared shell as this template embeds it. Limitations:
@@ -1172,9 +1172,10 @@ components:
         - integration-tested
       verified_at: 2026/09/16
       revision: 1.0.0-rc.2
-      environment: 'gitlab.example.com 18.9.1-ee, project 18, POST /api/v4/projects/<project-id>/ci/lint.
-        Executed on shared ref 1.0.0-rc.2 in: platform/k8s-gitops (61) 5723 (merge request)
-        and 5729 (main), job 47772, resolving 32 image references.'
+      environment: 'gitlab.example.com 18.9.1-ee, POST /api/v4/projects/:id/ci/lint. Executed
+        on shared ref 1.0.0-rc.2 by consumer pipelines on the originating estate, 2026/09:
+        one consumer, on both its merge-request and default-branch pipelines, resolving 32
+        image references.'
       notes: 'Failure semantics: a config-file that is not there, that resolves outside the
         checkout, or that declares no version, no arch or no lists; a release list the download
         root will not serve (curl --fail); and a release that resolves to no reference at
@@ -1358,9 +1359,10 @@ components:
         - integration-tested
       verified_at: 2026/09/16
       revision: 1.0.0-rc.2
-      environment: 'gitlab.example.com 18.9.1-ee, project 18, POST /api/v4/projects/<project-id>/ci/lint.
-        Executed on shared ref 1.0.0-rc.2 in: platform/k8s-gitops (61) 5723 as a dry run over
-        32 references and 5729 as a real mirror writing digests.txt, job 47773.'
+      environment: 'gitlab.example.com 18.9.1-ee, POST /api/v4/projects/:id/ci/lint. Executed
+        on shared ref 1.0.0-rc.2 by consumer pipelines on the originating estate, 2026/09:
+        one consumer, as a dry run over 32 references on the merge-request pipeline and as
+        a real mirror writing digests.txt on the default-branch pipeline.'
       notes: 'Failure semantics: neither credential source configured; vault-addr set without
         vault-role or vault-kv-path; a Vault login that returns no token; a list file that
         is absent, absolute or traverses out of the checkout; an empty assembled reference
@@ -1379,9 +1381,9 @@ components:
         into a mode-0600 docker auth file passed as --dest-authfile, the Vault JWT is posted
         from a mode-0600 file, and curl reads the Vault token from a mode-0600 --config file.
         Only lengths are printed. Evidence: the shape this component had at tag 0.2.0 was
-        integration-tested by platform/k8s-gitops. That claim is deliberately NOT carried
-        here. The job''s shell now comes from runtime/mirror/, the credential handling changed,
-        and nothing in this release has been executed. runtime-tested: tests/runtime/mirror/test_registry.py
+        integration-tested by a consumer. That claim is deliberately NOT carried here. The
+        job''s shell now comes from runtime/mirror/, the credential handling changed, and
+        nothing in this release has been executed. runtime-tested: tests/runtime/mirror/test_registry.py
         drives the copy this template embeds. Limitation: list-files is a validated space-separated
         string, not an array. GitLab rejects an array input interpolated into a variables
         value, and offers no join function, so an array cannot reach the shell at all.'
@@ -1531,8 +1533,8 @@ components:
         Harbor API. No artifact has been promoted by this component. Status: experimental,
         because no consumer pipeline has run this component on 1.0.0-rc.2. `released` in this
         repository means a consumer job executed green, not that the component looks finished.
-        platform/demo-app is the container consumer and its build source is tags-only, so
-        no candidate chain job was created at all.'
+        a consumer is the container consumer and its build source is tags-only, so no candidate
+        chain job was created at all.'
   - name: container-sign-attest-cosign
     kind: component
     path: templates/container-sign-attest-cosign/template.yml
@@ -1708,8 +1710,8 @@ components:
         component, and the v2.4.1 checksums were read from the published cosign_checksums.txt
         on 2026/09/15. Status: experimental, because no consumer pipeline has run this component
         on 1.0.0-rc.2. `released` in this repository means a consumer job executed green,
-        not that the component looks finished. platform/demo-app''s build source is tags-only,
-        so no candidate chain job was created.'
+        not that the component looks finished. a consumer''s build source is tags-only, so
+        no candidate chain job was created.'
   - name: container-smoke-test
     kind: component
     path: templates/container-smoke-test/template.yml
@@ -1931,11 +1933,10 @@ components:
         - integration-tested
       verified_at: 2026/09/16
       revision: 1.0.0-rc.2
-      environment: 'gitlab.example.com 18.9.1-ee, project 18, POST /api/v4/projects/<project-id>/ci/lint.
-        Executed on shared ref 1.0.0-rc.2 in: platform/wiki-tpl-flat (project 79) pipeline
-        5726, platform/wiki-tpl-nested (80) 5727 and platform/wiki-tpl-odd (81) 5728, all
-        three docs:docs-wiki-sync green; platform/docs-site (70) 5733 (merge request, component
-        included directly), 5737 (default-branch push) and 5740 (schedule). Both directions
+      environment: 'gitlab.example.com 18.9.1-ee, POST /api/v4/projects/:id/ci/lint. Executed
+        on shared ref 1.0.0-rc.2 by consumer pipelines on the originating estate, 2026/09:
+        three wiki-sync consumers, all three docs:docs-wiki-sync green, and a documentation
+        consumer on its merge-request, default-branch and scheduled pipelines. Both directions
         ran: the pull step reached its decision and reported "wiki has no edits since the
         last sync", which rc.1 skipped entirely through a swallowed failure. Importing an
         actual wiki edit has still not been exercised in a pipeline.'
@@ -2311,9 +2312,9 @@ components:
         - integration-tested
       verified_at: 2026/09/16
       revision: 1.0.0-rc.2
-      environment: 'gitlab.example.com 18.9.1-ee, project 18, POST /api/v4/projects/<project-id>/ci/lint.
-        Executed on shared ref 1.0.0-rc.2 in: platform/cluster-gitops (29) 5719 and 5722,
-        19 of 19 manifests; platform/platform-gitops (12) 5721 and 5725.'
+      environment: 'gitlab.example.com 18.9.1-ee, POST /api/v4/projects/:id/ci/lint. Executed
+        on shared ref 1.0.0-rc.2 by consumer pipelines on the originating estate, 2026/09:
+        one consumer, 19 of 19 manifests; and a second consumer.'
       notes: 'Runtime-tested as the copy embedded in template.yml. Six cases were exercised:
         a directory of plain manifests; a kustomize overlay; a single schema-invalid file;
         a path that does not exist; a directory holding no manifests; and two paths in one
@@ -2434,11 +2435,10 @@ components:
         count as pinned; an unpinned or range requirement does not. Evidence: unit tests in
         tests/runtime/scan/test_lockfiles.py covering the missing, empty, partially pinned
         and traversal cases, CI Lint through tests/pipelines/. Status: experimental. The component
-        HAS run in a consumer pipeline and failed: platform/demo-app (project 56) pipelines
-        5734 and 5745, jobs 47796 and 47859, because a stdlib-only Go module had no lockfile
-        to declare and an empty declaration is a usage error. The `none` sentinel added in
-        1.0.0 is the fix, and it has not itself been run in a pipeline, so there is still
-        no green consumer run to promote on.'
+        HAS run in a consumer pipeline and failed: a consumer, a job, because a stdlib-only
+        Go module had no lockfile to declare and an empty declaration is a usage error. The
+        `none` sentinel added in 1.0.0 is the fix, and it has not itself been run in a pipeline,
+        so there is still no green consumer run to promote on.'
   - name: quality-sonarqube
     kind: component
     path: templates/quality-sonarqube/template.yml
@@ -2582,14 +2582,12 @@ components:
         - report-ingestion-tested
       verified_at: 2026/09/16
       revision: 1.0.0-rc.2
-      environment: 'gitlab.example.com 18.9.1-ee, project 18, POST /api/v4/projects/<project-id>/ci/lint.
-        Executed on shared ref 1.0.0-rc.2 in: platform/docs-site (70) 5733 job docs:quality-sonarqube
-        and 5737; platform/demo-app (56) 5734 and 5745; platform/infrastructure (3) 5750 job
-        47892. On docs-site the job reached "QUALITY GATE STATUS: PASSED" on project key platform:docs-site
-        and wrote gate-result.json; the gate result was read back from the server, so the
-        analysis was ingested. platform/demo-app imported two SARIF reports and recorded a
-        red gate in advisory mode, which is the report-ingestion path end to end. platform/infrastructure
-        imported no SARIF and read its gate back as ERROR in advisory mode.'
+      environment: 'gitlab.example.com 18.9.1-ee, POST /api/v4/projects/:id/ci/lint. Executed
+        on shared ref 1.0.0-rc.2 by consumer pipelines on the originating estate, 2026/09:
+        three consumers. On the documentation consumer the job reached "QUALITY GATE STATUS:
+        PASSED" on project key platform:docs-site and wrote gate-result.json; the gate result
+        was read back from the server, so the analysis was ingested. A second consumer imported
+        two SARIF reports and a coverage report, which is what earns report-ingestion-tested.'
       notes: 'Failure semantics. The analysis always waits on the quality gate (sonar.qualitygate.wait=true)
         and the decided result is then read back from /api/qualitygates/project_status and
         written to gate-result.json. Upload is not a pass: section 10.3 separates analysis,
@@ -2605,17 +2603,17 @@ components:
         the server rather than inferred from the code. Producers. sarif-report-jobs is required
         with no default and becomes the job''s `needs`. Naming a job the pipeline does not
         create fails pipeline creation, which is the intended contract: a consumer `needs:`
-        override REPLACES this list rather than merging with it, and platform/demo-app silently
-        stopped importing SARIF that way. sarif-report-paths additionally makes the presence
-        of each named report mandatory, so an override that drops the artifacts fails instead
-        of quietly analysing without them. SARIF whose file path contains a space or %20 cannot
-        be resolved by SonarQube''s importer and is reported as dropped, verified on Community
-        Build 26.4 on 2026/09/09. No cache is declared: section 9.4 requires a cache scoped
-        by tool version, architecture and trust level, and the scanner cache is an acceleration,
-        not evidence. Evidence: unit tests in tests/runtime/scan/test_sonar_gate.py covering
-        the gate, task-failure, missing-report and OK-gate-with-failed-scanner paths against
-        a stubbed API, CI Lint through tests/pipelines/. No pipeline has executed this component
-        and no analysis has been run against sonarqube.example.com from it.'
+        override REPLACES this list rather than merging with it, and a consumer silently stopped
+        importing SARIF that way. sarif-report-paths additionally makes the presence of each
+        named report mandatory, so an override that drops the artifacts fails instead of quietly
+        analysing without them. SARIF whose file path contains a space or %20 cannot be resolved
+        by SonarQube''s importer and is reported as dropped, verified on Community Build 26.4
+        on 2026/09/09. No cache is declared: section 9.4 requires a cache scoped by tool version,
+        architecture and trust level, and the scanner cache is an acceleration, not evidence.
+        Evidence: unit tests in tests/runtime/scan/test_sonar_gate.py covering the gate, task-failure,
+        missing-report and OK-gate-with-failed-scanner paths against a stubbed API, CI Lint
+        through tests/pipelines/. No pipeline has executed this component and no analysis
+        has been run against sonarqube.example.com from it.'
   - name: release-trigger-jenkins
     kind: component
     path: templates/release-trigger-jenkins/template.yml
@@ -2759,8 +2757,8 @@ components:
         and API token are written to a mode-0600 curl config file rather than passed in argv.
         The Alpine package install of curl and jq is not pinned; that gap is inherited from
         promote/jenkins-trigger.yml and is recorded rather than claimed fixed. Status: experimental,
-        and the one consumer attempt never reached a runner: platform/infrastructure could
-        not create a pipeline at all, because job-path refused the leading underscore in `_seed-all-dsl-jobs`.
+        and the one consumer attempt never reached a runner: a consumer could not create a
+        pipeline at all, because job-path refused the leading underscore in `_seed-all-dsl-jobs`.
         The regex is widened in 1.0.0; the job body, which fires a live Jenkins build, has
         still never run.'
   - name: release-trigger-semaphore
@@ -3188,10 +3186,9 @@ components:
         - integration-tested
       verified_at: 2026/09/16
       revision: 1.0.0-rc.2
-      environment: 'gitlab.example.com 18.9.1-ee, project 18, POST /api/v4/projects/<project-id>/ci/lint.
-        Executed on shared ref 1.0.0-rc.2 in: platform/demo-app (56) 5734 and 5745; platform/terraform-hypervisor-roles
-        (22) 5735 for both instances; platform/terraform-dns (16) 5736 (merge request) and
-        5744 (main) for both instances.'
+      environment: 'gitlab.example.com 18.9.1-ee, POST /api/v4/projects/:id/ci/lint. Executed
+        on shared ref 1.0.0-rc.2 by consumer pipelines on the originating estate, 2026/09:
+        three consumers, two of them for both instances.'
       notes: 'Scope. Filesystem scanning of dependencies, secrets and IaC misconfiguration.
         It is not image scanning and not complete SAST coverage; section 9.2 treats those
         as separate capabilities and this contract does not claim them. Failure semantics.
@@ -3505,8 +3502,8 @@ components:
         convert-to-sarif, convert-to-template and version extraction were executed against
         the pinned image digest on 2026/09/15. Status: experimental, because no consumer pipeline
         has run this component on 1.0.0-rc.2. `released` in this repository means a consumer
-        job executed green, not that the component looks finished. platform/demo-app''s build
-        source is tags-only, so nothing was built for it to scan.'
+        job executed green, not that the component looks finished. a consumer''s build source
+        is tags-only, so nothing was built for it to scan.'
   - name: security-repository-audit
     kind: component
     path: templates/security-repository-audit/template.yml
@@ -3781,10 +3778,10 @@ components:
         - integration-tested
       verified_at: 2026/09/16
       revision: 1.0.0-rc.2
-      environment: 'gitlab.example.com 18.9.1-ee, project 18, POST /api/v4/projects/<project-id>/ci/lint.
-        Executed on shared ref 1.0.0-rc.2 in: platform/demo-app (56) 5734 job 47794 and 5745
-        job 47857, both green, SARIF written and imported by that project''s quality-sonarqube
-        job.'
+      environment: 'gitlab.example.com 18.9.1-ee, POST /api/v4/projects/:id/ci/lint. Executed
+        on shared ref 1.0.0-rc.2 by consumer pipelines on the originating estate, 2026/09:
+        one consumer, on two pipelines, both green, SARIF written and imported by that project''s
+        quality-sonarqube job.'
       notes: 'Failure semantics. `blocking` fails the job on a finding at or above severity-threshold;
         the default `advisory` records it and succeeds. The default is advisory because the
         template this replaces ended both semgrep invocations in `|| true`, so it gated on
@@ -3913,8 +3910,8 @@ components:
         against the pinned image digest on 2026/09/15. The component''s own job has never
         been executed in CI. Status: experimental, because no consumer pipeline has run this
         component on 1.0.0-rc.2. `released` in this repository means a consumer job executed
-        green, not that the component looks finished. platform/demo-app''s build source is
-        tags-only, so no image existed to describe.'
+        green, not that the component looks finished. a consumer''s build source is tags-only,
+        so no image existed to describe.'
   - name: security-sbom-upload-dtrack
     kind: component
     path: templates/security-sbom-upload-dtrack/template.yml
@@ -4139,11 +4136,10 @@ components:
         - integration-tested
       verified_at: 2026/09/16
       revision: 1.0.0-rc.2
-      environment: 'gitlab.example.com 18.9.1-ee, project 18, POST /api/v4/projects/<project-id>/ci/lint.
-        Executed on shared ref 1.0.0-rc.2 in: platform/cluster-gitops (29) 5719 (merge request)
-        and 5722 (main); platform/platform-gitops (12) 5721 and 5725; platform/demo-app (56)
-        5734 and 5745. Both paths are covered: cluster-gitops is a clean tree, platform-gitops
-        carries real findings suppressed by a .gitleaksignore under a reviewed exception.'
+      environment: 'gitlab.example.com 18.9.1-ee, POST /api/v4/projects/:id/ci/lint. Executed
+        on shared ref 1.0.0-rc.2 by consumer pipelines on the originating estate, 2026/09:
+        three consumers. Both paths are covered: one is a clean tree, another carries real
+        findings suppressed by a .gitleaksignore under a reviewed exception.'
       notes: 'Failure semantics. A detected secret fails the job under the default blocking
         policy and is recorded under advisory. Any execution failure fails the job in BOTH
         modes: gitleaks 8.21.2 returns 1 for a leak and also for a source it cannot read,
@@ -4546,7 +4542,7 @@ components:
         `gate-jobs` is spliced into needs after the plan producer, which is never replaced
         by it; the splice is the same one the security components use and it was linted here
         with an empty list and with a cross-instance entry. Status: experimental. The gated
-        half is unrun: platform/terraform-dns main pipeline 5744 CREATED example:terraform-apply
+        half is unrun: a consumer''s default-branch pipeline CREATED example:terraform-apply
         and tenant-b:terraform-apply as manual jobs and nobody started them, so no plan this
         repository produced has been consumed by an apply. A created job is not an executed
         one.'
@@ -4619,10 +4615,9 @@ components:
         - integration-tested
       verified_at: 2026/09/16
       revision: 1.0.0-rc.2
-      environment: 'gitlab.example.com 18.9.1-ee, project 18, POST /api/v4/projects/<project-id>/ci/lint.
-        Executed on shared ref 1.0.0-rc.2 in: platform/terraform-modules (15) 5720 (merge
-        request) and 5724 (main), 8 of 8 jobs across four instances; platform/terraform-dns
-        (16) 5736 and 5744; platform/terraform-hypervisor-roles (22) 5735.'
+      environment: 'gitlab.example.com 18.9.1-ee, POST /api/v4/projects/:id/ci/lint. Executed
+        on shared ref 1.0.0-rc.2 by consumer pipelines on the originating estate, 2026/09:
+        three consumers, the first with 8 of 8 jobs across four instances.'
       notes: Linted through the CI Lint API from tests/pipelines/test_terraform_components.py.
         Nothing here has been executed in a pipeline.
   - name: terraform-module-publish
@@ -4716,9 +4711,8 @@ components:
       notes: 'runtime-tested covers version normalisation, the packaging exclusions and every
         registry-assertion failure path in tests/runtime/terraform/. No module has been published
         to the registry from this component. Status: experimental. The gated half is unrun:
-        platform/terraform-modules ran the verify half of pipelines/terraform-module.yml on
-        5720 and 5724, and the publish job is tag-gated, so no tag pipeline has ever been
-        created from that composition.'
+        a consumer ran the verify half of pipelines/terraform-module.yml, and the publish
+        job is tag-gated, so no tag pipeline has ever been created from that composition.'
   - name: terraform-plan
     kind: component
     path: templates/terraform-plan/template.yml
@@ -4880,11 +4874,11 @@ components:
         - integration-tested
       verified_at: 2026/09/16
       revision: 1.0.0-rc.2
-      environment: 'gitlab.example.com 18.9.1-ee, project 18, POST /api/v4/projects/<project-id>/ci/lint.
-        Executed on shared ref 1.0.0-rc.2 in: platform/terraform-dns (16) main pipeline 5744,
-        jobs 47852 and 47853, both instances green: the GitLab http backend initialised, state
-        refreshed, "No changes", and plan-metadata.json written. No plan has yet been consumed
-        by terraform-apply in a pipeline.'
+      environment: 'gitlab.example.com 18.9.1-ee, POST /api/v4/projects/:id/ci/lint. Executed
+        on shared ref 1.0.0-rc.2 by consumer pipelines on the originating estate, 2026/09:
+        one consumer''s default-branch pipeline, both instances green: the GitLab http backend
+        initialised, state refreshed, "No changes", and plan-metadata.json written. No plan
+        has yet been consumed by terraform-apply in a pipeline.'
       notes: runtime-tested covers tfguard.sh in tests/runtime/terraform/, including a run
         in the pinned image under busybox. gitlab-linted covers the merged configuration.
         No plan has been executed against a real state backend.
@@ -4970,10 +4964,9 @@ components:
         - integration-tested
       verified_at: 2026/09/16
       revision: 1.0.0-rc.2
-      environment: 'gitlab.example.com 18.9.1-ee, project 18, POST /api/v4/projects/<project-id>/ci/lint.
-        Executed on shared ref 1.0.0-rc.2 in: platform/terraform-modules (15) 5720 and 5724
-        in lockfile-mode module; platform/terraform-dns (16) 5736 and 5744 and platform/terraform-hypervisor-roles
-        (22) 5735 in lockfile-mode readonly.'
+      environment: 'gitlab.example.com 18.9.1-ee, POST /api/v4/projects/:id/ci/lint. Executed
+        on shared ref 1.0.0-rc.2 by consumer pipelines on the originating estate, 2026/09:
+        one consumer in lockfile-mode module; two consumers in lockfile-mode readonly.'
       notes: 'Linted through the CI Lint API from tests/pipelines/test_terraform_lint.py.
         The init line each lockfile-mode produces is executed against a terraform stub in
         tests/runtime/terraform/test_terraform_validate_job_shell.py. Nothing here has been
@@ -5070,7 +5063,7 @@ pipelines:
         kind: ci-variable
         scope: Needed only when the tree contains Ansible Vault encrypted files, because ansible-lint
           runs a syntax check that has to decrypt them. The component takes the variable NAME
-          through the vault-password-secret input; this entry records the name platform/infrastructure
+          through the vault-password-secret input; this entry records the name one consumer
           uses today. It must be a masked variable and not a file type variable, since the
           job reads its value.
         protected_ref_required: true
@@ -5450,12 +5443,11 @@ pipelines:
         tag push while the four verify jobs still run on merge requests and default-branch
         pushes. Evidence is gitlab-linted only: the merged configuration compiles on gitlab.example.com
         18.9.1-ee and no pipeline has been executed. Status: experimental. The verify half
-        HAS executed on 1.0.0-rc.2: platform/demo-app (project 56) merge-request pipelines
-        5734 and 5745 ran security-secrets-gitleaks, security-sast-semgrep, security-filesystem-trivy
-        and quality-sonarqube green, and quality-dependency-lockfiles red on a gap 1.0.0 closes.
-        Nothing after `verify` has run: that project''s build source is tags-only and no release
-        tag has been pushed, so no image has been built, scanned, signed, attested or promoted
-        by this composition.'
+        HAS executed on 1.0.0-rc.2: a consumer ran security-secrets-gitleaks, security-sast-semgrep,
+        security-filesystem-trivy and quality-sonarqube green, and quality-dependency-lockfiles
+        red on a gap 1.0.0 closes. Nothing after `verify` has run: that project''s build source
+        is tags-only and no release tag has been pushed, so no image has been built, scanned,
+        signed, attested or promoted by this composition.'
   - name: container-jib
     kind: pipeline
     path: pipelines/container-jib.yml
@@ -6314,10 +6306,11 @@ pipelines:
         - integration-tested
       verified_at: 2026/09/16
       revision: 1.0.0-rc.2
-      environment: 'gitlab.example.com 18.9.1-ee, project 18, POST /api/v4/projects/<project-id>/ci/lint.
-        Executed on shared ref 1.0.0-rc.2 in: platform/k8s-gitops (61) 5723 (merge request,
-        list and dry-run mirror) and 5729 (main, list, real mirror of 32 references and real
-        export). Every job the composition creates ran green for its own source.'
+      environment: 'gitlab.example.com 18.9.1-ee, POST /api/v4/projects/:id/ci/lint. Executed
+        on shared ref 1.0.0-rc.2 by consumer pipelines on the originating estate, 2026/09:
+        one consumer, on the merge-request pipeline for the list and a dry-run mirror, and
+        on the default-branch pipeline for the list, a real mirror of 32 references and a
+        real export. Every job the composition creates ran green for its own source.'
       notes: 'Three pipeline sources: a merge request, a schedule and a default-branch push.
         A merge request resolves the list and inspects every reference without writing to
         the registry, and exports nothing; the mode is carried by a rule variable rather than
@@ -6396,11 +6389,10 @@ pipelines:
         - integration-tested
       verified_at: 2026/09/16
       revision: 1.0.0-rc.2
-      environment: 'gitlab.example.com 18.9.1-ee, project 18, POST /api/v4/projects/<project-id>/ci/lint.
-        Executed on shared ref 1.0.0-rc.2 in: platform/wiki-tpl-flat (79) 5726, platform/wiki-tpl-nested
-        (80) 5727, platform/wiki-tpl-odd (81) 5728, and platform/docs-site (70) 5737 (push)
-        and 5740 (schedule). Every job the composition creates ran green, on the push and
-        the schedule sources.'
+      environment: 'gitlab.example.com 18.9.1-ee, POST /api/v4/projects/:id/ci/lint. Executed
+        on shared ref 1.0.0-rc.2 by consumer pipelines on the originating estate, 2026/09:
+        three wiki-sync consumers and a documentation consumer. Every job the composition
+        creates ran green, on the push and the schedule sources.'
       notes: 'Three pipeline sources and no others: a default-branch push, the wiki-page-event
         webhook that calls the trigger API, and the schedule that is the safety net. WIKI_TOKEN
         is required by every rule, so a project without it skips the job rather than failing
@@ -6660,11 +6652,10 @@ pipelines:
         - integration-tested
       verified_at: 2026/09/16
       revision: 1.0.0-rc.2
-      environment: 'gitlab.example.com 18.9.1-ee, project 18, POST /api/v4/projects/<project-id>/ci/lint.
-        Executed on shared ref 1.0.0-rc.2 in: platform/cluster-gitops (29) 5719 and 5722 and
-        platform/platform-gitops (12) 5721 and 5725. Every job the composition creates --
-        kubernetes-validate and security-secrets-gitleaks -- ran green on the merge-request
-        and default-branch sources in two projects.'
+      environment: 'gitlab.example.com 18.9.1-ee, POST /api/v4/projects/:id/ci/lint. Executed
+        on shared ref 1.0.0-rc.2 by consumer pipelines on the originating estate, 2026/09:
+        two consumers. Every job the composition creates -- kubernetes-validate and security-secrets-gitleaks
+        -- ran green on the merge-request and default-branch sources in both projects.'
       notes: 'CI validates, a controller applies. .ci/estate.yml records kubernetes.deployment_mode
         as gitops, so no deploy stage exists here and adding one would give the same objects
         two owners. Chart validation is opt-in through `charts`. Rendering is not reconciliation:
@@ -7029,13 +7020,12 @@ pipelines:
         is asserted on the resolved configuration and the lint proves only that the configuration
         carrying it compiles. `changes:` semantics are likewise not observable in a dry run,
         which has no diff to compare against. Status: experimental. Part of this composition
-        HAS executed on 1.0.0-rc.2: platform/terraform-dns (project 16) merge-request pipeline
-        5736 and main pipeline 5744, and platform/terraform-hypervisor-roles (22) merge-request
-        pipeline 5735, with terraform-fmt, terraform-validate, security-filesystem-trivy and,
-        on 5744, terraform-plan all green. The apply half has not: 5744 created example:terraform-apply
-        and tenant-b:terraform-apply as manual jobs and nobody started them. A composition
-        whose reason to exist is applying a saved plan is not released until an apply has
-        consumed one.'
+        HAS executed on 1.0.0-rc.2: a consumer and a pipeline, and a consumer, with terraform-fmt,
+        terraform-validate, security-filesystem-trivy and, on the main pipeline, terraform-plan
+        all green. The apply half has not: that pipeline created example:terraform-apply and
+        tenant-b:terraform-apply as manual jobs and nobody started them. A composition whose
+        reason to exist is applying a saved plan is not released until an apply has consumed
+        one.'
   - name: terraform-module
     kind: pipeline
     path: pipelines/terraform-module.yml
@@ -7117,12 +7107,11 @@ pipelines:
         because a module repository commits no .terraform.lock.hcl and the default readonly
         init fails on it; the consumer does not choose this and it is not an input. Evidence
         is gitlab-linted only. Status: experimental. The verify half HAS executed on 1.0.0-rc.2:
-        platform/terraform-modules (project 15) merge-request pipeline 5720 and main pipeline
-        5724, 8 of 8 terraform-fmt and terraform-validate jobs green across four instances
-        in lockfile-mode module. The publish half has not: it is tag-gated and no tag pipeline
-        has ever been created from this composition. The rule applied here is the one used
-        for terraform-deploy: a composition is released when a real pipeline has run every
-        job it creates, and publishing is what this one is for.'
+        a consumer and a pipeline, 8 of 8 terraform-fmt and terraform-validate jobs green
+        across four instances in lockfile-mode module. The publish half has not: it is tag-gated
+        and no tag pipeline has ever been created from this composition. The rule applied
+        here is the one used for terraform-deploy: a composition is released when a real pipeline
+        has run every job it creates, and publishing is what this one is for.'
   - name: terraform-verify
     kind: pipeline
     path: pipelines/terraform-verify.yml

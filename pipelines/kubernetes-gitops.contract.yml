@@ -43,11 +43,11 @@ validation:
   verified_at: 2026/09/16
   revision: '1.0.0-rc.2'
   environment: >-
-    gitlab.example.com 18.9.1-ee, project 18, POST /api/v4/projects/<project-id>/ci/lint.
-    Executed on shared ref 1.0.0-rc.2 in: platform/cluster-gitops (29) 5719 and 5722
-    and platform/platform-gitops (12) 5721 and 5725. Every job the composition
-    creates -- kubernetes-validate and security-secrets-gitleaks -- ran green on
-    the merge-request and default-branch sources in two projects.
+    gitlab.example.com 18.9.1-ee, POST /api/v4/projects/:id/ci/lint. Executed on shared
+    ref 1.0.0-rc.2 by consumer pipelines on the originating estate, 2026/09: two
+    consumers. Every job the composition creates -- kubernetes-validate and
+    security-secrets-gitleaks -- ran green on the merge-request and default-branch
+    sources in both projects.
   notes: 'CI validates, a controller applies. .ci/estate.yml records kubernetes.deployment_mode
     as gitops, so no deploy stage exists here and adding one would give the same objects two
     owners. Chart validation is opt-in through `charts`. Rendering is not reconciliation:

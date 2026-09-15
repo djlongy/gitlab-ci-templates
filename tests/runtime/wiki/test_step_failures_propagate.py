@@ -4,7 +4,7 @@ wiki-deploy.sh sets `set -euo pipefail`, but `cycle` is called from an `if`, and
 bash turns `set -e` off for the whole call tree of a command tested that way. A
 function then returns the status of its LAST command, so a dead `python3 ...`
 followed by `after=$(git rev-parse HEAD)` returned success and the cycle carried
-on. platform/wiki-tpl-flat job 47477 (pipeline 5665) went green while its trace
+on. A consumer pipeline on the originating estate, 2026/09, went green while its trace
 showed wiki-pull.py raising FileNotFoundError for wiki-import.py; the wiki-to-repo
 pull was skipped and the job reported "synced 3 pages ... wiki already current".
 

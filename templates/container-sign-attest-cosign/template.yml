@@ -133,6 +133,11 @@ spec:
     VAULT_ID_TOKEN:
       aud: $[[ inputs.vault-jwt-audience ]]
   variables:
+    # Non-root execution images own their build directory: the runner reads the
+    # image's uid and gid and chowns it, instead of relying on umask 0000.
+    # Without it, a job running as a non-root uid died on .git/objects that a
+    # root job had written into the same concurrency slot.
+    FF_DISABLE_UMASK_FOR_DOCKER_EXECUTOR: 'true'
     CI_TPL_RUNTIME_DIR: /tmp/ci-runtime
     CI_TPL_ARTIFACT_DIR: '.ci-artifacts/$[[ inputs.instance ]]/container-sign-attest-cosign'
     CI_TPL_IDENTITY_FILE: '.ci-artifacts/$[[ inputs.instance ]]/$[[ inputs.build-component ]]/image.json'

@@ -380,7 +380,7 @@ def test_two_instances_of_one_composition_do_not_collide():
 def test_a_module_release_validates_without_a_committed_lockfile():
     """The composition, not the consumer, chooses the module lockfile mode.
 
-    platform/terraform-modules MR !3 pipeline 5662 failed every *:terraform-validate
+    A consumer pipeline on the originating estate, 2026/09, failed every *:terraform-validate
     job with "Provider dependency changes detected ... the lock file is
     read-only", because a module repository commits no .terraform.lock.hcl and
     terraform-module-publish excludes it from the archive anyway.

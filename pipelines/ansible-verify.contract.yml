@@ -27,7 +27,7 @@ required_secrets:
     kind: ci-variable
     scope: Needed only when the tree contains Ansible Vault encrypted files, because ansible-lint
       runs a syntax check that has to decrypt them. The component takes the variable NAME
-      through the vault-password-secret input; this entry records the name platform/infrastructure uses
+      through the vault-password-secret input; this entry records the name one consumer uses
       today. It must be a masked variable and not a file type variable, since the job reads
       its value.
     protected_ref_required: true

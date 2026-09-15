@@ -1,6 +1,6 @@
 # GitLab CI repository and agent implementation standard
 
-**Document version:** 1.0.3  
+**Document version:** 1.0.4  
 **Prepared:** 2026/09/15  
 **Applies to:** shared GitLab CI configuration for applications, containers, Terraform, Ansible, Kubernetes, security, releases and infrastructure deployment.  
 **Reference repository:** [djlongy/gitlab-ci-templates](https://github.com/djlongy/gitlab-ci-templates), reviewed at commit `87b4138c0ca12ac904d33c2383a6d885e678d324`.
@@ -549,7 +549,7 @@ spec:
   interruptible: true
 ```
 
-`instance` determines the public job name; `stage` and `runner-tags` integrate with the composition and estate. `execution-image` is digest constrained. `CI_TPL_WORKING_DIRECTORY` carries the input as runtime data; the shell validates its resolved location. `project_root` is a local shell variable containing the physical checkout path. `dependencies: []` prevents unrelated artifact downloads without enabling early DAG execution. Formatting is non-mutating because `-check` is used. Every component job also declares `inherit: default: [tags, timeout, interruptible, retry, id_tokens]`, so a consumer's `default:` image, `before_script`, `after_script`, `cache`, `services`, `artifacts` or `hooks` cannot reach it: those change what the job runs or what is on disk when it starts, and none of them is covered by the component's contract, tests or evidence, while runner selection and timeouts remain the consumer's to set.
+`instance` determines the public job name; `stage` and `runner-tags` integrate with the composition and estate. `execution-image` is digest constrained. `CI_TPL_WORKING_DIRECTORY` carries the input as runtime data; the shell validates its resolved location. `project_root` is a local shell variable containing the physical checkout path. `dependencies: []` prevents unrelated artifact downloads without enabling early DAG execution. Formatting is non-mutating because `-check` is used. Every component job also declares `inherit: default: [tags, timeout, interruptible, retry, id_tokens]`, so a consumer's `default:` image, `before_script`, `after_script`, `cache`, `services`, `artifacts` or `hooks` cannot reach it: those change what the job runs or what is on disk when it starts, and none of them is covered by the component's contract, tests or evidence, while runner selection and timeouts remain the consumer's to set. Every component job also sets `FF_DISABLE_UMASK_FOR_DOCKER_EXECUTOR: 'true'`, because an execution image that runs as a non-root uid cannot depend on the ownership of a build directory that the runner helper, a cache restore or a previous job in the same concurrency slot wrote as root: the flag makes the runner read the image's uid and gid and change the build directory's ownership to them instead of relying on `umask 0000`.
 
 ### 13.2 Validation component
 
@@ -840,11 +840,27 @@ Three further practices from the same review were absorbed as repository changes
 
 **Decision.** Section 13.1's component file shape now requires every job a component emits, hidden jobs included, to declare `inherit: default: [tags, timeout, interruptible, retry, id_tokens]`.
 
-**Reason.** A `default:` block is a consumer's convenience for its own jobs, and GitLab applies it to every job in the merged configuration, including one that came from an include. Measured: `platform/infrastructure` merge-request pipeline 5747, job 47873, where `quality-sonarqube` failed at `mkdir $CI_PROJECT_DIR/.ci-tpl: Permission denied` because that project's `default: cache:` was restored into a job whose image runs as uid 1000. The same component, image and runner pass in every consumer with no global cache, and a consumer-side `inherit:` override on that one job made it green (pipeline 5750, job 47892). An inherited `image`, `before_script`, `after_script`, `cache`, `services`, `artifacts` or `hooks` changes what the job runs or what is on disk before it starts, and none of it is covered by the component's contract, its tests or its recorded evidence. A component whose behaviour depends on a file it never reads has no contract.
+**Reason.** A `default:` block is a consumer's convenience for its own jobs, and GitLab applies it to every job in the merged configuration, including one that came from an include. Measured on a configuration-management consumer: `quality-sonarqube` failed at `mkdir $CI_PROJECT_DIR/.ci-tpl: Permission denied` in a merge-request pipeline because that project's `default: cache:` was restored into a job whose image runs as uid 1000. The same component, image and runner pass in every consumer with no global cache, and a consumer-side `inherit:` override on that one job made it green. An inherited `image`, `before_script`, `after_script`, `cache`, `services`, `artifacts` or `hooks` changes what the job runs or what is on disk before it starts, and none of it is covered by the component's contract, its tests or its recorded evidence. A component whose behaviour depends on a file it never reads has no contract.
 
 **Affected contracts.** Every component in `templates/`. The public interface is unchanged: no input, job name, artifact path or rule moves, so this is not a breaking input change.
 
 **Migration.** A consumer that relied on a global `before_script` or `image` to prepare a component job must move that setup into the component's inputs, or into a bespoke job of its own. A consumer's `default: tags:` and `default: timeout:` keep working, which is what the retained list is for.
+
+Sections not changed: everything but 13.1.
+
+#### 1.0.4 — 2026/09/16, a non-root execution image owns its build directory
+
+**Decision.** Section 13.1's component file shape now requires every job a component emits, hidden jobs included, to set `FF_DISABLE_UMASK_FOR_DOCKER_EXECUTOR: 'true'`. The rule is unconditional and does not depend on the image the component pins.
+
+**Reason.** The docker executor's default is `umask 0000`, which makes what the runner helper writes group-writable and lets a job running as any uid use it. What umask cannot do is change the ownership of something a root process already created. Measured on a documentation consumer, across four jobs in two main pipelines: `quality-sonarqube` failed with `java.nio.file.AccessDeniedException: /builds/<project>/.git/objects/4c` whenever it ran in the same runner concurrency slot immediately after `docs-wiki-sync`, which runs as root in the same build directory and writes git objects into it. In a different slot the same configuration is green, which is why 1.0.0-rc.2 looked clean. The same class had already broken the same component in another consumer, there through a cache a root helper restored rather than through a root sibling job, and section 13.1's inheritance rule closed only the cache half of it. A third consumer then failed at `mkdir /builds/<project>/.ci-tpl: Permission denied`, in slot `concurrent-0` after a root job, with the inheritance rule in place and no cache restored: the unwritable thing is the project root itself, not one directory inside it.
+
+GitLab Runner's documented behaviour under this flag is to discover the image's uid and gid and change the ownership of the build directory to them after updating sources, restoring cache and downloading artifacts. Read in the source rather than inferred from that sentence: `executors/docker/docker_command.go` calls `changeFilesOwnership` from `requestBuildContainer`, so the ownership passes once, when the build container is created and therefore after every predefined stage that can write the directory, and before the job's own script. It runs `chown -RP` over `FullProjectDir()` and `TmpProjectDir()`, which is the project root and everything under it, and it returns early without doing anything when the image's user is root. So the flag is not scoped to a clone or a fetch, and on a root image it is a no-op rather than a change worth reasoning about.
+
+The rule is unconditional because the alternative cannot be enforced. `execution-image` is a consumer input on every component, so a component's default image being root says nothing about the image its job runs in, and deciding per component would mean resolving an image against a registry inside a test suite that otherwise runs offline. The flag costs nothing on a root image: the ownership it sets is the ownership the directory already had. Its one precondition is that the execution image carries the POSIX `id` utility, which the runner calls with `-u` and `-g`.
+
+**Affected contracts.** Every component in `templates/`. No input, job name, artifact path or rule moves, so this is not a breaking input change. A consumer supplying an `execution-image` with no `id` utility is the one new failure mode, and no image in the catalogue is such an image.
+
+**Migration.** None.
 
 Sections not changed: everything but 13.1.
 

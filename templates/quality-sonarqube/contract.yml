@@ -56,46 +56,39 @@ validation:
   verified_at: 2026/09/16
   revision: '1.0.0-rc.2'
   environment: >-
-    gitlab.example.com 18.9.1-ee, project 18, POST /api/v4/projects/<project-id>/ci/lint.
-    Executed on shared ref 1.0.0-rc.2 in: platform/docs-site (70) 5733 job
-    docs:quality-sonarqube and 5737; platform/demo-app (56) 5734 and 5745;
-    platform/infrastructure (3) 5750 job 47892. On docs-site the job reached "QUALITY
-    GATE STATUS: PASSED" on project key platform:docs-site and wrote
-    gate-result.json; the gate result was read back from the server, so the
-    analysis was ingested. platform/demo-app imported two SARIF reports and recorded
-    a red gate in advisory mode, which is the report-ingestion path end to end.
-    platform/infrastructure imported no SARIF and read its gate back as ERROR in advisory
-    mode.
+    gitlab.example.com 18.9.1-ee, POST /api/v4/projects/:id/ci/lint. Executed on shared
+    ref 1.0.0-rc.2 by consumer pipelines on the originating estate, 2026/09: three
+    consumers. On the documentation consumer the job reached "QUALITY GATE STATUS:
+    PASSED" on project key platform:docs-site and wrote gate-result.json; the gate
+    result was read back from the server, so the analysis was ingested. A second
+    consumer imported two SARIF reports and a coverage report, which is what earns
+    report-ingestion-tested.
   notes: >-
     Failure semantics. The analysis always waits on the quality gate
     (sonar.qualitygate.wait=true) and the decided result is then read back from
-    /api/qualitygates/project_status and written to gate-result.json. Upload is
-    not a pass: section 10.3 separates analysis, external-report import and the
-    gate, and the template this replaces defaulted the wait to false and carried
-    allow_failure: true, so it could not fail for any reason at all. A red gate
-    fails the job under `blocking` and is recorded under the default `advisory`;
-    the default preserves today's non-gating behaviour and a composition that
-    wants the gate sets blocking. Everything else fails the job in BOTH modes: a
-    compute-engine task that did not succeed, an unreachable server, a missing
-    SONAR_TOKEN, a missing report-task.txt, a declared SARIF report that is not
-    present, and a gate reported OK while sonar-scanner exited non-zero.
-    sonar-scanner uses exit code 1 for an analysis error and for a failed gate
-    alike, which is why the decision is read from the server rather than
-    inferred from the code.
-    Producers. sarif-report-jobs is required with no default and becomes the
-    job's `needs`. Naming a job the pipeline does not create fails pipeline
-    creation, which is the intended contract: a consumer `needs:` override
-    REPLACES this list rather than merging with it, and platform/demo-app silently
+    /api/qualitygates/project_status and written to gate-result.json. Upload is not a
+    pass: section 10.3 separates analysis, external-report import and the gate, and the
+    template this replaces defaulted the wait to false and carried allow_failure: true,
+    so it could not fail for any reason at all. A red gate fails the job under
+    `blocking` and is recorded under the default `advisory`; the default preserves
+    today's non-gating behaviour and a composition that wants the gate sets blocking.
+    Everything else fails the job in BOTH modes: a compute-engine task that did not
+    succeed, an unreachable server, a missing SONAR_TOKEN, a missing report-task.txt, a
+    declared SARIF report that is not present, and a gate reported OK while
+    sonar-scanner exited non-zero. sonar-scanner uses exit code 1 for an analysis error
+    and for a failed gate alike, which is why the decision is read from the server
+    rather than inferred from the code. Producers. sarif-report-jobs is required with
+    no default and becomes the job's `needs`. Naming a job the pipeline does not create
+    fails pipeline creation, which is the intended contract: a consumer `needs:`
+    override REPLACES this list rather than merging with it, and a consumer silently
     stopped importing SARIF that way. sarif-report-paths additionally makes the
-    presence of each named report mandatory, so an override that drops the
-    artifacts fails instead of quietly analysing without them. SARIF whose file
-    path contains a space or %20 cannot be resolved by SonarQube's importer and
-    is reported as dropped, verified on Community Build 26.4 on 2026/09/09.
-    No cache is declared: section 9.4 requires a cache scoped by tool version,
-    architecture and trust level, and the scanner cache is an acceleration, not
-    evidence.
-    Evidence: unit tests in tests/runtime/scan/test_sonar_gate.py covering the
-    gate, task-failure, missing-report and OK-gate-with-failed-scanner paths
-    against a stubbed API, CI Lint through tests/pipelines/. No pipeline has
-    executed this component and no analysis has been run against
-    sonarqube.example.com from it.
+    presence of each named report mandatory, so an override that drops the artifacts
+    fails instead of quietly analysing without them. SARIF whose file path contains a
+    space or %20 cannot be resolved by SonarQube's importer and is reported as dropped,
+    verified on Community Build 26.4 on 2026/09/09. No cache is declared: section 9.4
+    requires a cache scoped by tool version, architecture and trust level, and the
+    scanner cache is an acceleration, not evidence. Evidence: unit tests in
+    tests/runtime/scan/test_sonar_gate.py covering the gate, task-failure,
+    missing-report and OK-gate-with-failed-scanner paths against a stubbed API, CI Lint
+    through tests/pipelines/. No pipeline has executed this component and no analysis
+    has been run against sonarqube.example.com from it.

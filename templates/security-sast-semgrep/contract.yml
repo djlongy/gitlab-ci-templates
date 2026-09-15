@@ -54,10 +54,10 @@ validation:
   verified_at: 2026/09/16
   revision: '1.0.0-rc.2'
   environment: >-
-    gitlab.example.com 18.9.1-ee, project 18, POST /api/v4/projects/<project-id>/ci/lint.
-    Executed on shared ref 1.0.0-rc.2 in: platform/demo-app (56) 5734 job 47794 and
-    5745 job 47857, both green, SARIF written and imported by that project's
-    quality-sonarqube job.
+    gitlab.example.com 18.9.1-ee, POST /api/v4/projects/:id/ci/lint. Executed on shared
+    ref 1.0.0-rc.2 by consumer pipelines on the originating estate, 2026/09: one
+    consumer, on two pipelines, both green, SARIF written and imported by that
+    project's quality-sonarqube job.
   notes: >-
     Failure semantics. `blocking` fails the job on a finding at or above
     severity-threshold; the default `advisory` records it and succeeds. The

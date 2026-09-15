@@ -1,6 +1,6 @@
 """The gitleaks job must reach its gate on a CLEAN report, not abort before it.
 
-platform/cluster-gitops MR !7, pipeline 5663, job `mgt:security-secrets-gitleaks`:
+On a consumer pipeline on the originating estate, 2026/09, security-secrets-gitleaks:
 gitleaks logged "no leaks found" and wrote `[]`, and the job exited 1 without
 writing scan-result.json. The counting line was
 
@@ -209,7 +209,7 @@ def planted_token() -> str:
 def docker_is_usable() -> bool:
     """No docker binary at all is the CI runner's case, and it must skip, not
     error. `docker info` raises FileNotFoundError there rather than returning a
-    status, which failed runtime-tests at collection in pipeline 5706."""
+    status, which failed runtime-tests at collection on a consumer pipeline."""
     if shutil.which("docker") is None:
         return False
     return subprocess.run(["docker", "info"], capture_output=True).returncode == 0

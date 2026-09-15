@@ -124,7 +124,7 @@ pull_wiki_edits() {
   # is off for everything below it and a function returns the status of its LAST
   # command. Without this, wiki-pull.py could die and `after=$(git rev-parse)`
   # would still succeed, the pull would be skipped and the job would go green:
-  # platform/wiki-tpl-flat job 47477 did exactly that, with wiki-pull.py raising
+  # A consumer's job did exactly that, with wiki-pull.py raising
   # FileNotFoundError for the wiki-import.py the embed marker had left out.
   python3 "$scripts/wiki-pull.py" "$docs" "$wiki" ${args[@]+"${args[@]}"} || return 1
   after=$(git -C "$repo" rev-parse HEAD)

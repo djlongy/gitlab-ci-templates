@@ -3,6 +3,76 @@
 Release changes, migration instructions and deprecation deadlines for
 `platform/gitlab-ci-templates`. Dates are yyyy/mm/dd.
 
+## 1.0.1 — 2026/09/16
+
+One fix, for a failure that only appears when two jobs share a runner
+concurrency slot. No input, job name or artifact path changes.
+
+### Fixed
+
+- **A component job whose image runs as a non-root uid could not write to its
+  own build directory.** Every component job now sets
+  `FF_DISABLE_UMASK_FOR_DOCKER_EXECUTOR: 'true'`, which makes the runner read
+  the execution image's uid and gid and take ownership of the build directory
+  for them, instead of relying on `umask 0000` to make what the helper wrote
+  group-writable.
+
+  Measured on a documentation consumer, across four jobs in two main pipelines:
+  `quality-sonarqube` failed with
+  `java.nio.file.AccessDeniedException: /builds/<project>/.git/objects/4c`
+  each time it ran in the same slot immediately after `docs-wiki-sync`, which
+  runs as root in that build directory and writes git objects into it. In a
+  different slot the same configuration is green, which is why 1.0.0-rc.2
+  looked clean across eleven projects. umask governs the permissions on a file
+  as it is created; it cannot change the ownership of one a root process
+  created earlier, and the scanner image runs as uid 1000.
+
+  This is the second half of the class section 13.1 opened on. 1.0.0 stopped a
+  consumer's `default: cache:` from being restored into a component job, which
+  covered a root cache helper. It did not cover a root sibling job, a git
+  object cache carried between jobs in a slot, or anything else that wrote the
+  directory before the job started. A second consumer hit the same thing one
+  level up: `mkdir /builds/<project>/.ci-tpl: Permission denied` in slot
+  `concurrent-0` after a root job, with the inheritance rule in place and no
+  cache restored. The project root itself was the unwritable thing.
+
+  The ownership passes once, when the runner creates the build container, so
+  after every predefined stage that can write the directory and before the
+  job's own script. It covers the project root recursively, and the runner
+  skips it entirely when the image's user is root.
+
+  The flag is set on every component, not only on the three whose default image
+  is non-root today (`quality-sonarqube` at uid 1000 and the two grype
+  components at uid 65532). `execution-image` is a consumer input everywhere,
+  so a default that is root says nothing about the image a job runs in, and a
+  per-component rule cannot be checked without resolving images against a
+  registry. On a root image the flag sets the ownership the directory already
+  had. `tests/contracts/test_build_directory_ownership.py` holds it across
+  every component, and standard 1.0.4 records the rule in section 13.1.
+
+  One precondition comes with it: the execution image must carry the POSIX
+  `id` utility, which the runner calls with `-u` and `-g`. All 18 images the
+  components pin were checked on 2026/09/16 and every one resolves it. A
+  consumer supplying an image without `id` is the one new way to break a job
+  that worked.
+
+- **The mirror trust-bundle test proved the filesystem, not the check.**
+  `ci_tpl_trust_bundle` wrote the fetched bundle to a hardcoded path under
+  `/usr/local/share`, so the test that a certificate-free bundle fails could
+  only run where that directory is writable: green on a workstation and in a
+  root container, a permission error on an unprivileged runner. A new
+  `CI_TPL_CA_BUNDLE_PATH` names the path and defaults to exactly the value that
+  was hardcoded, which is the only path `update-ca-certificates` reads, so no
+  pipeline behaves differently. The test points it at a temporary directory.
+
+  This fix shipped in the public copy first, where a GitHub Actions runner
+  exposed it during the 1.0.0 publication.
+
+### Upgrading from 1.0.0
+
+Repin the ref to `1.0.1`. Nothing else changes: no input, job name, artifact
+path or rule moves, and no behaviour changes in a job that was already green.
+
 ## 1.0.0 — 2026/09/16
 
 The first stable release. It is 1.0.0-rc.1 and 1.0.0-rc.2 unchanged, plus the
@@ -82,8 +152,8 @@ consumer pins, and section 14.2 forbids `main`.
   `inherit: default: [tags, timeout, interruptible, retry, id_tokens]`, so a
   consumer's global `image`, `before_script`, `after_script`, `cache`,
   `services`, `artifacts` and `hooks` stop at the component boundary while
-  runner selection and timeouts still apply. a consumer pipeline's job
-  47873 is why: `quality-sonarqube` died at
+  runner selection and timeouts still apply. A consumer pipeline on the
+  originating estate, 2026/09, is why: `quality-sonarqube` died at
   `mkdir $CI_PROJECT_DIR/.ci-tpl: Permission denied` because that project's
   `default: cache:` was restored into a container that runs as uid 1000, and
   the same component passes everywhere without a global cache. Standard 1.0.3

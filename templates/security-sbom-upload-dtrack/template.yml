@@ -85,6 +85,11 @@ spec:
     entrypoint: ['']
   tags: $[[ inputs.runner-tags ]]
   variables:
+    # Non-root execution images own their build directory: the runner reads the
+    # image's uid and gid and chowns it, instead of relying on umask 0000.
+    # Without it, a job running as a non-root uid died on .git/objects that a
+    # root job had written into the same concurrency slot.
+    FF_DISABLE_UMASK_FOR_DOCKER_EXECUTOR: 'true'
     # The SBOM and its subject record arrive as artifacts from the producer named
     # in sbom-job, and nothing here opens a file from the checkout, so the clone
     # is time spent on nothing.

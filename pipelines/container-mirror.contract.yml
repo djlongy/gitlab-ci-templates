@@ -85,11 +85,11 @@ validation:
   verified_at: 2026/09/16
   revision: '1.0.0-rc.2'
   environment: >-
-    gitlab.example.com 18.9.1-ee, project 18, POST /api/v4/projects/<project-id>/ci/lint.
-    Executed on shared ref 1.0.0-rc.2 in: platform/k8s-gitops (61) 5723 (merge
-    request, list and dry-run mirror) and 5729 (main, list, real mirror of 32
-    references and real export). Every job the composition creates ran green for
-    its own source.
+    gitlab.example.com 18.9.1-ee, POST /api/v4/projects/:id/ci/lint. Executed on shared
+    ref 1.0.0-rc.2 by consumer pipelines on the originating estate, 2026/09: one
+    consumer, on the merge-request pipeline for the list and a dry-run mirror, and on
+    the default-branch pipeline for the list, a real mirror of 32 references and a real
+    export. Every job the composition creates ran green for its own source.
   notes: >-
     Three pipeline sources: a merge request, a schedule and a default-branch
     push. A merge request resolves the list and inspects every reference without

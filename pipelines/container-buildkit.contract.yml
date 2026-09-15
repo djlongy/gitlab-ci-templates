@@ -135,27 +135,25 @@ validation:
   verified_at: 2026/09/15
   environment: gitlab.example.com 18.9.1-ee, project 18, POST /api/v4/projects/<project-id>/ci/lint
   notes: >-
-    The release chain is verify -> build -> scan -> attest -> publish, and each
-    link is a declared `needs:` edge rather than a stage name: promotion needs
-    the image scan and the signing job, and signing needs the build, the SBOM,
-    the scan and all four verify gates. Optional jobs, off by default: the smoke
-    test (smoke-test), the Dependency-Track upload (dependency-track) and the
-    Vigil readiness gate (vigil). Enabling the smoke test adds it to the signing
-    gate list, and enabling Vigil adds the readiness verdict to the promotion
-    gate list; both are done by selecting a second include, because a
-    `gate-jobs` array cannot be varied inside one. Merge request pipelines run
-    the four verify jobs and nothing that mutates. Promotion is manual on a
-    protected tag. `build-sources` chooses which pushes produce a candidate:
-    `default-branch-and-tags`, the default and the behaviour before this input
-    existed, or `tags-only`, which confines the build, smoke test, SBOM, image
-    scan, signature, attestations and promotion to a protected tag push while
-    the four verify jobs still run on merge requests and default-branch pushes.
-    Evidence is gitlab-linted only: the merged configuration compiles on
-    gitlab.example.com 18.9.1-ee and no pipeline has been executed. Status:
-    experimental. The verify half HAS executed on 1.0.0-rc.2: platform/demo-app
-    (project 56) merge-request pipelines 5734 and 5745 ran
-    security-secrets-gitleaks, security-sast-semgrep, security-filesystem-trivy
-    and quality-sonarqube green, and quality-dependency-lockfiles red on a gap
-    1.0.0 closes. Nothing after `verify` has run: that project's build source is
-    tags-only and no release tag has been pushed, so no image has been built,
-    scanned, signed, attested or promoted by this composition.
+    The release chain is verify -> build -> scan -> attest -> publish, and each link is
+    a declared `needs:` edge rather than a stage name: promotion needs the image scan
+    and the signing job, and signing needs the build, the SBOM, the scan and all four
+    verify gates. Optional jobs, off by default: the smoke test (smoke-test), the
+    Dependency-Track upload (dependency-track) and the Vigil readiness gate (vigil).
+    Enabling the smoke test adds it to the signing gate list, and enabling Vigil adds
+    the readiness verdict to the promotion gate list; both are done by selecting a
+    second include, because a `gate-jobs` array cannot be varied inside one. Merge
+    request pipelines run the four verify jobs and nothing that mutates. Promotion is
+    manual on a protected tag. `build-sources` chooses which pushes produce a
+    candidate: `default-branch-and-tags`, the default and the behaviour before this
+    input existed, or `tags-only`, which confines the build, smoke test, SBOM, image
+    scan, signature, attestations and promotion to a protected tag push while the four
+    verify jobs still run on merge requests and default-branch pushes. Evidence is
+    gitlab-linted only: the merged configuration compiles on gitlab.example.com
+    18.9.1-ee and no pipeline has been executed. Status: experimental. The verify half
+    HAS executed on 1.0.0-rc.2: a consumer ran security-secrets-gitleaks,
+    security-sast-semgrep, security-filesystem-trivy and quality-sonarqube green, and
+    quality-dependency-lockfiles red on a gap 1.0.0 closes. Nothing after `verify` has
+    run: that project's build source is tags-only and no release tag has been pushed,
+    so no image has been built, scanned, signed, attested or promoted by this
+    composition.

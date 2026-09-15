@@ -31,7 +31,7 @@ required_secrets:
     scope: >-
       Needed only when the play reads Ansible Vault encrypted variable files.
       The component takes the variable NAME through the vault-password-secret
-      input; this entry records the name platform/infrastructure uses today. It must be a
+      input; this entry records the name one consumer uses today. It must be a
       masked variable and not a file type variable, since the job reads its
       value.
     protected_ref_required: true
@@ -76,25 +76,22 @@ validation:
   verified_at: 2026/09/15
   environment: gitlab.example.com 18.9.1-ee, project 18
   notes: >-
-    Check mode is PARTIAL PREDICTIVE COVERAGE, not a deployment plan. A module
-    without check support reports nothing rather than no change; a task gated on
-    a skipped task's result is not evaluated; anything depending on state the
-    run did not create predicts wrongly. A green check is not evidence the
-    deploy will succeed and must not be the only gate in front of one.
-    gitlab-linted through the CI Lint API by
-    tests/pipelines/test_ansible_components.py, including that the shipped
-    run-rules create no job on an ordinary push. The job shell is behaviour
-    tested by tests/runtime/ansible/, with ansible-playbook stubbed: that covers
-    the checkout escape check, the path validation, the required inventory, the
-    host key checking assertion, the vault password handling and the exact
-    argument list. runtime-tested covers the tool invocation only: the pinned
-    image was run by hand on 2026/09/15 with the argument list this job builds,
-    against a one host local inventory. The run exited 0, reported the task as
-    changed, and the file the task would have created did not exist afterwards,
-    which is the property --check is there for. Nothing has been run against a
-    real remote inventory and nothing was executed by a GitLab runner, so this
-    is neither integration-tested nor evidence about SSH reachability from a
-    runner. Status: experimental, because no consumer pipeline has run any
-    ansible component. platform/infrastructure is the only consumer and its ansible jobs
-    sit in a stage behind a preflight that went red, so they were skipped rather
-    than run.
+    Check mode is PARTIAL PREDICTIVE COVERAGE, not a deployment plan. A module without
+    check support reports nothing rather than no change; a task gated on a skipped
+    task's result is not evaluated; anything depending on state the run did not create
+    predicts wrongly. A green check is not evidence the deploy will succeed and must
+    not be the only gate in front of one. gitlab-linted through the CI Lint API by
+    tests/pipelines/test_ansible_components.py, including that the shipped run-rules
+    create no job on an ordinary push. The job shell is behaviour tested by
+    tests/runtime/ansible/, with ansible-playbook stubbed: that covers the checkout
+    escape check, the path validation, the required inventory, the host key checking
+    assertion, the vault password handling and the exact argument list. runtime-tested
+    covers the tool invocation only: the pinned image was run by hand on 2026/09/15
+    with the argument list this job builds, against a one host local inventory. The run
+    exited 0, reported the task as changed, and the file the task would have created
+    did not exist afterwards, which is the property --check is there for. Nothing has
+    been run against a real remote inventory and nothing was executed by a GitLab
+    runner, so this is neither integration-tested nor evidence about SSH reachability
+    from a runner. Status: experimental, because no consumer pipeline has run any
+    ansible component. a consumer is the only consumer and its ansible jobs sit in a
+    stage behind a preflight that went red, so they were skipped rather than run.

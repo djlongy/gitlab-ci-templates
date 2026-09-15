@@ -53,6 +53,7 @@ STAGE_VOCABULARY = {
 # configures the tool or the runner rather than carrying the component's own
 # state, which is what the CI_TPL_ prefix reserves.
 EXTERNAL_VARIABLES = {
+    "FF_DISABLE_UMASK_FOR_DOCKER_EXECUTOR",
     "GIT_DEPTH",
     "SONAR_USER_HOME",
     "TRIVY_NO_PROGRESS",

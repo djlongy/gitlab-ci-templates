@@ -128,6 +128,11 @@ spec:
     VAULT_ID_TOKEN:
       aud: $[[ inputs.id-token-audience ]]
   variables:
+    # Non-root execution images own their build directory: the runner reads the
+    # image's uid and gid and chowns it, instead of relying on umask 0000.
+    # Without it, a job running as a non-root uid died on .git/objects that a
+    # root job had written into the same concurrency slot.
+    FF_DISABLE_UMASK_FOR_DOCKER_EXECUTOR: 'true'
     GIT_STRATEGY: none
     CI_TPL_ARTIFACT_DIR: "$CI_PROJECT_DIR/.ci-artifacts/$[[ inputs.instance ]]/release-trigger-jenkins"
     CI_TPL_JENKINS_URL: $[[ inputs.jenkins-url ]]

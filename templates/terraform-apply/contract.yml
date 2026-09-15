@@ -68,15 +68,14 @@ validation:
   verified_at: 2026/09/15
   environment: gitlab.example.com 18.9.1-ee, hashicorp/terraform 1.11.4 on Alpine 3.21
   notes: >-
-    runtime-tested covers every pre-apply refusal in tests/runtime/terraform/:
-    tampered plan, changed lockfile, stale plan, wrong instance, environment,
-    state id, working directory, source commit, engine version and recorded
-    maximum age, plus the destroy guard against real terraform plan JSON. No
-    apply has been executed against real infrastructure. `gate-jobs` is spliced
-    into needs after the plan producer, which is never replaced by it; the
-    splice is the same one the security components use and it was linted here
-    with an empty list and with a cross-instance entry. Status: experimental.
-    The gated half is unrun: platform/terraform-dns main pipeline 5744
-    CREATED example:terraform-apply and tenant-b:terraform-apply as manual jobs
-    and nobody started them, so no plan this repository produced has been
-    consumed by an apply. A created job is not an executed one.
+    runtime-tested covers every pre-apply refusal in tests/runtime/terraform/: tampered
+    plan, changed lockfile, stale plan, wrong instance, environment, state id, working
+    directory, source commit, engine version and recorded maximum age, plus the destroy
+    guard against real terraform plan JSON. No apply has been executed against real
+    infrastructure. `gate-jobs` is spliced into needs after the plan producer, which is
+    never replaced by it; the splice is the same one the security components use and it
+    was linted here with an empty list and with a cross-instance entry. Status:
+    experimental. The gated half is unrun: a consumer's default-branch pipeline CREATED example:terraform-apply
+    and tenant-b:terraform-apply as manual jobs and nobody started them, so no plan
+    this repository produced has been consumed by an apply. A created job is not an
+    executed one.

@@ -46,18 +46,16 @@ validation:
   verified_at: 2026/09/16
   environment: gitlab.example.com 18.9.1-ee, project 18, POST /api/v4/projects/<project-id>/ci/lint
   notes: >-
-    Verify then publish on a protected tag. Publication is immutable: a version
-    already in the registry is refused rather than overwritten, so a failed
-    upload needs a new version. No test stage is declared because no module test
-    component exists. This composition applies nothing. terraform-validate is
-    given lockfile-mode: module, because a module repository commits no
-    .terraform.lock.hcl and the default readonly init fails on it; the consumer
-    does not choose this and it is not an input. Evidence is gitlab-linted only.
-    Status: experimental. The verify half HAS executed on 1.0.0-rc.2:
-    platform/terraform-modules (project 15) merge-request pipeline 5720 and main
-    pipeline 5724, 8 of 8 terraform-fmt and terraform-validate jobs green across
-    four instances in lockfile-mode module. The publish half has not: it is
-    tag-gated and no tag pipeline has ever been created from this composition.
-    The rule applied here is the one used for terraform-deploy: a composition is
-    released when a real pipeline has run every job it creates, and publishing
-    is what this one is for.
+    Verify then publish on a protected tag. Publication is immutable: a version already
+    in the registry is refused rather than overwritten, so a failed upload needs a new
+    version. No test stage is declared because no module test component exists. This
+    composition applies nothing. terraform-validate is given lockfile-mode: module,
+    because a module repository commits no .terraform.lock.hcl and the default readonly
+    init fails on it; the consumer does not choose this and it is not an input.
+    Evidence is gitlab-linted only. Status: experimental. The verify half HAS executed
+    on 1.0.0-rc.2: a consumer and a pipeline, 8 of 8 terraform-fmt and
+    terraform-validate jobs green across four instances in lockfile-mode module. The
+    publish half has not: it is tag-gated and no tag pipeline has ever been created
+    from this composition. The rule applied here is the one used for terraform-deploy:
+    a composition is released when a real pipeline has run every job it creates, and
+    publishing is what this one is for.
