@@ -262,8 +262,12 @@ spec:
         if [ -z "${CI_TPL_CA_BUNDLE_URL:-}" ]; then
           return 0
         fi
-        curl -sf "$CI_TPL_CA_BUNDLE_URL" -o /usr/local/share/ca-certificates/ci-tpl-bundle.crt
-        _certs=$(grep -c 'BEGIN CERTIFICATE' /usr/local/share/ca-certificates/ci-tpl-bundle.crt) || _certs=0
+        # The install path is a variable so this is testable without root. A job runs
+        # as root in its container and never sets it; the default is the only path
+        # update-ca-certificates reads.
+        _bundle="${CI_TPL_CA_BUNDLE_PATH:-/usr/local/share/ca-certificates/ci-tpl-bundle.crt}"
+        curl -sf "$CI_TPL_CA_BUNDLE_URL" -o "$_bundle"
+        _certs=$(grep -c 'BEGIN CERTIFICATE' "$_bundle") || _certs=0
         if [ "$_certs" -eq 0 ]; then
           echo "ERROR: ca-bundle-url served no certificate" >&2
           exit 1

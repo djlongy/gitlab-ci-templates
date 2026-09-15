@@ -283,7 +283,13 @@ def test_a_ca_bundle_with_no_certificate_fails(harness):
     """curl -f rejects an error status, not an HTTP 200 carrying a login page.
     A bundle with no certificate in it would otherwise be trusted as empty and
     the job would fail later naming the registry instead."""
-    harness.env = variables(CI_TPL_CA_BUNDLE_URL="https://pki.example.com/bundle.pem")
+    harness.env = variables(
+        CI_TPL_CA_BUNDLE_URL="https://pki.example.com/bundle.pem",
+        # The default install path needs root. Point it somewhere writable so
+        # the check under test — that a bundle with no certificate fails — is
+        # what decides the outcome, not the filesystem.
+        CI_TPL_CA_BUNDLE_PATH=str(harness.project_dir / "ci-tpl-bundle.crt"),
+    )
     harness.stub("curl")
     harness.stub("update-ca-certificates")
     harness.write_stub(
