@@ -1050,8 +1050,8 @@ components:
       revision: 1.0.0-rc.2
       environment: 'gitlab.example.com 18.9.1-ee, project 18, POST /api/v4/projects/<project-id>/ci/lint.
         Executed on shared ref 1.0.0-rc.2 in: platform/k8s-gitops (61) 5729, job 47774: a
-        real export tar written to s3://rke2-lab/image-diode/low-export/. Not created on the
-        merge-request pipeline 5723, where the mirror runs as a dry run.'
+        real export tar written to s3://lab-transfer/image-diode/low-export/. Not created
+        on the merge-request pipeline 5723, where the mirror runs as a dry run.'
       notes: 'Producers: list-job supplies the reference list and is consumed with artifacts
         true; mirror-job is a gate consumed with artifacts false, so nothing is exported unless
         the mirror succeeded. Neither is optional, and neither is implied by a shared stage.
@@ -4547,8 +4547,8 @@ components:
         by it; the splice is the same one the security components use and it was linted here
         with an empty list and with a cross-instance entry. Status: experimental. The gated
         half is unrun: platform/terraform-dns main pipeline 5744 CREATED example:terraform-apply
-        and sixbrothers:terraform-apply as manual jobs and nobody started them, so no plan
-        this repository produced has been consumed by an apply. A created job is not an executed
+        and tenant-b:terraform-apply as manual jobs and nobody started them, so no plan this
+        repository produced has been consumed by an apply. A created job is not an executed
         one.'
   - name: terraform-fmt
     kind: component
@@ -7033,7 +7033,7 @@ pipelines:
         5736 and main pipeline 5744, and platform/terraform-hypervisor-roles (22) merge-request
         pipeline 5735, with terraform-fmt, terraform-validate, security-filesystem-trivy and,
         on 5744, terraform-plan all green. The apply half has not: 5744 created example:terraform-apply
-        and sixbrothers:terraform-apply as manual jobs and nobody started them. A composition
+        and tenant-b:terraform-apply as manual jobs and nobody started them. A composition
         whose reason to exist is applying a saved plan is not released until an apply has
         consumed one.'
   - name: terraform-module

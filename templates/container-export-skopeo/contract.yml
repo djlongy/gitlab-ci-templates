@@ -88,7 +88,7 @@ validation:
   environment: >-
     gitlab.example.com 18.9.1-ee, project 18, POST /api/v4/projects/<project-id>/ci/lint.
     Executed on shared ref 1.0.0-rc.2 in: platform/k8s-gitops (61) 5729, job
-    47774: a real export tar written to s3://rke2-lab/image-diode/low-export/.
+    47774: a real export tar written to s3://lab-transfer/image-diode/low-export/.
     Not created on the merge-request pipeline 5723, where the mirror runs as a
     dry run.
   notes: >-

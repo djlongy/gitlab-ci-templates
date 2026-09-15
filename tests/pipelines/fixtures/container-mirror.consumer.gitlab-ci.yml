@@ -25,7 +25,7 @@ include:
     ref: 'REPLACE_WITH_APPROVED_SHARED_CI_REF'
     file: '/pipelines/container-mirror.yml'
     inputs:
-      instance: rke2lab
+      instance: lab
       changes-paths:
         - 'image-mirror/**/*'
         # The pinned ref lives here, so a bump must run the pipeline that the
@@ -36,16 +36,16 @@ include:
       repository-prefix: rke2
       arch: linux-amd64
       s3-endpoint: 'http://192.0.2.10:9010'
-      s3-bucket: rke2-lab
+      s3-bucket: lab-transfer
       s3-prefix: image-diode/low-export
       have-key: image-diode/have/blobs.txt
       vault-addr: 'https://vault.example.com:8200'
       vault-role: gitlab-ci
-      vault-kv-path: kv/apps/image-mirror/rke2lab
+      vault-kv-path: kv/apps/image-mirror/lab
       vault-field-registry: quay_low_registry
       vault-field-user: quay_low_user
       vault-field-token: quay_low_token
-      vault-s3-kv-path: kv/apps/cnpg/rke2lab
+      vault-s3-kv-path: kv/apps/cnpg/lab
       ca-bundle-url: 'https://vault.example.com:8200/v1/pki/ca_chain'
       no-proxy: 'localhost,127.0.0.1,.example.internal,.example.com,192.0.2.0/24'
       egress-proxy: "$EGRESS_PROXY"

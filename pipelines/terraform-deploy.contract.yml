@@ -101,6 +101,6 @@ validation:
     platform/terraform-hypervisor-roles (22) merge-request pipeline 5735, with
     terraform-fmt, terraform-validate, security-filesystem-trivy and, on 5744,
     terraform-plan all green. The apply half has not: 5744 created
-    example:terraform-apply and sixbrothers:terraform-apply as manual jobs and
+    example:terraform-apply and tenant-b:terraform-apply as manual jobs and
     nobody started them. A composition whose reason to exist is applying a saved
     plan is not released until an apply has consumed one.

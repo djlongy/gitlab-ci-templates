@@ -77,6 +77,6 @@ validation:
     splice is the same one the security components use and it was linted here
     with an empty list and with a cross-instance entry. Status: experimental.
     The gated half is unrun: platform/terraform-dns main pipeline 5744
-    CREATED example:terraform-apply and sixbrothers:terraform-apply as manual jobs
+    CREATED example:terraform-apply and tenant-b:terraform-apply as manual jobs
     and nobody started them, so no plan this repository produced has been
     consumed by an apply. A created job is not an executed one.

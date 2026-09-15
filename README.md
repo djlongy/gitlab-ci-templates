@@ -211,5 +211,4 @@ directly, with `--host` and `--project-id` overriding the variables above.
 
 ## Licence
 
-This repository carries no licence file. Until one is added, no licence is
-granted beyond what GitHub's terms of service provide for viewing and forking.
+MIT. See [`LICENSE`](LICENSE).
