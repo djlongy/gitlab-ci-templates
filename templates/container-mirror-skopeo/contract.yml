@@ -66,37 +66,34 @@ validation:
   verified_at: 2026/09/16
   revision: '1.0.0-rc.2'
   environment: >-
-    gitlab.example.com 18.9.1-ee, project 18, POST /api/v4/projects/<project-id>/ci/lint.
-    Executed on shared ref 1.0.0-rc.2 in: platform/k8s-gitops (61) 5723 as a dry
-    run over 32 references and 5729 as a real mirror writing digests.txt, job
-    47773.
+    gitlab.example.com 18.9.1-ee, POST /api/v4/projects/:id/ci/lint. Executed on shared
+    ref 1.0.0-rc.2 by consumer pipelines on the originating estate, 2026/09: one
+    consumer, as a dry run over 32 references on the merge-request pipeline and as a
+    real mirror writing digests.txt on the default-branch pipeline.
   notes: >-
-    Failure semantics: neither credential source configured; vault-addr set
-    without vault-role or vault-kv-path; a Vault login that returns no token; a
-    list file that is absent, absolute or traverses out of the checkout; an
-    empty assembled reference set; a copy or inspect that fails three rounds,
-    naming the reference; a pinned digest the registry does not hold, which
-    takes the same path as `manifest unknown`; and fewer digests recorded than
-    references listed. Every one of those ends the job.
-    CI_TPL_DRY_RUN decides whether anything is written and is guarded at run
-    time, because a project or group CI variable outranks a job variable. It
-    must be exactly true or false, and true only when CI_PIPELINE_SOURCE is
-    merge_request_event. Anything else exits 1 naming the variable, so a mirror
-    that writes nothing cannot report success.
-    Copies use --format oci, not --preserve-digests: container-export-skopeo
-    stores these manifests in an OCI layout, which takes OCI media types only,
-    and a preserved docker v2 manifest is one the receiving side cannot read.
-    skopeo cannot parse a tag and a digest in one reference, so a pinned entry
-    is fetched as repo@digest and its tag only names the copy.
-    No credential reaches a command line. The registry token is written by
-    python into a mode-0600 docker auth file passed as --dest-authfile, the
-    Vault JWT is posted from a mode-0600 file, and curl reads the Vault token
-    from a mode-0600 --config file. Only lengths are printed.
-    Evidence: the shape this component had at tag 0.2.0 was integration-tested
-    by platform/k8s-gitops. That claim is deliberately NOT carried here. The job's
-    shell now comes from runtime/mirror/, the credential handling changed, and
+    Failure semantics: neither credential source configured; vault-addr set without
+    vault-role or vault-kv-path; a Vault login that returns no token; a list file that
+    is absent, absolute or traverses out of the checkout; an empty assembled reference
+    set; a copy or inspect that fails three rounds, naming the reference; a pinned
+    digest the registry does not hold, which takes the same path as `manifest unknown`;
+    and fewer digests recorded than references listed. Every one of those ends the job.
+    CI_TPL_DRY_RUN decides whether anything is written and is guarded at run time,
+    because a project or group CI variable outranks a job variable. It must be exactly
+    true or false, and true only when CI_PIPELINE_SOURCE is merge_request_event.
+    Anything else exits 1 naming the variable, so a mirror that writes nothing cannot
+    report success. Copies use --format oci, not --preserve-digests:
+    container-export-skopeo stores these manifests in an OCI layout, which takes OCI
+    media types only, and a preserved docker v2 manifest is one the receiving side
+    cannot read. skopeo cannot parse a tag and a digest in one reference, so a pinned
+    entry is fetched as repo@digest and its tag only names the copy. No credential
+    reaches a command line. The registry token is written by python into a mode-0600
+    docker auth file passed as --dest-authfile, the Vault JWT is posted from a
+    mode-0600 file, and curl reads the Vault token from a mode-0600 --config file. Only
+    lengths are printed. Evidence: the shape this component had at tag 0.2.0 was
+    integration-tested by a consumer. That claim is deliberately NOT carried here. The
+    job's shell now comes from runtime/mirror/, the credential handling changed, and
     nothing in this release has been executed. runtime-tested:
     tests/runtime/mirror/test_registry.py drives the copy this template embeds.
-    Limitation: list-files is a validated space-separated string, not an array.
-    GitLab rejects an array input interpolated into a variables value, and
-    offers no join function, so an array cannot reach the shell at all.
+    Limitation: list-files is a validated space-separated string, not an array. GitLab
+    rejects an array input interpolated into a variables value, and offers no join
+    function, so an array cannot reach the shell at all.

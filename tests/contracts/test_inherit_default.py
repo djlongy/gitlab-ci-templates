@@ -1,12 +1,12 @@
 """A component job runs what the component ships, not what a consumer defaults.
 
-platform/infrastructure MR pipeline 5747, job 47873: `quality-sonarqube` died at
+On a consumer pipeline on the originating estate, 2026/09, `quality-sonarqube` died at
 `mkdir $CI_PROJECT_DIR/.ci-tpl: Permission denied`. The scanner image runs as
 uid 1000, and the consumer's `default: cache:` (a pip cache) was restored into
 the job by the runner's cache helper before the script ran. The same image on
 the same runner passes in every consumer without a global cache. A
 consumer-side `inherit: default: [tags, timeout, interruptible]` on that one job
-made it green end to end (pipeline 5750, job 47892).
+made it green end to end.
 
 The fix belongs in the component, not in each consumer. A `default:` block is a
 consumer's convenience for its OWN jobs; when it reaches a component job it

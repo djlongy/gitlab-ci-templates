@@ -93,8 +93,8 @@ def test_readonly_mode_holds_the_committed_lockfile(checkout, stubs):
 
 def test_module_mode_omits_the_readonly_lockfile_flag(checkout, stubs):
     """A module repository commits no .terraform.lock.hcl, so readonly init fails
-    with "Provider dependency changes detected" (platform/terraform-modules MR !3,
-    pipeline 5662). This is the branch that mode exists for."""
+    with "Provider dependency changes detected" (seen on a consumer merge request,
+    a consumer pipeline). This is the branch that mode exists for."""
     result = run(checkout, stubs, "module")
     assert result.returncode == 0, result.stderr
     assert "-lockfile=readonly" not in init_line(stubs)

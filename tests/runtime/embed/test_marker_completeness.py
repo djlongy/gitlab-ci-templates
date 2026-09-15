@@ -8,7 +8,8 @@ passes, every unit test passes against runtime/ where the sibling is present,
 and the job dies at run time on a file that was never copied.
 
 That is RC2-2. templates/docs-wiki-sync/template.yml listed wiki-pull.py and not
-the wiki-import.py it loads on line 52; platform/wiki-tpl-flat job 47477 raised
+the wiki-import.py it loads on line 52; a consumer pipeline on the originating
+estate, 2026/09, raised
 FileNotFoundError for /tmp/ci-tpl-runtime/docs-wiki-sync/wiki-import.py.
 
 This walks each marker's Python sources transitively — a dependency of a

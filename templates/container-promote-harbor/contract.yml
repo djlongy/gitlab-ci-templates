@@ -60,25 +60,23 @@ validation:
   verified_at: 2026/09/15
   environment: gitlab.example.com 18.9.1-ee, project 18
   notes: >-
-    Failure semantics: an image.json without a digest, a candidate artifact that
-    is not there, a destination project equal to the source, a refused copy, a
-    destination that cannot be read back or whose digest differs, a missing
-    cosign signature while require-signatures is true, or a tag that is not a
-    valid tag name. allow_failure is set explicitly to false because GitLab
-    defaults manual jobs to true, which is how the predecessor made a failed
-    production publication green. Referrers: cosign stores a signature and
-    attestations as the separate tags sha256-<hex>.sig and .att. Those are
-    copied explicitly; a digest copy does not carry them. The .att tag is copied
-    when present and its absence is recorded, not fatal. Approval is a control
-    on the environment, not on this template: the default rules require a
-    protected tag and a manual action, and the environment named by the
-    environment input carries the protection and approvers. .ci/estate.yml
-    records every environment's protected and approvers fields as unresolved, so
-    no approval is proven to exist today. gitlab-linted through the CI Lint API;
-    no job ran. runtime-tested: unit tests cover every failure path above
-    against a stubbed Harbor API. No artifact has been promoted by this
-    component. Status: experimental, because no consumer pipeline has run this
-    component on 1.0.0-rc.2. `released` in this repository means a consumer job
-    executed green, not that the component looks finished. platform/demo-app is the
-    container consumer and its build source is tags-only, so no candidate chain
-    job was created at all.
+    Failure semantics: an image.json without a digest, a candidate artifact that is not
+    there, a destination project equal to the source, a refused copy, a destination
+    that cannot be read back or whose digest differs, a missing cosign signature while
+    require-signatures is true, or a tag that is not a valid tag name. allow_failure is
+    set explicitly to false because GitLab defaults manual jobs to true, which is how
+    the predecessor made a failed production publication green. Referrers: cosign
+    stores a signature and attestations as the separate tags sha256-<hex>.sig and .att.
+    Those are copied explicitly; a digest copy does not carry them. The .att tag is
+    copied when present and its absence is recorded, not fatal. Approval is a control
+    on the environment, not on this template: the default rules require a protected tag
+    and a manual action, and the environment named by the environment input carries the
+    protection and approvers. .ci/estate.yml records every environment's protected and
+    approvers fields as unresolved, so no approval is proven to exist today.
+    gitlab-linted through the CI Lint API; no job ran. runtime-tested: unit tests cover
+    every failure path above against a stubbed Harbor API. No artifact has been
+    promoted by this component. Status: experimental, because no consumer pipeline has
+    run this component on 1.0.0-rc.2. `released` in this repository means a consumer
+    job executed green, not that the component looks finished. a consumer is the
+    container consumer and its build source is tags-only, so no candidate chain job was
+    created at all.

@@ -45,7 +45,7 @@ required_secrets:
       Needed only when the tree contains Ansible Vault encrypted files, because
       ansible-lint runs a syntax check that has to decrypt them. The component
       takes the variable NAME through the vault-password-secret input; this
-      entry records the name platform/infrastructure uses today. It must be a masked
+      entry records the name one consumer uses today. It must be a masked
       variable and not a file type variable, since the job reads its value.
     protected_ref_required: true
 
@@ -57,7 +57,7 @@ runtime_image:
   # the default is this community image, which is why the component ships as
   # experimental rather than released.
   #
-  # Its ansible-lint is 26.4.0. platform/infrastructure pins 25.1.3 today, so adopting this
+  # Its ansible-lint is 26.4.0. A consumer pinning an older one today, so adopting this
   # component changes the rule set that repository is measured against. Resolve
   # that before promoting the component past experimental.
   reference: >-
@@ -87,24 +87,21 @@ validation:
   environment: gitlab.example.com 18.9.1-ee, project 18
   notes: >-
     gitlab-linted through the CI Lint API by
-    tests/pipelines/test_ansible_components.py. The job shell is behaviour
-    tested by tests/runtime/ansible/ with ansible-lint stubbed, covering the
-    checkout escape check, the vault password handling and the exact argument
-    list. runtime-tested: on 2026/09/15 the job's own shell, extracted from this
-    template, was run in the pinned image against three trees in both policy
-    modes. A tree with violations exits 1 blocking and 0 advisory with the
-    findings in scan-result.json; a clean tree exits 0 in both; a tree the
-    linter analysed nothing in exits 2 in both, which is the execution error
-    advisory mode does not cover. The tool's own codes behind that are exit 0
-    clean, 2 violations, 1 unusable configuration and 5 nothing analysed. That
-    is where the missing path argument comes from: `ansible-lint .` reported
-    zero files processed and exit 0 on the failing tree. The same session
-    measured the exit codes the policy gate classifies (0 clean, 2 violations, 1
-    unusable configuration, 5 nothing analysed) and that `--sarif-file` writes
-    its file on a clean tree but is suppressed by `-f codeclimate`, which is why
-    the SARIF is the report this component keeps. Nothing here was executed by a
-    GitLab runner, so this is not integration-tested. Status: experimental,
-    because no consumer pipeline has run any ansible component. platform/infrastructure
-    merge-request pipelines 5747 and 5750 created
-    example-unprotected:ansible-lint and skipped it: its stage sits behind a
-    preflight that failed. A skipped job is not evidence.
+    tests/pipelines/test_ansible_components.py. The job shell is behaviour tested by
+    tests/runtime/ansible/ with ansible-lint stubbed, covering the checkout escape
+    check, the vault password handling and the exact argument list. runtime-tested: on
+    2026/09/15 the job's own shell, extracted from this template, was run in the pinned
+    image against three trees in both policy modes. A tree with violations exits 1
+    blocking and 0 advisory with the findings in scan-result.json; a clean tree exits 0
+    in both; a tree the linter analysed nothing in exits 2 in both, which is the
+    execution error advisory mode does not cover. The tool's own codes behind that are
+    exit 0 clean, 2 violations, 1 unusable configuration and 5 nothing analysed. That
+    is where the missing path argument comes from: `ansible-lint .` reported zero files
+    processed and exit 0 on the failing tree. The same session measured the exit codes
+    the policy gate classifies (0 clean, 2 violations, 1 unusable configuration, 5
+    nothing analysed) and that `--sarif-file` writes its file on a clean tree but is
+    suppressed by `-f codeclimate`, which is why the SARIF is the report this component
+    keeps. Nothing here was executed by a GitLab runner, so this is not
+    integration-tested. Status: experimental, because no consumer pipeline has run any
+    ansible component. a consumer created example-unprotected:ansible-lint and skipped
+    it: its stage sits behind a preflight that failed. A skipped job is not evidence.

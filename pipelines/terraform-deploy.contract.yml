@@ -72,35 +72,31 @@ validation:
   verified_at: 2026/09/15
   environment: gitlab.example.com 18.9.1-ee, project 18, POST /api/v4/projects/<project-id>/ci/lint
   notes: >-
-    One include is one root, one state and one environment. The apply job names
-    its plan job explicitly and re-checks the plan's hash, age, engine version,
-    lockfile, state id, working directory and source commit before applying; it
-    never re-plans. Destroy is not a branch of this pipeline: `allow-destroy`
-    only permits an apply whose saved plan is already destructive.
-    `environment:` records a deployment; it is not a protection rule, which must
-    be configured on the GitLab environment separately. There is no
-    verify-deploy stage because no component fills it. Three inputs exist so a
-    project adopting this composition can keep gates it already has, and all
-    three are off by default. `changes-filter` with `changes-paths` adds
-    `changes:` to every job in the instance, so a repository of several roots
-    plans only the one whose paths moved. `apply-mode: automatic` makes the
-    apply run on success on the default branch instead of waiting for a person:
-    that is an owner decision, not a default, section 6.1 does not default a
-    production mutation to unconditional execution, and the consuming project
-    records the decision and its reason in .ci/project.yml. `apply-gate-jobs`
-    adds needs entries with artifacts false to the apply, for ordering between
-    instances such as prod applying only after dev; the plan producer is always
-    needed as well and is never replaced by that list. Evidence is gitlab-linted
-    only, and the lint has a limit worth stating: the API returns no `needs` per
-    job, so the two-instance ordering is asserted on the resolved configuration
-    and the lint proves only that the configuration carrying it compiles.
-    `changes:` semantics are likewise not observable in a dry run, which has no
-    diff to compare against. Status: experimental. Part of this composition HAS
-    executed on 1.0.0-rc.2: platform/terraform-dns (project 16)
-    merge-request pipeline 5736 and main pipeline 5744, and
-    platform/terraform-hypervisor-roles (22) merge-request pipeline 5735, with
-    terraform-fmt, terraform-validate, security-filesystem-trivy and, on 5744,
-    terraform-plan all green. The apply half has not: 5744 created
-    example:terraform-apply and tenant-b:terraform-apply as manual jobs and
-    nobody started them. A composition whose reason to exist is applying a saved
-    plan is not released until an apply has consumed one.
+    One include is one root, one state and one environment. The apply job names its
+    plan job explicitly and re-checks the plan's hash, age, engine version, lockfile,
+    state id, working directory and source commit before applying; it never re-plans.
+    Destroy is not a branch of this pipeline: `allow-destroy` only permits an apply
+    whose saved plan is already destructive. `environment:` records a deployment; it is
+    not a protection rule, which must be configured on the GitLab environment
+    separately. There is no verify-deploy stage because no component fills it. Three
+    inputs exist so a project adopting this composition can keep gates it already has,
+    and all three are off by default. `changes-filter` with `changes-paths` adds
+    `changes:` to every job in the instance, so a repository of several roots plans
+    only the one whose paths moved. `apply-mode: automatic` makes the apply run on
+    success on the default branch instead of waiting for a person: that is an owner
+    decision, not a default, section 6.1 does not default a production mutation to
+    unconditional execution, and the consuming project records the decision and its
+    reason in .ci/project.yml. `apply-gate-jobs` adds needs entries with artifacts
+    false to the apply, for ordering between instances such as prod applying only after
+    dev; the plan producer is always needed as well and is never replaced by that list.
+    Evidence is gitlab-linted only, and the lint has a limit worth stating: the API
+    returns no `needs` per job, so the two-instance ordering is asserted on the
+    resolved configuration and the lint proves only that the configuration carrying it
+    compiles. `changes:` semantics are likewise not observable in a dry run, which has
+    no diff to compare against. Status: experimental. Part of this composition HAS
+    executed on 1.0.0-rc.2: a consumer and a pipeline, and a consumer, with
+    terraform-fmt, terraform-validate, security-filesystem-trivy and, on the main
+    pipeline, terraform-plan all green. The apply half has not: that pipeline created
+    example:terraform-apply and tenant-b:terraform-apply as manual jobs and nobody
+    started them. A composition whose reason to exist is applying a saved plan is not
+    released until an apply has consumed one.

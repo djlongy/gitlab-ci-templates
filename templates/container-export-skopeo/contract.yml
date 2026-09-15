@@ -86,37 +86,33 @@ validation:
   verified_at: 2026/09/16
   revision: '1.0.0-rc.2'
   environment: >-
-    gitlab.example.com 18.9.1-ee, project 18, POST /api/v4/projects/<project-id>/ci/lint.
-    Executed on shared ref 1.0.0-rc.2 in: platform/k8s-gitops (61) 5729, job
-    47774: a real export tar written to s3://lab-transfer/image-diode/low-export/.
-    Not created on the merge-request pipeline 5723, where the mirror runs as a
-    dry run.
+    gitlab.example.com 18.9.1-ee, POST /api/v4/projects/:id/ci/lint. Executed on shared
+    ref 1.0.0-rc.2 by consumer pipelines on the originating estate, 2026/09: a real
+    export tar written to s3://lab-transfer/image-diode/low-export/ on a default-branch
+    pipeline. The merge-request pipeline creates no export, because the mirror runs
+    there as a dry run.
   notes: >-
-    Producers: list-job supplies the reference list and is consumed with
-    artifacts true; mirror-job is a gate consumed with artifacts false, so
-    nothing is exported unless the mirror succeeded. Neither is optional, and
-    neither is implied by a shared stage.
-    Failure semantics: either credential source incomplete; vault-addr set
-    without vault-role, vault-kv-path or vault-s3-kv-path; a Vault login that
-    returns no token; a list file that is absent, absolute or traverses out of
-    the checkout; an empty assembled reference set; a reference the OCI layout
-    does not carry, or a manifest blob that is not on disk, which now names the
-    reference instead of raising a KeyError; and have-key unreadable for any
-    reason other than NoSuchKey, which exits 2. The archive is uploaded only
-    after manifest.json is written.
-    have-key is read with s3api get-object, not head-object: some S3 gateways
-    answer HeadObject with HTTP 400, which reads as "no object" and would
-    silently send the full set every run. A genuine NoSuchKey means send
-    everything.
-    Copies out of the registry use --preserve-digests, so the layout, the source
-    registry and the receiving registry all report the same digest. That holds
-    only because container-mirror-skopeo wrote OCI manifests.
-    No credential reaches a command line; see container-mirror-skopeo.
-    Evidence: the shape this component had at tag 0.2.0 was integration-tested
-    by platform/k8s-gitops. That claim is deliberately NOT carried here, because
-    the job's shell now comes from runtime/mirror/ and nothing in this release
+    Producers: list-job supplies the reference list and is consumed with artifacts
+    true; mirror-job is a gate consumed with artifacts false, so nothing is exported
+    unless the mirror succeeded. Neither is optional, and neither is implied by a
+    shared stage. Failure semantics: either credential source incomplete; vault-addr
+    set without vault-role, vault-kv-path or vault-s3-kv-path; a Vault login that
+    returns no token; a list file that is absent, absolute or traverses out of the
+    checkout; an empty assembled reference set; a reference the OCI layout does not
+    carry, or a manifest blob that is not on disk, which now names the reference
+    instead of raising a KeyError; and have-key unreadable for any reason other than
+    NoSuchKey, which exits 2. The archive is uploaded only after manifest.json is
+    written. have-key is read with s3api get-object, not head-object: some S3 gateways
+    answer HeadObject with HTTP 400, which reads as "no object" and would silently send
+    the full set every run. A genuine NoSuchKey means send everything. Copies out of
+    the registry use --preserve-digests, so the layout, the source registry and the
+    receiving registry all report the same digest. That holds only because
+    container-mirror-skopeo wrote OCI manifests. No credential reaches a command line;
+    see container-mirror-skopeo. Evidence: the shape this component had at tag 0.2.0
+    was integration-tested by a consumer. That claim is deliberately NOT carried here,
+    because the job's shell now comes from runtime/mirror/ and nothing in this release
     has been executed. runtime-tested: tests/runtime/mirror/ covers the transfer
-    description and the shared shell as this template embeds it.
-    Limitations: list-files is a validated space-separated string for the same
-    reason as in container-mirror-skopeo; the component uploads one object, and
-    a receiving side that needs it split is responsible for splitting it.
+    description and the shared shell as this template embeds it. Limitations:
+    list-files is a validated space-separated string for the same reason as in
+    container-mirror-skopeo; the component uploads one object, and a receiving side
+    that needs it split is responsible for splitting it.

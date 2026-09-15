@@ -54,10 +54,9 @@ validation:
   verified_at: 2026/09/15
   environment: gitlab.example.com 18.9.1-ee, alpine/curl 8.12.1
   notes: >-
-    runtime-tested covers version normalisation, the packaging exclusions and
-    every registry-assertion failure path in tests/runtime/terraform/. No module
-    has been published to the registry from this component. Status:
-    experimental. The gated half is unrun: platform/terraform-modules ran the
-    verify half of pipelines/terraform-module.yml on 5720 and 5724, and the
-    publish job is tag-gated, so no tag pipeline has ever been created from that
-    composition.
+    runtime-tested covers version normalisation, the packaging exclusions and every
+    registry-assertion failure path in tests/runtime/terraform/. No module has been
+    published to the registry from this component. Status: experimental. The gated half
+    is unrun: a consumer ran the verify half of pipelines/terraform-module.yml, and
+    the publish job is tag-gated, so no tag pipeline has ever been
+    created from that composition.

@@ -152,8 +152,8 @@ consumer pins, and section 14.2 forbids `main`.
   `inherit: default: [tags, timeout, interruptible, retry, id_tokens]`, so a
   consumer's global `image`, `before_script`, `after_script`, `cache`,
   `services`, `artifacts` and `hooks` stop at the component boundary while
-  runner selection and timeouts still apply. a consumer pipeline's job
-  47873 is why: `quality-sonarqube` died at
+  runner selection and timeouts still apply. A consumer pipeline on the
+  originating estate, 2026/09, is why: `quality-sonarqube` died at
   `mkdir $CI_PROJECT_DIR/.ci-tpl: Permission denied` because that project's
   `default: cache:` was restored into a container that runs as uid 1000, and
   the same component passes everywhere without a global cache. Standard 1.0.3

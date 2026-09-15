@@ -42,11 +42,9 @@ validation:
   verified_at: 2026/09/16
   revision: '1.0.0-rc.2'
   environment: >-
-    gitlab.example.com 18.9.1-ee, project 18, POST /api/v4/projects/<project-id>/ci/lint.
-    Executed on shared ref 1.0.0-rc.2 in: platform/terraform-modules (15) 5720
-    (merge request) and 5724 (main), 8 of 8 jobs across four instances;
-    platform/terraform-dns (16) 5736 and 5744; platform/terraform-hypervisor-roles
-    (22) 5735.
+    gitlab.example.com 18.9.1-ee, POST /api/v4/projects/:id/ci/lint. Executed on shared
+    ref 1.0.0-rc.2 by consumer pipelines on the originating estate, 2026/09: three
+    consumers, the first with 8 of 8 jobs across four instances.
   notes: >-
     Linted through the CI Lint API from tests/pipelines/test_terraform_components.py.
     Nothing here has been executed in a pipeline.

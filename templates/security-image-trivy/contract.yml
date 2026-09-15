@@ -65,15 +65,14 @@ validation:
   environment: gitlab.example.com 18.9.1-ee, project 18
   notes: >-
     Failure semantics: a finding at or above severity-threshold fails the job in
-    blocking mode and is recorded in advisory mode. A scanner crash, a database
-    that did not download, an empty report or a report missing its SchemaVersion
-    marker fails the job in BOTH modes. Unfixed vulnerabilities gate by default,
-    unlike the predecessor template, which set TRIVY_IGNORE_UNFIXED true.
-    gitlab-linted through the CI Lint API; no job ran. runtime-tested: the scan
-    wrapper has unit tests, and trivy's --download-db-only, convert-to-sarif,
-    convert-to-template and version extraction were executed against the pinned
-    image digest on 2026/09/15. Status: experimental, because no consumer
-    pipeline has run this component on 1.0.0-rc.2. `released` in this repository
-    means a consumer job executed green, not that the component looks finished.
-    platform/demo-app's build source is tags-only, so nothing was built for it to
-    scan.
+    blocking mode and is recorded in advisory mode. A scanner crash, a database that
+    did not download, an empty report or a report missing its SchemaVersion marker
+    fails the job in BOTH modes. Unfixed vulnerabilities gate by default, unlike the
+    predecessor template, which set TRIVY_IGNORE_UNFIXED true. gitlab-linted through
+    the CI Lint API; no job ran. runtime-tested: the scan wrapper has unit tests, and
+    trivy's --download-db-only, convert-to-sarif, convert-to-template and version
+    extraction were executed against the pinned image digest on 2026/09/15. Status:
+    experimental, because no consumer pipeline has run this component on 1.0.0-rc.2.
+    `released` in this repository means a consumer job executed green, not that the
+    component looks finished. a consumer's build source is tags-only, so nothing was
+    built for it to scan.

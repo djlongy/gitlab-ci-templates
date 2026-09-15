@@ -49,9 +49,10 @@ validation:
   verified_at: 2026/09/16
   revision: '1.0.0-rc.2'
   environment: >-
-    gitlab.example.com 18.9.1-ee, project 18, POST /api/v4/projects/<project-id>/ci/lint.
-    Executed on shared ref 1.0.0-rc.2 in: platform/k8s-gitops (61) 5723 (merge
-    request) and 5729 (main), job 47772, resolving 32 image references.
+    gitlab.example.com 18.9.1-ee, POST /api/v4/projects/:id/ci/lint. Executed on shared
+    ref 1.0.0-rc.2 by consumer pipelines on the originating estate, 2026/09: one
+    consumer, on both its merge-request and default-branch pipelines, resolving 32
+    image references.
   notes: >-
     Failure semantics: a config-file that is not there, that resolves outside
     the checkout, or that declares no version, no arch or no lists; a release

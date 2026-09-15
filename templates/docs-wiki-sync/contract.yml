@@ -55,15 +55,13 @@ validation:
   verified_at: 2026/09/16
   revision: '1.0.0-rc.2'
   environment: >-
-    gitlab.example.com 18.9.1-ee, project 18, POST /api/v4/projects/<project-id>/ci/lint.
-    Executed on shared ref 1.0.0-rc.2 in: platform/wiki-tpl-flat (project 79)
-    pipeline 5726, platform/wiki-tpl-nested (80) 5727 and platform/wiki-tpl-odd (81)
-    5728, all three docs:docs-wiki-sync green; platform/docs-site (70) 5733
-    (merge request, component included directly), 5737 (default-branch push) and
-    5740 (schedule). Both directions ran: the pull step reached its decision and
-    reported "wiki has no edits since the last sync", which rc.1 skipped
-    entirely through a swallowed failure. Importing an actual wiki edit has
-    still not been exercised in a pipeline.
+    gitlab.example.com 18.9.1-ee, POST /api/v4/projects/:id/ci/lint. Executed on shared
+    ref 1.0.0-rc.2 by consumer pipelines on the originating estate, 2026/09: three
+    wiki-sync consumers, all three docs:docs-wiki-sync green, and a documentation
+    consumer on its merge-request, default-branch and scheduled pipelines. Both
+    directions ran: the pull step reached its decision and reported "wiki has no edits
+    since the last sync", which rc.1 skipped entirely through a swallowed failure.
+    Importing an actual wiki edit has still not been exercised in a pipeline.
   notes: >-
     Failure semantics (section 10.1): a missing WIKI_TOKEN excludes the job
     through run-rules rather than failing it; once the job runs, an absent token,

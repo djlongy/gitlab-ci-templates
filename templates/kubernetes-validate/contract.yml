@@ -59,9 +59,9 @@ validation:
   verified_at: 2026/09/16
   revision: '1.0.0-rc.2'
   environment: >-
-    gitlab.example.com 18.9.1-ee, project 18, POST /api/v4/projects/<project-id>/ci/lint.
-    Executed on shared ref 1.0.0-rc.2 in: platform/cluster-gitops (29) 5719 and 5722,
-    19 of 19 manifests; platform/platform-gitops (12) 5721 and 5725.
+    gitlab.example.com 18.9.1-ee, POST /api/v4/projects/:id/ci/lint. Executed on shared
+    ref 1.0.0-rc.2 by consumer pipelines on the originating estate, 2026/09: one
+    consumer, 19 of 19 manifests; and a second consumer.
   notes: >-
     Runtime-tested as the copy embedded in template.yml. Six cases were
     exercised: a directory of plain manifests; a kustomize overlay; a single

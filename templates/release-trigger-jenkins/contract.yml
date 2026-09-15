@@ -45,7 +45,7 @@ runtime_image:
 # No checkout: this job reads the named producer's artifacts and the APIs it
 # calls, so it runs with GIT_STRATEGY none and never clones the consumer
 # repository. tests/contracts/test_git_strategy.py holds both halves together.
-# job-path accepts a leading underscore: Jenkins does, and platform/infrastructure's seed
+# job-path accepts a leading underscore: Jenkins does, and one consumer's seed
 # job is `_seed-all-dsl-jobs`. The character class refusing it made the include
 # fail pipeline creation with "provided value does not match required RegEx
 # pattern", which is an input validation error and not a Jenkins error, so the
@@ -70,14 +70,13 @@ validation:
     Neither Vault, nor Jenkins, nor a runner was contacted at this revision. The
     job body has not been executed; there is no runtime-tested claim.
   notes: >-
-    Failure semantics (section 10.1): a failed Vault login, a missing credential
-    field, a missing CSRF crumb, a non-2xx response, a POST that returns no
-    queue item, or a parameters input that is not a JSON object each fail the
-    job. The Jenkins user and API token are written to a mode-0600 curl config
-    file rather than passed in argv. The Alpine package install of curl and jq
-    is not pinned; that gap is inherited from promote/jenkins-trigger.yml and is
-    recorded rather than claimed fixed. Status: experimental, and the one
-    consumer attempt never reached a runner: platform/infrastructure could not create a
-    pipeline at all, because job-path refused the leading underscore in
-    `_seed-all-dsl-jobs`. The regex is widened in 1.0.0; the job body, which
-    fires a live Jenkins build, has still never run.
+    Failure semantics (section 10.1): a failed Vault login, a missing credential field,
+    a missing CSRF crumb, a non-2xx response, a POST that returns no queue item, or a
+    parameters input that is not a JSON object each fail the job. The Jenkins user and
+    API token are written to a mode-0600 curl config file rather than passed in argv.
+    The Alpine package install of curl and jq is not pinned; that gap is inherited from
+    promote/jenkins-trigger.yml and is recorded rather than claimed fixed. Status:
+    experimental, and the one consumer attempt never reached a runner: a consumer could
+    not create a pipeline at all, because job-path refused the leading underscore in
+    `_seed-all-dsl-jobs`. The regex is widened in 1.0.0; the job body, which fires a
+    live Jenkins build, has still never run.
