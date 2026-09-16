@@ -373,7 +373,7 @@ def test_the_lint_payload_keeps_the_declared_stage_order():
     container-mirror declares `verify` then `publish`, and its mirror job needs
     the list job in the earlier stage. Alphabetical order puts `publish` first,
     and the API rejects a valid configuration with "need
-    rke2lab:container-list-rke2 is not defined in current or prior stages".
+    lab:container-list-rke2 is not defined in current or prior stages".
     """
     jobs, stages = ci_local.resolve_config(ci_local.fixture_path("container-mirror"), {})
     assert stages[0] == "verify" and "publish" in stages

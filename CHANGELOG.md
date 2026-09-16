@@ -3,6 +3,51 @@
 Release changes, migration instructions and deprecation deadlines for
 `platform/gitlab-ci-templates`. Dates are yyyy/mm/dd.
 
+## 1.1.1 — 2026/09/16
+
+One fix. The webhook reconcile step added in 1.1.0 could stop wiki edits
+reaching CI, which is the failure it exists to prevent.
+
+1.1.0 was superseded before publication; the public release is 1.1.1.
+
+### Fixed
+
+- **The reconcile step keeps the trigger token the webhook already carries**
+  and rewrites only the address around it. It creates one only when there is
+  none to keep: no webhook, or a webhook whose URL has no token.
+
+  1.1.0 had the component take ownership: it created a trigger token of its own
+  and wrote that into the hook. A pipeline started by a trigger token runs as
+  that token's OWNER and sees only the variables that identity can see. A
+  group-level protected `WIKI_TOKEN` is visible to a group member and not to a
+  project access token's bot, which belongs to the project alone. So on the
+  common setup, a group variable plus a project token, the first reconcile that
+  actually wrote replaced a working token with one whose owner could not see
+  `WIKI_TOKEN`. Every rule in the composition requires it, no job matched, and a
+  wiki edit produced a failed pipeline containing nothing.
+
+  Measured on a GitLab 18.9.1-ee server against one wiki-sync consumer: a
+  pipeline triggered through a project bot's token was created with zero jobs
+  and failed; the same commit and the same hook seconds later, triggered through
+  a group member's token, ran `docs:docs-wiki-sync` green. The difference was
+  the owner and nothing else.
+
+  The repair never needed to own anything. GitLab returns the hook URL verbatim,
+  token included, so the value is readable whoever created it. Migration, which
+  is the reason the step exists, only ever needed the scheme, host, project id
+  and branch rewritten around it.
+
+  A token this job does mint now says so in the log, because that case does
+  change the identity a wiki edit runs as.
+
+### Upgrading from 1.1.0
+
+Change your `ref` to `1.1.1`. If a 1.1.0 run already replaced your webhook's
+trigger token and wiki edits stopped producing jobs, point the webhook back at a
+trigger owned by a group member, or make `WIKI_TOKEN` a project variable;
+`docs/howto/docs-wiki-sync.md` has a section on it. 1.1.1 will then leave that
+token alone.
+
 ## 1.1.0 — 2026/09/16
 
 Two things ship in 1.1.0 and they are unrelated. The wiki sync repairs its own

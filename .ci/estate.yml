@@ -39,14 +39,14 @@ shared_ci:
   # is project-scoped, so the lint harness needs it; set GITLAB_PROJECT_ID to
   # override it without editing this file.
   project_id: 1
-  # The 1.1.0 tag, cut on the final commit of this release and protected by the
+  # The 1.1.1 tag, cut on the final commit of this release and protected by the
   # project's `1.*` protected-tag rule, so only a Maintainer can create or move
   # one. It is written here as the release is prepared: the tag does not exist
   # until that commit is on `main`, and a consumer that repins before then gets
   # "ref does not exist" from its include, not a silently wrong pipeline.
   #
   # Section 14.2 forbids `main`: a moving ref is not an approved ref.
-  approved_ref: 1.1.0
+  approved_ref: 1.1.1
   verified_at: 2026/09/16
 
 runners:

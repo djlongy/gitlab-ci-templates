@@ -139,7 +139,7 @@ server, and `--fixture` runs those same bytes locally:
 
 ```bash
 python3 tools/ci-local.py --fixture container-mirror --list
-python3 tools/ci-local.py --fixture container-mirror --job rke2lab:container-list-rke2 --show
+python3 tools/ci-local.py --fixture container-mirror --job lab:container-list-rke2 --show
 ```
 
 Keeping one set means the local loop and the gate cannot drift into disagreeing

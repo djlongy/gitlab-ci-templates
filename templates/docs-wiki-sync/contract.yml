@@ -122,6 +122,13 @@ validation:
     and a repository edit reached the wiki. The pull's own push to the default
     branch was skipped by its ci.skip, as designed.
   notes: >-
+    Webhook reconcile ownership (1.1.1): the step keeps the trigger token the
+    webhook already carries and rewrites only the address around it, minting one
+    only when there is none to keep. A trigger pipeline runs as its token's
+    owner, so replacing a working token changes which identity the delivery runs
+    as; on a group-level protected WIKI_TOKEN and a project access token, that
+    produced trigger pipelines containing no jobs at all, while the same hook
+    seconds later through a group member's token ran the sync green.
     Webhook reconcile failure semantics (section 10.1): the step's first call is
     a capability probe. An authorization failure there is a fact about the token
     rather than an outage, so the run names the variable and the scope it needs

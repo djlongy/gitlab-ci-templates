@@ -86,7 +86,7 @@ project path at a tag:
 ```yaml
 include:
   - project: '<group>/gitlab-ci-templates'
-    ref: '1.1.0'
+    ref: '1.1.1'
     file: '/pipelines/docs-wiki.yml'
     inputs:
       instance: docs
@@ -103,7 +103,7 @@ mirror at all:
 
 ```yaml
 include:
-  - remote: 'https://raw.githubusercontent.com/djlongy/gitlab-ci-templates/1.1.0/templates/docs-wiki-sync/template.yml'
+  - remote: 'https://raw.githubusercontent.com/djlongy/gitlab-ci-templates/1.1.1/templates/docs-wiki-sync/template.yml'
     inputs:
       instance: docs
       working-directory: 'docs'
@@ -134,7 +134,7 @@ Two limits to know before choosing (b):
 ```yaml
 include:
   - project: 'platform/gitlab-ci-templates'
-    ref: '1.1.0'
+    ref: '1.1.1'
     file: '/pipelines/docs-wiki.yml'
 ```
 

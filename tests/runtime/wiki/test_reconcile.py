@@ -1,16 +1,16 @@
 """Behaviour tests for runtime/wiki/reconcile.py.
 
 The fake server below is not invented. Every field and every quirk it models was
-read off a GitLab 18.9.1-ee server on 2026/09/16, with a group access token whose
-bot user is a Maintainer on the project:
+read off a GitLab 18.9.1-ee server on 2026/09/16, with a group access token
+whose bot user is a Maintainer on the project:
 
   * `GET /projects/:id/hooks` returns the hook URL verbatim, trigger token and
     all. It is not redacted, which is why the reconciler can compare the whole
     URL and so stay silent on a second run, and also why nothing here may print
     one.
   * `GET /projects/:id/triggers` returned an operator's token, created by the
-    instance administrator, as four characters; a token the calling identity had
-    just created came back at its full 26. That asymmetry is the whole reason the
+    instance administrator, as four characters; a token the calling identity had just
+    created came back at its full 26. That asymmetry is the whole reason the
     component insists on owning its own trigger token.
   * `POST /projects/:id/triggers` as that bot returned 201 with the bot's own
     `owner.id`, and `PUT /projects/:id/hooks/:hook` returned 200, so a Maintainer
@@ -44,6 +44,7 @@ PROJECT = "79"
 BOT = 6
 OPERATOR = 1
 OUR_TOKEN = "glptt-" + "a" * 20
+FOREIGN = "glptt-" + "f" * 20   # a token created by somebody else
 HOOK_URL = f"{API}/projects/{PROJECT}/ref/main/trigger/pipeline?token={OUR_TOKEN}"
 
 
@@ -80,6 +81,7 @@ class FakeGitLab:
         self.user_id = user_id
         self.statuses = statuses or {}
         self.writes = []
+        self.reads = []
         self.next_id = 100
 
     def install(self, monkeypatch):
@@ -92,6 +94,8 @@ class FakeGitLab:
         if forced:
             return FakeResponse(forced, {"message": "forced"})
 
+        if method == "GET":
+            self.reads.append(path)
         if method == "GET" and path == "/user":
             return FakeResponse(200, {"id": self.user_id, "username": "bot"})
         if method == "GET" and path == f"/projects/{PROJECT}/hooks":
@@ -144,11 +148,19 @@ def test_hook_missing_creates_the_trigger_and_the_hook(monkeypatch, capsys):
     output = capsys.readouterr().out
     assert "trigger  created" in output
     assert "webhook  created" in output
+    assert "runs as this job's own identity" in output
 
 
-def test_hook_on_an_old_hostname_is_repointed(monkeypatch, capsys):
-    stale = f"{OLD_API}/projects/{PROJECT}/ref/main/trigger/pipeline?token={OUR_TOKEN}"
-    server = FakeGitLab(hooks=[hook(url=stale)], triggers=[trigger()])
+def test_hook_on_an_old_hostname_is_repointed_with_its_own_token(monkeypatch, capsys):
+    """The address is rewritten around the token, which is copied untouched.
+
+    The token here belongs to the operator (`FOREIGN`), not to the identity the
+    job runs as. Replacing it is what broke project 79's pipeline 6080, so the
+    assertion that matters is that it survives the repair.
+    """
+    stale = f"{OLD_API}/projects/{PROJECT}/ref/main/trigger/pipeline?token={FOREIGN}"
+    server = FakeGitLab(hooks=[hook(url=stale)], triggers=[trigger(trigger_id=4, owner=OPERATOR,
+                                                                  token="6d05")])
     assert run(monkeypatch, server) == 0
 
     assert [(method, path) for method, path, _ in server.writes] == [
@@ -157,11 +169,49 @@ def test_hook_on_an_old_hostname_is_repointed(monkeypatch, capsys):
     patch = server.writes[0][2]
     assert list(patch) == ["url"], "only the drifted field is written"
     assert "gitlab.example.com" in patch["url"]
+    assert patch["url"].endswith(FOREIGN), "the operator's token is carried across"
 
     output = capsys.readouterr().out
-    assert "trigger  already present (id 7)" in output
+    assert "keeping the token the webhook already carries" in output
     assert "webhook  updated (id 58, url)" in output
     assert "gitlab.old.example" in output, "the log names the address it replaced"
+
+
+def test_a_foreign_token_is_never_swapped_for_one_this_job_owns(monkeypatch, capsys):
+    """No trigger is created, listed or reported when the hook supplies one.
+
+    A trigger pipeline runs as its token's owner. Swapping a group member's
+    token for a project bot's leaves the pipeline unable to see a group-level
+    protected WIKI_TOKEN, so it is created with no jobs and fails.
+    """
+    stale = f"{OLD_API}/x?token={FOREIGN}"
+    server = FakeGitLab(hooks=[hook(url=stale)], triggers=[trigger(trigger_id=4, owner=OPERATOR,
+                                                                  token="6d05")])
+    assert run(monkeypatch, server) == 0
+
+    assert not any(path.endswith("/triggers") for _, path, _ in server.writes)
+    assert server.reads.count(f"/projects/{PROJECT}/triggers") == 0, (
+        "the trigger list is not even fetched when the hook carries a token"
+    )
+    assert server.reads.count("/user") == 0
+    output = capsys.readouterr().out
+    assert "belongs to" not in output, "another identity's token is not drift"
+    assert FOREIGN not in output
+
+
+def test_a_hook_carrying_no_token_gets_one_minted(monkeypatch, capsys):
+    server = FakeGitLab(hooks=[hook(url=f"{API}/projects/{PROJECT}/ref/main/trigger/pipeline")],
+                        triggers=[])
+    assert run(monkeypatch, server) == 0
+
+    methods = [(method, path) for method, path, _ in server.writes]
+    assert methods == [
+        ("POST", f"/projects/{PROJECT}/triggers"),
+        ("PUT", f"/projects/{PROJECT}/hooks/58"),
+    ]
+    output = capsys.readouterr().out
+    assert "trigger  created" in output
+    assert "runs as this job's own identity" in output, "the identity change is announced"
 
 
 def test_hook_already_correct_writes_nothing(monkeypatch, capsys):
@@ -184,23 +234,23 @@ def test_a_flag_someone_turned_off_is_restored(monkeypatch):
     assert server.writes[0][2] == {"wiki_page_events": "true"}
 
 
-def test_an_operators_trigger_token_is_never_used_or_deleted(monkeypatch, capsys):
-    """GitLab shortens another user's token to four characters.
+def test_an_unreadable_operator_token_is_not_a_reason_to_mint(monkeypatch, capsys):
+    """GitLab shortens another user's trigger token to four characters.
 
-    Putting that stub into the hook URL would break the wiring while reporting
-    success, so the component makes its own and leaves the operator's alone.
+    Until 1.1.1 that was read as "unusable, so make my own", which changed the
+    identity a wiki edit's pipeline runs as and broke delivery. The value in the
+    hook URL is readable whoever owns it, so the shortened listing no longer
+    decides anything.
     """
     operators = trigger(trigger_id=4, owner=OPERATOR, token="6d05")
-    server = FakeGitLab(hooks=[hook(url="https://stale/x")], triggers=[operators])
+    stale = f"https://stale.example/projects/{PROJECT}/ref/main/trigger/pipeline?token={FOREIGN}"
+    server = FakeGitLab(hooks=[hook(url=stale)], triggers=[operators])
     assert run(monkeypatch, server) == 0
 
-    assert [method for method, _, _ in server.writes] == ["POST", "PUT"]
-    assert "DELETE" not in [method for method, _, _ in server.writes]
-    assert "6d05" not in server.writes[1][2]["url"]
-
-    output = capsys.readouterr().out
-    assert "belongs to root" in output
-    assert "will not delete it" in output
+    assert [method for method, _, _ in server.writes] == ["PUT"]
+    assert server.writes[0][2]["url"].endswith(FOREIGN)
+    assert "6d05" not in server.writes[0][2]["url"]
+    assert "belongs to root" not in capsys.readouterr().out
 
 
 def test_a_token_that_cannot_manage_hooks_reports_and_does_not_fail(monkeypatch, capsys):

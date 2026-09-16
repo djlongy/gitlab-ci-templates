@@ -61,7 +61,7 @@ The whole `.gitlab-ci.yml` of a project whose only pipeline is this:
 ```yaml
 include:
   - project: 'platform/gitlab-ci-templates'
-    ref: '1.1.0'
+    ref: '1.1.1'
     file: '/pipelines/docs-wiki.yml'
 ```
 
@@ -82,7 +82,7 @@ those cannot be merged:
 ```yaml
 include:
   - project: 'platform/gitlab-ci-templates'
-    ref: '1.1.0'
+    ref: '1.1.1'
     file: '/templates/docs-wiki-sync/template.yml'
     inputs:
       instance: docs
@@ -209,15 +209,35 @@ should have from the job's own environment, compares it with the hook that is
 there, and rewrites it on a difference. A migrated project repairs itself on its
 next push, and the job log names the address it replaced.
 
-Two details worth knowing:
+### Who owns the trigger
 
-- The component **owns its own trigger token**, identified by the description
-  `wiki-sync` and by being created by the identity the job authenticates as.
-  GitLab shows a trigger token's value in full only to the user who created it
-  and shortens everybody else's to four characters, so a token an operator
-  created by hand cannot be reused by the job. If it finds one, it makes its own
-  and says that yours is now unused. It never deletes it: that credential is not
-  the job's to remove.
+A pipeline started by a trigger token runs **as that token's owner**, and it
+sees only the variables that identity can see. This matters more than it sounds.
+
+If `WIKI_TOKEN` is a group-level variable and it is protected, then a group
+member's trigger token produces a pipeline that can see it, and the sync job
+runs. A project access token's bot belongs to the project and not to the group,
+so a trigger token owned by that bot produces a pipeline that cannot see it.
+Every rule in the composition requires `$WIKI_TOKEN`, so no job matches, and
+GitLab records a failed pipeline containing nothing at all.
+
+That is why the reconcile step keeps the token the webhook already carries and
+rewrites only the address around it. Repairing a hostname must not quietly
+change who the delivery runs as.
+
+It mints a token only when there is none to keep, meaning no webhook at all or a
+webhook whose URL has no token in it. The job log says so when that happens,
+because it does change the identity. If your `WIKI_TOKEN` is a protected
+group-level variable, check after that first run that a wiki edit still produces
+a pipeline with the sync job in it, and not an empty failed one.
+
+Two more details worth knowing:
+
+- The token in the webhook is **read from the webhook**, not from the trigger
+  list. GitLab shows a trigger token's value in full only to the user who
+  created it and shortens everybody else's to four characters, but it returns
+  the hook URL verbatim, so the value is usable whoever owns it. The step never
+  creates, changes or deletes a trigger token that is already doing its job.
 - It recognises **its webhook by name**, not by URL, since the URL is the thing
   being repaired. Do not rename the `wiki-sync` webhook in the UI. If you do, the
   next run creates a second one and you will get two pipelines per wiki edit.
@@ -280,6 +300,7 @@ calls only your own GitLab server.
 | `webhook not reconciled: GET /projects/…/hooks returned HTTP 403` | The token is not Maintainer, or lacks the `api` scope. | Grant `api` and Maintainer, or put an `api` token in `WIKI_ADMIN_TOKEN`, or set `webhook-reconcile: off`. The job keeps syncing meanwhile; only the self-repair is off. |
 | `ERROR: pyyaml is missing and pip could not install it` | A shell executor on a host with no pyyaml and no reachable Python index. | Install the OS package on the runner host, or set `PIP_INDEX_URL` and, for a plain-HTTP mirror, `PIP_TRUSTED_HOST`. |
 | `image name can't be blank` when creating the pipeline | `executor` is `docker` but `execution-image` was set to an empty value. | Either pass an image reference, or set `executor: shell`, which renders no `image:` key at all. |
+| A wiki edit creates a pipeline that fails with **no jobs in it** | The trigger token's owner cannot see `WIKI_TOKEN`, so no rule matches. Usually a group-level protected variable and a trigger owned by a project access token bot. | Point the webhook back at a trigger token owned by a group member, or make `WIKI_TOKEN` a project variable. See [Who owns the trigger](#who-owns-the-trigger). |
 | The job fails pushing to the default branch | The branch is protected and the token's user is not allowed to push to it. | Allow the token's user to push, or make it Maintainer. |
 | It worked, then stopped months later | The access token expired. | Rotate it. GitLab emails before expiry; the sync gives no other warning. |
 | A wiki edit was overwritten by the repository version | Both sides changed the same lines and the repository edit was newer. | The wiki edit is not lost: it is in the wiki's own history. Re-apply it, or edit `docs/`, which is the source of truth. |

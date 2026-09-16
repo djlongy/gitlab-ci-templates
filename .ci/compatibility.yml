@@ -79,6 +79,34 @@ runner_behaviour:
       resumed environment whose build container already exists. Not yet
       exercised by a consumer pipeline: no component's evidence label changes
       for it.
+  - subject: pipeline trigger tokens, the identity a triggered pipeline runs as
+    measured_at: 2026/09/16
+    finding: >-
+      A pipeline created through the trigger API runs as the trigger token's
+      OWNER and sees only the CI variables that identity can see. A group-level
+      protected variable is visible to a group member and not to a project
+      access token's bot, which is a member of the project alone; asking the
+      group members API for such a bot returns 404. Measured against a wiki-sync
+      consumer on the originating estate, 2026/09: a pipeline triggered through
+      a project bot's token was created with ZERO jobs and failed, because every
+      run-rule of docs-wiki-sync requires $WIKI_TOKEN and the pipeline could not
+      see it; the same commit and the same webhook seconds later, triggered
+      through a group member's token, ran docs:docs-wiki-sync green. The failure
+      is silent in the sense that matters: the webhook still delivers, GitLab
+      still creates a pipeline, and the sync simply never runs.
+    response: >-
+      1.1.1 makes the webhook reconcile step keep whatever trigger token the
+      hook already carries and rewrite only the address around it, minting one
+      only when the hook has none. GET /hooks returns the URL verbatim, token
+      included, so the value is usable whoever owns it and the repair never
+      needs to change the identity. Proven on the same consumer at the fix
+      commit: the hook was pointed at a dead host while carrying a group
+      member's token, the next run rewrote the host and preserved the token
+      ("keeping the token the webhook already carries"), a further run on the
+      same commit reported "webhook already correct", and the hook test then
+      returned 201 and created a trigger pipeline with docs:docs-wiki-sync
+      green. Under 1.1.0 the same test returned 422 and a zero-job failed
+      pipeline.
   - subject: execution image user, every image the components pin
     measured_at: 2026/09/16
     finding: >-

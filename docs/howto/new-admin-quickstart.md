@@ -33,7 +33,7 @@ checkout under your home directory.
 GIT_CONFIG_GLOBAL=/dev/null python3 -m pytest -q tests/contracts/ tests/runtime/ tests/tools/
 ```
 
-Expect `1608 passed, 4 skipped, 1 xfailed`; the count grows as components land.
+Expect `1610 passed, 4 skipped, 1 xfailed`; the count grows as components land.
 `tests/pipelines/` is left out because it needs a GitLab server; step 6 covers
 it.
 

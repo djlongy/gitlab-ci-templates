@@ -256,8 +256,18 @@ def test_this_repositorys_own_pipeline_compiles_with_the_audit_components():
     they are resolved here and the result is linted. On the default-branch push
     the dry run simulates, the self-test jobs are created and neither audit is:
     both are schedule-or-web, which is the gating the old jobs had.
+
+    A copy of this library whose own pipeline includes nothing has no such
+    composition to compile, so there is nothing here to assert. That is the shape
+    of the public copy, which ships without the scheduled estate audits, and it
+    skips rather than failing on a missing key.
     """
     config = yaml.safe_load((REPO_ROOT / ".gitlab-ci.yml").read_text())
+    if "include" not in config:
+        pytest.skip(
+            "this repository's .gitlab-ci.yml carries no `include:`, so it composes "
+            "none of its own components and there is no merged configuration to lint"
+        )
     includes = config.pop("include")
     for entry in includes:
         component = Path(entry["local"]).parent.name
