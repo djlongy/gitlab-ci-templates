@@ -3,6 +3,9 @@
 #
 # Section 6.3. The catalogue generator reads this plus the spec:inputs header
 # of docs-wiki.yml; do not restate inputs here.
+#
+# Consumer guide, for a reader who has never seen this repository:
+# docs/howto/docs-wiki-sync.md.
 name: docs-wiki
 kind: pipeline
 status: released
@@ -17,7 +20,16 @@ required_secrets:
   - name: WIKI_TOKEN
     kind: ci-variable
     scope: write_repository on the project, Maintainer when the default branch is protected.
-      Clones and pushes the wiki, and pushes pulled wiki edits to the default branch.
+      Clones and pushes the wiki, and pushes pulled wiki edits to the default branch. Also the
+      fallback identity for the webhook-reconcile step, which needs api rather than
+      write_repository.
+    protected_ref_required: false
+  - name: WIKI_ADMIN_TOKEN
+    kind: ci-variable
+    scope: api on the project, Maintainer role. Optional, and used only by the
+      webhook-reconcile step to list and write the project's webhooks and pipeline trigger
+      tokens. Set it when WIKI_TOKEN should stay at write_repository; absent, the step falls
+      back to WIKI_TOKEN and reports the shortfall instead of failing.
     protected_ref_required: false
 runtime_image:
   reference: 'per component: the include forwards execution-image, whose default is

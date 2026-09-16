@@ -29,8 +29,11 @@ import yaml
 
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(HERE.parent.parent))
 
-import composition  # noqa: E402
+# The resolvers live in tools/resolve/ so the lint harness and the local
+# runner share one implementation; see that package's docstring.
+from tools.resolve import composition  # noqa: E402
 
 REPO_ROOT = HERE.parent.parent
 PIPELINES = REPO_ROOT / "pipelines"

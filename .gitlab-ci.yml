@@ -29,6 +29,14 @@ validate:templates:
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
     - if: '$CI_COMMIT_BRANCH == "main"'
+  # Infrastructure only, the same condition every component in templates/ sets
+  # and tests/contracts/test_retry_policy.py enforces. A registry blip pulling
+  # the job's image failed this pipeline once (embedded-runtime, 2026/09/16,
+  # "TLS handshake timeout" on docker.io/library/python:3.12); any condition
+  # other than runner_system_failure would retry a real failure instead.
+  retry:
+    max: 1
+    when: [runner_system_failure]
 
 # Estate profile schema, catalogue drift, and the component contract schema.
 contracts:
@@ -40,6 +48,14 @@ contracts:
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
     - if: '$CI_COMMIT_BRANCH == "main"'
+  # Infrastructure only, the same condition every component in templates/ sets
+  # and tests/contracts/test_retry_policy.py enforces. A registry blip pulling
+  # the job's image failed this pipeline once (embedded-runtime, 2026/09/16,
+  # "TLS handshake timeout" on docker.io/library/python:3.12); any condition
+  # other than runner_system_failure would retry a real failure instead.
+  retry:
+    max: 1
+    when: [runner_system_failure]
 
 # Merged-configuration lint through the CI Lint API.
 #
@@ -63,6 +79,14 @@ pipelines-lint:
     - python3 -m pytest -q tests/pipelines/
   rules:
     - if: '$GITLAB_TOKEN'
+  # Infrastructure only, the same condition every component in templates/ sets
+  # and tests/contracts/test_retry_policy.py enforces. A registry blip pulling
+  # the job's image failed this pipeline once (embedded-runtime, 2026/09/16,
+  # "TLS handshake timeout" on docker.io/library/python:3.12); any condition
+  # other than runner_system_failure would retry a real failure instead.
+  retry:
+    max: 1
+    when: [runner_system_failure]
 
 # A component include imports YAML, so each template carries the runtime its job
 # executes. This fails the pipeline when a template and runtime/ have drifted,
@@ -75,6 +99,14 @@ embedded-runtime:
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
     - if: '$CI_COMMIT_BRANCH == "main"'
+  # Infrastructure only, the same condition every component in templates/ sets
+  # and tests/contracts/test_retry_policy.py enforces. A registry blip pulling
+  # the job's image failed this pipeline once (embedded-runtime, 2026/09/16,
+  # "TLS handshake timeout" on docker.io/library/python:3.12); any condition
+  # other than runner_system_failure would retry a real failure instead.
+  retry:
+    max: 1
+    when: [runner_system_failure]
 
 # The components in templates/ ship the runtime their jobs execute, so this repo
 # owns its tests: the wiki tools, the audit scripts and the embedding.
@@ -93,6 +125,36 @@ runtime-tests:
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
     - if: '$CI_COMMIT_BRANCH == "main"'
+  # Infrastructure only, the same condition every component in templates/ sets
+  # and tests/contracts/test_retry_policy.py enforces. A registry blip pulling
+  # the job's image failed this pipeline once (embedded-runtime, 2026/09/16,
+  # "TLS handshake timeout" on docker.io/library/python:3.12); any condition
+  # other than runner_system_failure would retry a real failure instead.
+  retry:
+    max: 1
+    when: [runner_system_failure]
+
+# tools/ci-local.py runs a component job locally. Its resolver and its
+# environment assembly decide what the container executes, so they are tested
+# here. No docker: tests/tools/ asserts the script, the image and the variables,
+# not that alpine can run sh.
+tools-tests:
+  stage: verify
+  image: python:3.12
+  script:
+    - pip install -q pyyaml pytest
+    - python3 -m pytest -q tests/tools/
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+  # Infrastructure only, the same condition every component in templates/ sets
+  # and tests/contracts/test_retry_policy.py enforces. A registry blip pulling
+  # the job's image failed this pipeline once (embedded-runtime, 2026/09/16,
+  # "TLS handshake timeout" on docker.io/library/python:3.12); any condition
+  # other than runner_system_failure would retry a real failure instead.
+  retry:
+    max: 1
+    when: [runner_system_failure]
 
 # Cut the GitLab Release for a version tag.
 #

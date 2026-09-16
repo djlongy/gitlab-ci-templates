@@ -66,6 +66,18 @@ spec:
         the repository root mkdocs.yml when one exists, and no filtering
         otherwise.
       default: ''
+    webhook-reconcile:
+      type: string
+      description: >-
+        Whether the sync job repairs its own wiki webhook and pipeline trigger
+        token on each default-branch run, so a project that is renamed, moved or
+        migrated to another server name keeps delivering wiki edits to CI
+        without anyone re-running the bootstrap script. Needs a token with the
+        api scope and the Maintainer role in WIKI_ADMIN_TOKEN, or failing that
+        in WIKI_TOKEN; a narrower token is reported and the wiring is left
+        alone.
+      default: 'on'
+      options: ['on', 'off']
     runner-tags:
       type: array
       description: Approved runner selection from the estate profile.
@@ -116,6 +128,7 @@ include:
       working-directory: $[[ inputs.working-directory ]]
       mkdocs-config: $[[ inputs.mkdocs-config ]]
       executor: $[[ inputs.executor ]]
+      webhook-reconcile: $[[ inputs.webhook-reconcile ]]
       execution-image: $[[ inputs.execution-image ]]
       runner-tags: $[[ inputs.runner-tags ]]
       run-rules:

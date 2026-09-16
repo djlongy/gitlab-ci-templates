@@ -28,9 +28,13 @@ import yaml
 
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(HERE.parent.parent))
 
 import compose_fixture as cf  # noqa: E402
-import render_component as rc  # noqa: E402
+
+# The resolvers live in tools/resolve/ so the lint harness and the local
+# runner share one implementation; see that package's docstring.
+from tools.resolve import render_component as rc  # noqa: E402
 
 REPO_ROOT = HERE.parent.parent
 TEMPLATES = REPO_ROOT / "templates"

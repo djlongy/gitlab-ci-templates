@@ -5,10 +5,12 @@ Release changes, migration instructions and deprecation deadlines for
 
 ## 1.1.0 — 2026/09/16
 
-The wiki sync runs on a shell executor with no registry, no image and no
-internet. One new input, one widened regex, and one dependency pin that had to
-change to make either useful. `executor` defaults to `docker`, so a consumer
-that changes nothing renders the job it rendered before.
+Two things ship in 1.1.0 and they are unrelated. The wiki sync repairs its own
+webhook and trigger token instead of depending on a one-time bootstrap script,
+and it can run on a shell-executor runner with no registry, no image and no
+internet. Two new inputs, one new optional variable, one widened regex and one
+dependency pin that had to change. Every default is unchanged: a consumer on
+1.0.1 upgrades by changing the `ref` and gets the job it had.
 
 ### Added
 
@@ -20,9 +22,72 @@ that changes nothing renders the job it rendered before.
   GitLab cannot omit a key conditionally and an empty value is not absence.
   `image: ''` and `image: {name: ''}` are both rejected with
   `image name can't be blank`, measured against
-  `the CI Lint API` on 18.9.1-ee. The component therefore
+  `POST /api/v4/projects/:id/ci/lint` on 18.9.1-ee. The component therefore
   carries two hidden parents, one with `image:` and one without, and the job
   extends whichever the input names.
+
+- **`docs-wiki-sync` reconciles its own webhook and pipeline trigger token on
+  every default-branch run**, gated by the new `webhook-reconcile` input
+  (`on` | `off`, default `on`) on both the component and the `docs-wiki`
+  composition. Quote the value in your `.gitlab-ci.yml`: bare `off` is the YAML
+  boolean `false`, which GitLab rejects with ``` `false` cannot be used because
+  it is not in the list of allowed options ```.
+
+  The path a wiki edit travels to reach CI is a project setting, not a file in
+  the repository: a webhook on wiki page events whose URL is that project's
+  pipeline trigger endpoint, carrying a trigger token. Rename the project, move
+  it to another group, change the default branch, or migrate the estate to a
+  different server name, and that URL stops resolving to the project. Nothing
+  fails. The hourly schedule keeps the sync job green while wiki edits quietly
+  stop arriving, and the only repair was for somebody to remember to re-run
+  `wiki-bootstrap.sh`. That does not scale to an estate, which is the point of
+  this release.
+
+  The step builds the URL the hook must have from the job's own
+  `CI_API_V4_URL`, `CI_PROJECT_ID` and `CI_DEFAULT_BRANCH`, compares, and writes
+  only on a difference. A second run reports `webhook already correct` and
+  writes nothing.
+
+  Two measured GitLab 18.9 behaviours shape it. `GET /projects/:id/hooks`
+  returns the hook URL with its trigger token in clear, so the whole URL can be
+  compared, and so no line the job prints may carry a URL unelided.
+  `GET /projects/:id/triggers` shortens a token created by another user to four
+  characters, so a token an operator created by hand cannot be reused: the
+  component creates and owns its own, identified by the description `wiki-sync`
+  and by its owner, and reports an operator's leftover token rather than
+  deleting a credential that is not its to delete. It recognises its webhook by
+  the `name` field, `wiki-sync`, because the URL is the thing being repaired.
+
+- **`WIKI_ADMIN_TOKEN`**, optional. The reconcile step needs the `api` scope,
+  which the sync itself does not: `write_repository` is enough to move the wiki
+  and the branch. A project that would rather keep `WIKI_TOKEN` narrow puts an
+  `api`-scope Maintainer token here instead. Absent, the step falls back to
+  `WIKI_TOKEN`.
+
+- **`docs/howto/docs-wiki-sync.md`** and **`docs/howto/consuming-the-library.md`**,
+  both written for a reader who has never seen this repository. The first covers
+  adopting the wiki sync end to end: what it mirrors and how conflicts resolve,
+  the three-line include, every input, the token and its scope, verification,
+  rolling it out across many repositories, and a troubleshooting table. The
+  second explains why components and compositions are separate, the naming
+  grammar, when to include which, why `ref: main` is refused, and what
+  `.ci/estate.yml` and `.ci/project.yml` are for. Both are linked from
+  `README.md`. The wiki-sync guide covers both of this release's inputs,
+  including what a shell executor changes and how pyyaml is resolved on a host
+  with no index.
+
+- **`tools/ci-local.py`**, which runs one component job's script in the image the
+  component pins, against a local checkout. It resolves the job through
+  `tools/resolve/`, the same package the CI Lint tests render with, so a local
+  render is the harness's own answer rather than a second implementation. The
+  resolvers moved out of `tests/pipelines/` into `tools/resolve/` for that
+  reason; nothing about what they resolve changed.
+
+- **`docs/howto/local-testing.md`** and **`docs/howto/new-admin-quickstart.md`**.
+  The first sets out the three tiers of local check, what each proves, and the
+  long list of things a green local run is silent about. The second is a
+  numbered walkthrough from `git clone` to a cut release, every command run from
+  a fresh clone.
 
 ### Changed
 
@@ -47,9 +112,32 @@ that changes nothing renders the job it rendered before.
   hosts it was meant to protect. The runtime's tests now run under 3.9 as well
   as 3.12.
 
+- **`runtime/wiki/wiki-bootstrap.sh` now runs the same reconcile code the job
+  runs**, so the first-time path and the self-healing path cannot disagree. It
+  keeps creating the hourly safety-net schedule, which the job does not touch.
+
+- **The bootstrap script no longer adds the project to the templates project's
+  job-token allowlist.** That step existed so a job could clone this repository
+  for its scripts at run time. Components have carried their runtime embedded
+  since 1.0.0, so nothing clones anything, and the step only widened an
+  allowlist for no reason.
+
 ### Upgrading from 1.0.1
 
-Nothing to do. The two new shapes are opt-in and every default is unchanged.
+Change your `ref` to `1.1.0`. Both new shapes are opt-in and every default is
+unchanged, so for most consumers there is nothing else to do.
+
+Two exceptions. If your `WIKI_TOKEN` has only `write_repository`, the webhook
+reconcile step says so and leaves your webhook alone; the sync keeps working
+exactly as it did. To get the self-repair, widen that token to `api` or set
+`WIKI_ADMIN_TOKEN`. To decline it, pass `webhook-reconcile: 'off'`. And if your
+runners are shell executors, pass `executor: shell`, which renders the job with
+no `image:` key at all.
+
+Failure semantics for the reconcile step: its first API call is a capability
+probe, and an authorization failure there is reported rather than fatal. Every
+API failure after that probe fails the job.
+
 
 ## 1.0.1 — 2026/09/16
 

@@ -48,7 +48,18 @@ python3 tests/pipelines/lint.py path/to/.gitlab-ci.yml
 # Runtime helper tests, and the drift gate for the runtime the templates carry
 # (regenerate it with: python3 runtime/embed/generate.py --write).
 GIT_CONFIG_GLOBAL=/dev/null python3 -m pytest -q tests/runtime/
+
+# Run one component job's script in the image the component pins. This one DOES
+# execute: it is the only command here that does, and it executes one job
+# against a local checkout, never a pipeline.
+python3 tools/ci-local.py --template <component> --input instance=demo \
+  --job demo:<component> --checkout ~/src/<consumer>
 ```
+
+`docs/howto/local-testing.md` is the guide to that loop: the three tiers, what
+each proves, and the long list of things a green local run is silent about.
+Nothing there replaces the one real consumer pipeline run a component needs
+before it can be called `released`.
 
 The CI Lint API will not accept `CI_JOB_TOKEN`: it is not on that token's
 [documented resource allowlist](https://docs.gitlab.com/ci/jobs/ci_job_token/).

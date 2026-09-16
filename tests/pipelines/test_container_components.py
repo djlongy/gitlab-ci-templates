@@ -22,11 +22,13 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import sys
 from pathlib import Path
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO_ROOT))
 TEMPLATES = REPO_ROOT / "templates"
 BUILDKIT = TEMPLATES / "container-build-buildkit" / "template.yml"
 KO = TEMPLATES / "container-build-ko" / "template.yml"
@@ -45,7 +47,10 @@ def load(name: str, filename: str):
 
 
 lint_module = load("ci_lint", "lint.py")
-render = load("render_component", "render_component.py")
+
+# render_component moved to tools/resolve/ so the lint harness and the local
+# runner share one implementation; `load()` still reaches lint.py beside this file.
+from tools.resolve import render_component as render  # noqa: E402
 
 needs_token = pytest.mark.skipif(
     not os.environ.get("GITLAB_TOKEN"),

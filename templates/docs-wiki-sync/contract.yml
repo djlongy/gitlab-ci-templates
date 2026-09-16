@@ -1,4 +1,8 @@
 ---
+# Consumer guide, written for a reader who has never seen this repository:
+# docs/howto/docs-wiki-sync.md — adoption, the token and its scope, the webhook,
+# how to verify a first run, rolling it out across many repositories, and a
+# troubleshooting table.
 name: docs-wiki-sync
 kind: component
 status: released
@@ -26,7 +30,20 @@ required_secrets:
     scope: >-
       write_repository on the project, Maintainer when the default branch is
       protected. Clones and pushes the wiki, and pushes pulled wiki edits to the
-      default branch.
+      default branch. It is also the fallback identity for the webhook reconcile
+      step, which needs api rather than write_repository; a project that does not
+      want to widen this token sets WIKI_ADMIN_TOKEN instead.
+    protected_ref_required: false
+  - name: WIKI_ADMIN_TOKEN
+    kind: ci-variable
+    # Optional. Absent, the reconcile step falls back to WIKI_TOKEN and reports
+    # the shortfall rather than failing, so a consumer upgrading to 1.1.0 with a
+    # write_repository token is told what to grant and keeps syncing meanwhile.
+    scope: >-
+      api on the project, Maintainer role. Used only by the webhook-reconcile
+      step, to list and write the project's webhooks and pipeline trigger tokens.
+      Separate from WIKI_TOKEN because api can do anything its user can and the
+      sync itself needs no more than write_repository.
     protected_ref_required: false
 
 # The default, and what `executor: docker` runs. `executor: shell` emits no
@@ -62,8 +79,25 @@ validation:
     - runtime-tested
     - integration-tested
   verified_at: 2026/09/16
-  revision: '1.0.0-rc.2'
+  revision: '1.1.0'
   environment: >-
+    Webhook reconcile (1.1.0) executed against a GitLab 18.9.1-ee server on the
+    originating estate, 2026/09, on one wiki-sync consumer, authenticated as the
+    same kind of identity the job itself uses: a group access token bot holding
+    the Maintainer role. That project's existing hook carried an invalid trigger
+    token. The first run created a trigger token owned by that bot, rewrote the
+    hook URL, and reported an operator's leftover trigger token, which it cannot
+    read and did not delete; the second run wrote nothing and reported "webhook
+    already correct". Firing the hook's own wiki_page_events test then returned
+    201 and created a pipeline whose source was `trigger`, so the repaired wiring
+    delivers. Two behaviours measured on the same server and relied on by the
+    implementation: GET /hooks returns the hook URL with its trigger token in
+    clear, and GET /triggers shortens a token created by another user to four
+    characters. That run exercised runtime/wiki/reconcile.py through
+    runtime/wiki/wiki-bootstrap.sh; the component's own job has not yet run it on
+    a default branch, which needs a consumer pinned at a ref carrying 1.1.0.
+
+    Earlier evidence, for the sync itself:
     gitlab.example.com 18.9.1-ee, POST /api/v4/projects/:id/ci/lint. Executed on shared
     ref 1.0.0-rc.2 by consumer pipelines on the originating estate, 2026/09: three
     wiki-sync consumers, all three docs:docs-wiki-sync green, and a documentation
@@ -88,6 +122,15 @@ validation:
     and a repository edit reached the wiki. The pull's own push to the default
     branch was skipped by its ci.skip, as designed.
   notes: >-
+    Webhook reconcile failure semantics (section 10.1): the step's first call is
+    a capability probe. An authorization failure there is a fact about the token
+    rather than an outage, so the run names the variable and the scope it needs
+    and leaves the wiring untouched; every API failure after that probe fails the
+    job. It writes only on a difference, so a second run reports "already
+    correct" and touches nothing, and it runs only on the default branch, since
+    a URL built from a feature branch would point the hook at a ref that is about
+    to disappear. It never deletes a trigger token belonging to another user and
+    never prints a token, including the one inside the hook URL.
     Failure semantics (section 10.1): a missing WIKI_TOKEN excludes the job
     through run-rules rather than failing it; once the job runs, an absent token,
     an unreachable wiki, a rejected push after the bounded retries, a payload
