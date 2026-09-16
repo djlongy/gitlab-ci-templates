@@ -42,7 +42,8 @@ CHECKOUT_PATH = re.compile(r"\$CI_PROJECT_DIR/(?!\.ci-artifacts)")
 def parts(component: str) -> tuple[dict, dict]:
     parsed = list(yaml.safe_load_all((TEMPLATES_DIR / component / "template.yml").read_text()))
     assert len(parsed) == 2, "a component is exactly two documents: spec, then jobs"
-    jobs = parsed[1]
+    # A name starting with `.` is a hidden parent, not a job a consumer gets.
+    jobs = {name: job for name, job in parsed[1].items() if not name.startswith(".")}
     assert len(jobs) == 1, f"{component} emits {len(jobs)} jobs"
     return parsed[0]["spec"]["inputs"], next(iter(jobs.values()))
 

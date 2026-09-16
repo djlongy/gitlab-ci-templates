@@ -201,7 +201,7 @@ def test_a_source_only_job_declares_no_incidental_artifact_downloads(component):
     jobs = resolve_component.resolve(
         component, instance="example", **REQUIRED[component]
     )
-    (job,) = jobs.values()
+    (job,) = resolve_component.public(jobs).values()
     assert job["dependencies"] == []
     assert "needs" not in job
 
@@ -290,7 +290,7 @@ def test_artifacts_stay_under_the_components_own_root(component):
     three complete clones, state files included — and every other template wrote
     bare repo-root filenames that two instances would collide on."""
     jobs = resolve_component.resolve(component, instance="example", **REQUIRED[component])
-    (job,) = jobs.values()
+    (job,) = resolve_component.public(jobs).values()
     artifacts = job.get("artifacts")
     if artifacts is None:
         return
@@ -299,19 +299,87 @@ def test_artifacts_stay_under_the_components_own_root(component):
     assert "example" in artifacts["name"] and component in artifacts["name"]
 
 
-def test_the_wiki_job_installs_only_hash_pinned_dependencies():
-    """Section 12. The old job ran `pip install -q pyyaml`: no version, no hash,
-    so the artefact it installed was whatever the index served that minute."""
-    jobs = resolve_component.resolve("docs-wiki-sync", instance="example")
-    (job,) = jobs.values()
-    install = [step for step in job["before_script"] if "pip install" in step]
-    assert len(install) == 1, install
-    assert "--require-hashes" in install[0]
-    assert "--no-deps" in install[0]
+def wiki_job(**inputs) -> dict:
+    jobs = resolve_component.resolve("docs-wiki-sync", instance="example", **inputs)
+    (job,) = resolve_component.public(jobs).values()
+    return job
+
+
+def test_the_wiki_job_reaches_the_network_for_pyyaml_only_as_a_last_resort():
+    """Section 12, as amended by standard 1.0.5.
+
+    The old job ran `pip install -q pyyaml`: no version, so the artefact was
+    whatever the index served that minute. What replaced it required hashes for
+    the three artefacts CPython 3.12 could resolve, which is unreachable on a
+    shell executor running the host's 3.9. The order below is what survives
+    both: use what is installed, then an index the estate configured, then say
+    which of the two to fix.
+    """
+    steps = [s for s in wiki_job()["before_script"] if "pyyaml" in s]
+    assert len(steps) == 1, steps
+    # Commands only. The requirements file is embedded into this same step and
+    # its comments name what the job no longer does.
+    body = "\n".join(
+        line for line in steps[0].splitlines() if not line.strip().startswith("#")
+    )
+    assert body.index("import yaml") < body.index("pip install"), (
+        "the job must try the installed interpreter before any index"
+    )
+    (install,) = [line for line in body.splitlines() if "pip install" in line]
+    assert "--user" in install and '-r "$CI_TPL_RUNTIME_DIR/requirements.txt"' in install
+    assert "--require-hashes" not in install, install
+    error = body[body.index("ERROR:"):]
+    assert "python3-pyyaml" in error and "PIP_INDEX_URL" in error, error
 
     requirements = (REPO_ROOT / "runtime" / "wiki" / "requirements.txt").read_text()
     assert "pyyaml==6.0.2" in requirements
-    assert requirements.count("--hash=sha256:") >= 1
+
+
+def test_the_wiki_job_carries_no_image_on_a_shell_executor():
+    """Standard 1.0.5. A shell executor ignores `image:`; the job must not
+    render one, because an empty value is not absence -- GitLab rejects both
+    `image: ''` and `image: {name: ''}` with "image name can't be blank"."""
+    job = wiki_job(executor="shell", **{"execution-image": ""})
+    assert "image" not in job
+    assert job["extends"] == ".ci:example:docs-wiki-sync:shell"
+
+
+@pytest.mark.parametrize(
+    "reference",
+    [
+        "docker.io/python@sha256:" + "c" * 64,
+        "registry.internal:5000/python:3.9",
+        "python:3.9",
+    ],
+)
+def test_the_wiki_job_accepts_a_digest_or_a_tag_on_a_docker_executor(reference):
+    """Digest is preferred and is the default; a site whose internal mirror
+    cannot serve one is not thereby excluded from the sync."""
+    job = wiki_job(executor="docker", **{"execution-image": reference})
+    assert job["extends"] == ".ci:example:docs-wiki-sync:docker"
+    declared, body = resolve_component.load_template("docs-wiki-sync")
+    base = body[".ci:$[[ inputs.instance ]]:docs-wiki-sync:docker"]
+    assert base["image"]["name"] == "$[[ inputs.execution-image ]]"
+
+
+@pytest.mark.parametrize("reference", ["python:3.9 ; id", "python 3.9", "$(id)"])
+def test_the_execution_image_still_refuses_a_value_that_is_not_a_reference(reference):
+    with pytest.raises(resolve_component.InputError):
+        wiki_job(executor="docker", **{"execution-image": reference})
+
+
+def test_only_the_two_executor_shapes_exist():
+    """The hidden parents are the component's private API; a third would be a
+    shape no contract describes."""
+    _, body = resolve_component.load_template("docs-wiki-sync")
+    hidden = sorted(name for name in body if name.startswith("."))
+    assert hidden == [
+        ".ci:$[[ inputs.instance ]]:docs-wiki-sync:docker",
+        ".ci:$[[ inputs.instance ]]:docs-wiki-sync:shell",
+    ], hidden
+    declared, _ = resolve_component.load_template("docs-wiki-sync")
+    assert declared["executor"]["options"] == ["docker", "shell"]
+    assert declared["executor"]["default"] == "docker"
 
 
 def test_the_semaphore_trigger_defaults_to_dry_run():

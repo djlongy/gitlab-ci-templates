@@ -1863,11 +1863,25 @@ components:
         description: mkdocs.yml to read exclude_docs / not_in_nav from. Empty means the repository
           root mkdocs.yml when one exists, and no filtering otherwise.
         default: ''
+      executor:
+        type: string
+        description: 'Which runner executor the job is going to land on. `docker` puts `execution-image`
+          in the job''s `image:`; `shell` emits no `image:` key at all, because a shell executor
+          ignores one and the job then runs on the host''s own python3, git and tar. Section
+          12: the estate prefers a digest-pinned image, and a site with no reachable registry
+          is not thereby excluded from the sync.'
+        default: docker
+        options:
+          - docker
+          - shell
       execution-image:
         type: string
-        description: Approved Python execution image pinned by digest. Needs python3, pip,
-          git, tar, base64 and sha256sum.
-        regex: ^.+@sha256:[0-9a-f]{64}$
+        description: Python execution image, ignored when `executor` is `shell`. Needs python3,
+          pip, git, tar, base64 and sha256sum. A digest is the estate's preferred form and
+          the default; `name:tag` is accepted for a site whose internal mirror cannot serve
+          a digest, and an empty value for a shell executor that will not pull an image at
+          all.
+        regex: ^$|^[A-Za-z0-9][A-Za-z0-9._\-/:]*$|^[A-Za-z0-9][A-Za-z0-9._\-/:]*@sha256:[0-9a-f]{64}$
         default: docker.io/python@sha256:cd7c412d000912f29075a1b8803e43cb2f38bb67f104019df526df5ceaf30569
       runner-tags:
         type: array
@@ -1920,9 +1934,13 @@ components:
       privileged: false
       network_egress:
         - gitlab.example.com
-        - registry.example.com
-        - the configured Python package index
-      runner_profile: shared-docker
+        - registry.example.com, only when executor is docker
+        - the configured Python package index, only when python3 cannot already import yaml.
+          PIP_INDEX_URL and PIP_TRUSTED_HOST are read from the job environment; with neither
+          set and no OS package present the job fails with a message naming both options rather
+          than reaching pypi.org.
+      runner_profile: 'shared-docker by default. `executor: shell` also supports a shell-executor
+        runner, where the job runs as the runner''s own user on the host.'
       protected_ref_required: false
     validation:
       evidence:
@@ -1939,14 +1957,28 @@ components:
         consumer on its merge-request, default-branch and scheduled pipelines. Both directions
         ran: the pull step reached its decision and reported "wiki has no edits since the
         last sync", which rc.1 skipped entirely through a swallowed failure. Importing an
-        actual wiki edit has still not been exercised in a pipeline.'
+        actual wiki edit has still not been exercised in a pipeline.
+
+        Executed on a shell-executor runner on the originating estate, 2026/09: a throwaway
+        project runner on EL9 with python 3.9 and gitlab-runner 19.3, tagged and refusing
+        untagged jobs, against a documentation consumer pinned to the branch carrying this
+        change. Six pipelines, in this order. The job renders with no image and the runner
+        logs "Preparing the shell executor", "Using Shell (bash) executor" and the host''s
+        python version. The three pyyaml paths each ran: the OS package already importable,
+        the OS package removed with a package index configured, and neither, which failed
+        on the one-line error and nothing else. The round trip followed on the same runner
+        with pypi.org blackholed in the host''s /etc/hosts and no index configured, so none
+        of it reached the internet: the wiki was wiped to zero pages and reseeded from docs/,
+        a wiki edit that also changed the page title became a repository commit authored by
+        the wiki editor and renaming the page''s file, and a repository edit reached the wiki.
+        The pull''s own push to the default branch was skipped by its ci.skip, as designed.'
       notes: 'Failure semantics (section 10.1): a missing WIKI_TOKEN excludes the job through
         run-rules rather than failing it; once the job runs, an absent token, an unreachable
         wiki, a rejected push after the bounded retries, a payload whose sha256 does not match,
-        or a pyyaml artefact whose hash does not match all fail the job. Compatibility: this
-        component drops the `.not_for_wiki_sync` rules fragment that consumers pulled in by
-        `!reference`, and takes the documentation folder as the `working-directory` input
-        instead of the top-level `DOCS_DIR` variable.'
+        or a pyyaml that is neither importable nor installable all fail the job. Compatibility:
+        this component drops the `.not_for_wiki_sync` rules fragment that consumers pulled
+        in by `!reference`, and takes the documentation folder as the `working-directory`
+        input instead of the top-level `DOCS_DIR` variable.'
   - name: helm-package-publish
     kind: component
     path: templates/helm-package-publish/template.yml
@@ -6349,11 +6381,23 @@ pipelines:
         type: array
         description: Approved runner selection from the estate profile.
         default: []
+      executor:
+        type: string
+        description: Which runner executor the sync job lands on. `docker` runs it in `execution-image`;
+          `shell` emits no `image:` key and runs it on the runner host's own python3, git
+          and tar, which is the only shape available to a site with no reachable container
+          registry.
+        default: docker
+        options:
+          - docker
+          - shell
       execution-image:
         type: string
-        description: Approved Python execution image pinned by digest. Needs python3, pip,
-          git, tar, base64 and sha256sum.
-        regex: ^.+@sha256:[0-9a-f]{64}$
+        description: Python execution image, ignored when `executor` is `shell`. Needs python3,
+          pip, git, tar, base64 and sha256sum. A digest is the estate's preferred form and
+          the default; `name:tag` is accepted for a site whose internal mirror cannot serve
+          one.
+        regex: ^$|^[A-Za-z0-9][A-Za-z0-9._\-/:]*$|^[A-Za-z0-9][A-Za-z0-9._\-/:]*@sha256:[0-9a-f]{64}$
         default: docker.io/python@sha256:cd7c412d000912f29075a1b8803e43cb2f38bb67f104019df526df5ceaf30569
     introduced_in: 1.0.0
     minimum_gitlab: '18.9'
@@ -6369,17 +6413,20 @@ pipelines:
           Clones and pushes the wiki, and pushes pulled wiki edits to the default branch.
         protected_ref_required: false
     runtime_image:
-      reference: 'per component: every include forwards a digest-pinned execution image, and
-        the ones a consumer may need to change are inputs of this composition'
+      reference: 'per component: the include forwards execution-image, whose default is digest-pinned.
+        A consumer may pass a name:tag reference, or select executor shell and run in no image
+        at all'
       pinning: input
     trust:
       privileged: false
       network_egress:
         - gitlab.example.com
-        - registry.example.com
-        - the configured Python package index
+        - registry.example.com, only when executor is docker
+        - the configured Python package index, only when python3 cannot already import yaml
       runner_profile: shared-docker, the estate instance runners. They are registered untagged,
-        so runner-tags selects nothing today and a tag is not a permission boundary.
+        so runner-tags selects nothing on that estate and a tag is not a permission boundary.
+        A site whose runners are shell executors passes executor shell and selects them by
+        tag.
       protected_ref_required: false
     validation:
       evidence:
@@ -6392,7 +6439,21 @@ pipelines:
       environment: 'gitlab.example.com 18.9.1-ee, POST /api/v4/projects/:id/ci/lint. Executed
         on shared ref 1.0.0-rc.2 by consumer pipelines on the originating estate, 2026/09:
         three wiki-sync consumers and a documentation consumer. Every job the composition
-        creates ran green, on the push and the schedule sources.'
+        creates ran green, on the push and the schedule sources.
+
+        Executed on a shell-executor runner on the originating estate, 2026/09: a throwaway
+        project runner on EL9 with python 3.9 and gitlab-runner 19.3, tagged and refusing
+        untagged jobs, against a documentation consumer pinned to the branch carrying this
+        change. Six pipelines, in this order. The job renders with no image and the runner
+        logs "Preparing the shell executor", "Using Shell (bash) executor" and the host''s
+        python version. The three pyyaml paths each ran: the OS package already importable,
+        the OS package removed with a package index configured, and neither, which failed
+        on the one-line error and nothing else. The round trip followed on the same runner
+        with pypi.org blackholed in the host''s /etc/hosts and no index configured, so none
+        of it reached the internet: the wiki was wiped to zero pages and reseeded from docs/,
+        a wiki edit that also changed the page title became a repository commit authored by
+        the wiki editor and renaming the page''s file, and a repository edit reached the wiki.
+        The pull''s own push to the default branch was skipped by its ci.skip, as designed.'
       notes: 'Three pipeline sources and no others: a default-branch push, the wiki-page-event
         webhook that calls the trigger API, and the schedule that is the safety net. WIKI_TOKEN
         is required by every rule, so a project without it skips the job rather than failing

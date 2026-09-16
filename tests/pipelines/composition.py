@@ -172,7 +172,12 @@ def render(name: str, **supplied: Any) -> str:
 
 
 def jobs_only(config: dict) -> dict:
-    return {k: v for k, v in config.items() if k not in ("workflow", "stages")}
+    """Real jobs. A key starting with `.` is a hidden parent, not a job."""
+    return {
+        k: v
+        for k, v in config.items()
+        if k not in ("workflow", "stages") and not k.startswith(".")
+    }
 
 
 def needs_of(job: dict) -> list[str]:

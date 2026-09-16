@@ -10,6 +10,17 @@
 # A repository that also has its own checks includes
 # /templates/docs-wiki-sync/template.yml directly instead, because this file
 # owns `workflow:` and `stages:`.
+# A site whose runners are shell executors, with no container registry it can
+# reach, passes two more inputs and nothing else:
+#
+#       executor: shell
+#       runner-tags: [its-shell-runner-tag]
+#
+# The job then carries no `image:` at all and runs on the host's python3, git
+# and tar. Its one Python dependency is pyyaml: install python3-pyyaml on the
+# runner host, or set PIP_INDEX_URL (and PIP_TRUSTED_HOST for a plain-HTTP
+# mirror) as CI variables pointing at an internal index. With neither, the job
+# fails with one line naming both.
 include:
   - project: 'platform/gitlab-ci-templates'
     ref: 'REPLACE_WITH_APPROVED_SHARED_CI_REF'

@@ -29,6 +29,9 @@ required_secrets:
       default branch.
     protected_ref_required: false
 
+# The default, and what `executor: docker` runs. `executor: shell` emits no
+# image at all and the job runs on the runner host's interpreter, which is
+# python 3.9 on EL9; the runtime is tested on both (tests/runtime/wiki).
 runtime_image:
   reference: 'docker.io/python@sha256:cd7c412d000912f29075a1b8803e43cb2f38bb67f104019df526df5ceaf30569'
   pinning: digest
@@ -40,9 +43,15 @@ trust:
   privileged: false
   network_egress:
     - gitlab.example.com
-    - registry.example.com
-    - the configured Python package index
-  runner_profile: shared-docker
+    - registry.example.com, only when executor is docker
+    - >-
+      the configured Python package index, only when python3 cannot already
+      import yaml. PIP_INDEX_URL and PIP_TRUSTED_HOST are read from the job
+      environment; with neither set and no OS package present the job fails with
+      a message naming both options rather than reaching pypi.org.
+  runner_profile: >-
+    shared-docker by default. `executor: shell` also supports a shell-executor
+    runner, where the job runs as the runner's own user on the host.
   protected_ref_required: false
 
 validation:
@@ -62,11 +71,27 @@ validation:
     directions ran: the pull step reached its decision and reported "wiki has no edits
     since the last sync", which rc.1 skipped entirely through a swallowed failure.
     Importing an actual wiki edit has still not been exercised in a pipeline.
+
+    Executed on a shell-executor runner on the originating estate, 2026/09: a
+    throwaway project runner on EL9 with python 3.9 and gitlab-runner 19.3,
+    tagged and refusing untagged jobs, against a documentation consumer pinned
+    to the branch carrying this change. Six pipelines, in this order. The job
+    renders with no image and the runner logs "Preparing the shell executor",
+    "Using Shell (bash) executor" and the host's python version. The three
+    pyyaml paths each ran: the OS package already importable, the OS package
+    removed with a package index configured, and neither, which failed on the
+    one-line error and nothing else. The round trip followed on the same runner
+    with pypi.org blackholed in the host's /etc/hosts and no index configured,
+    so none of it reached the internet: the wiki was wiped to zero pages and
+    reseeded from docs/, a wiki edit that also changed the page title became a
+    repository commit authored by the wiki editor and renaming the page's file,
+    and a repository edit reached the wiki. The pull's own push to the default
+    branch was skipped by its ci.skip, as designed.
   notes: >-
     Failure semantics (section 10.1): a missing WIKI_TOKEN excludes the job
     through run-rules rather than failing it; once the job runs, an absent token,
     an unreachable wiki, a rejected push after the bounded retries, a payload
-    whose sha256 does not match, or a pyyaml artefact whose hash does not match
+    whose sha256 does not match, or a pyyaml that is neither importable nor installable
     all fail the job. Compatibility: this component drops the
     `.not_for_wiki_sync` rules fragment that consumers pulled in by
     `!reference`, and takes the documentation folder as the `working-directory`

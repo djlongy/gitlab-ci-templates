@@ -105,6 +105,8 @@ Per composition, not universally:
 - **Runners with the `docker` executor.** The profile these were written
   against registers them untagged and unprivileged, so `runner-tags` defaults
   to `[]`. The `container-smoke-test` component needs a privileged runner.
+  `docs-wiki` is the exception: it also runs on a shell executor, with no image
+  and no registry. See [Shell executor, air-gapped](#shell-executor-air-gapped).
 - **An OCI registry**, for any container composition: CI variables
   `HARBOR_USER` and `HARBOR_PASSWORD`, a candidate project and a release
   project. `container-promote-harbor` drives the Harbor API specifically; the
@@ -133,6 +135,43 @@ the upstream manifest unchanged, so `<cache>/<ref>@sha256:<d>` and
 against a live cache before this release was published. Keep the Renovate
 lookup names pointing at Docker Hub either way; a bot that cannot authenticate
 to your registry logs "found no results" and silently stops proposing updates.
+
+### Shell executor, air-gapped
+
+`docs-wiki` is the one composition that runs without a container image at all.
+Pass `executor: shell` and the sync job renders with no `image:` key, which is
+what a shell-executor runner needs: it ignores `image:` and runs the script on
+the host.
+
+```yaml
+inputs:
+  instance: docs
+  working-directory: 'docs'
+  executor: shell
+  runner-tags: [your-shell-runner-tag]
+```
+
+The host supplies python3, git and tar. The one Python dependency is pyyaml,
+and the job resolves it in this order:
+
+1. `python3 -c 'import yaml'`. On EL9 `dnf install python3-pyyaml` is enough,
+   and then nothing is fetched at all. The version there is 5.4.1, which the
+   runtime is tested against alongside 6.0.2.
+2. `pip install --user -r requirements.txt`, using whatever `PIP_INDEX_URL` and
+   `PIP_TRUSTED_HOST` you set as CI variables. Set `PIP_TRUSTED_HOST` when the
+   index serves plain HTTP.
+3. Neither: the job fails with one line naming both options. It does not fall
+   through to pypi.org.
+
+`execution-image` is ignored in this mode, and its regex accepts an empty
+value, a `name:tag` reference and a digest. A digest is still the default and
+still the preferred form; standard 1.0.5 in
+[`docs/gitlab-ci-agent-standard.md`](docs/gitlab-ci-agent-standard.md) records
+why it is not required. Every other component still requires one, because none
+of them has been exercised on a shell executor.
+
+The runtime is exercised on python 3.9 and 3.12. The rest of the repository's
+test suite needs 3.11 or newer.
 
 ## Forking
 

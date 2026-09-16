@@ -3,6 +3,54 @@
 Release changes, migration instructions and deprecation deadlines for
 `platform/gitlab-ci-templates`. Dates are yyyy/mm/dd.
 
+## 1.1.0 — 2026/09/16
+
+The wiki sync runs on a shell executor with no registry, no image and no
+internet. One new input, one widened regex, and one dependency pin that had to
+change to make either useful. `executor` defaults to `docker`, so a consumer
+that changes nothing renders the job it rendered before.
+
+### Added
+
+- **`executor` on `docs-wiki-sync` and the `docs-wiki` composition**, over
+  `[docker, shell]`. `shell` renders the job with no `image:` key, which is what
+  a shell-executor runner needs: it ignores `image:` and runs the script on the
+  host.
+
+  GitLab cannot omit a key conditionally and an empty value is not absence.
+  `image: ''` and `image: {name: ''}` are both rejected with
+  `image name can't be blank`, measured against
+  `the CI Lint API` on 18.9.1-ee. The component therefore
+  carries two hidden parents, one with `image:` and one without, and the job
+  extends whichever the input names.
+
+### Changed
+
+- **`execution-image` accepts `name:tag` and an empty value**, not only a
+  digest. A digest is still the default and still what Renovate tracks, and
+  standard 1.0.5 records the policy: digest-preferred, not digest-required. The
+  estate has runners with no reachable registry; requiring a digest there does
+  not make anything reproducible, it makes a pipeline that cannot be written.
+  The regex still refuses anything that is not an image reference.
+
+- **pyyaml is resolved in three steps instead of installed unconditionally.**
+  `python3 -c 'import yaml'` first, so a host with python3-pyyaml installs
+  nothing; then `pip install --user -r requirements.txt`, which uses whatever
+  `PIP_INDEX_URL` and `PIP_TRUSTED_HOST` the estate set; then one line naming
+  both options and a failed job. Nothing reaches pypi.org by default.
+
+- **`runtime/wiki/requirements.txt` pins a version, not hashes.** Its hashes
+  covered the source distribution and the two CPython 3.12 wheels, which is
+  every artefact the pinned execution image could resolve. On a shell executor
+  the interpreter is the host's -- EL9 ships 3.9 -- pip resolves the wheel built
+  for that interpreter, and `--require-hashes` fails on exactly the air-gapped
+  hosts it was meant to protect. The runtime's tests now run under 3.9 as well
+  as 3.12.
+
+### Upgrading from 1.0.1
+
+Nothing to do. The two new shapes are opt-in and every default is unchanged.
+
 ## 1.0.1 — 2026/09/16
 
 One fix, for a failure that only appears when two jobs share a runner

@@ -1,6 +1,6 @@
 # GitLab CI repository and agent implementation standard
 
-**Document version:** 1.0.4  
+**Document version:** 1.0.5  
 **Prepared:** 2026/09/15  
 **Applies to:** shared GitLab CI configuration for applications, containers, Terraform, Ansible, Kubernetes, security, releases and infrastructure deployment.  
 **Reference repository:** [djlongy/gitlab-ci-templates](https://github.com/djlongy/gitlab-ci-templates), reviewed at commit `87b4138c0ca12ac904d33c2383a6d885e678d324`.
@@ -471,7 +471,7 @@ CI YAML connects operations; maintained execution images contain substantial imp
 
 Do not call adjacent `scripts/...` assuming a component include checked out the shared repository. It imports YAML; the job normally operates on the consumer checkout.
 
-- Pin execution images by digest and record architecture and tool versions in the catalogue.
+- Pin execution images by digest where the estate can serve one, and record architecture and tool versions in the catalogue. A component may accept `name:tag`, or no image at all for a shell executor, when its contract declares which executor each form is for; see the 1.0.5 entry in section 16.
 - Pin runtime tools, collections, rule packs and dependency sources. A pinned scanner image with moving remote rules is not a fully pinned scan configuration.
 - Avoid `go install ...@latest`, unverified `curl` executables and unpinned package installation in consumer jobs.
 - When runtime download is unavoidable, use a pinned immutable source and independently verified checksum/signature; fail validation errors.
@@ -863,6 +863,26 @@ The rule is unconditional because the alternative cannot be enforced. `execution
 **Migration.** None.
 
 Sections not changed: everything but 13.1.
+
+#### 1.0.5 — 2026/09/16, an execution image is digest-preferred, not digest-required
+
+**Decision.** Section 12's first bullet becomes: pin an execution image by digest where the estate can serve one, and record architecture and tool versions in the catalogue. A component may accept `name:tag`, and may accept no image at all, when it declares which executor each form is for and the catalogue records the pinning it actually has. Section 1's "never silently substitute a tag for a digest" is unchanged: substituting one silently is still forbidden, and a component whose contract says the image is an input the consumer chooses is not substituting anything.
+
+**Reason.** The digest-only rule assumed every runner is a docker executor with a reachable registry. Work runners in the sites this repository now has to serve are shell executors: there is no container registry they can reach, docker.io is unreachable, and a shell executor ignores `image:` entirely. Requiring a digest there does not make anything reproducible; it makes a pipeline that cannot be written at all, because the `execution-image` regex rejects every value such a consumer could truthfully supply. The three forms and what each is for:
+
+- a digest, for a docker executor pulling through the estate's mirror. Still the default on every component, and still what Renovate tracks.
+- `name:tag`, for a docker executor at a site whose internal mirror cannot serve a digest. Weaker, and the contract says so.
+- empty, for a shell executor. The job runs on the host's own interpreter and tools and pulls nothing.
+
+GitLab cannot omit a key conditionally, and an empty value is not absence: `image: ''` and `image: {name: ''}` are both rejected with `image name can't be blank`, measured against `the CI Lint API` on 18.9.1-ee. A component offering the third form therefore declares an `executor` input over `[docker, shell]` and extends one of two hidden bases, one carrying `image:` and one carrying none, which is the smallest shape that renders a job with no `image:` key.
+
+The same reasoning removes the hash pin from `runtime/wiki/requirements.txt`. Its hashes covered the source distribution and the two CPython 3.12 wheels, which is every artefact the pinned execution image could resolve. On a shell executor the interpreter is the host's -- EL9 ships 3.9 -- pip resolves the wheel built for that interpreter, and `--require-hashes` fails on precisely the air-gapped hosts it was meant to protect. A version pin holds on every interpreter, and the job installs nothing at all when `import yaml` already works.
+
+**Affected contracts.** `docs-wiki-sync` and the `docs-wiki` composition, which gain the `executor` input and a widened `execution-image` regex. No other component changes: the widened form is opt-in per component, and a component that has not been exercised on a shell executor must keep the digest-only regex rather than claim a capability nobody measured. `.ci/estate.yml` gains no new runner profile, because this estate still has only docker executors; the shell-executor evidence is recorded in `.ci/compatibility.yml` under `runner_behaviour`.
+
+**Migration.** None. `executor` defaults to `docker` and the image defaults stay digest-pinned, so a consumer that changes nothing renders the job it rendered before.
+
+Sections not changed: everything but 12 and the section 1 bullet it qualifies.
 
 ## 17. Definition of done
 

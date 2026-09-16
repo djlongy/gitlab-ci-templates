@@ -132,10 +132,13 @@ def test_no_probe_still_pipes_a_capture_through_grep():
     offenders = []
     for path in sorted(TEMPLATES.glob("*/template.yml")):
         documents = list(yaml.safe_load_all(path.read_text()))
-        (job,) = documents[1].values()
-        for line in "\n".join(
-            job.get("before_script", []) + job.get("script", [])
-        ).splitlines():
+        # Hidden parents included: a probe would hide in one just as well.
+        body = "\n".join(
+            line
+            for job in documents[1].values()
+            for line in job.get("before_script", []) + job.get("script", [])
+        )
+        for line in body.splitlines():
             stripped = line.strip()
             if not re.match(r"^CI_TPL_[A-Z_]+=\$\(", stripped):
                 continue

@@ -126,6 +126,19 @@ def resolve(component: str, **supplied: Any) -> dict:
     return interpolate(body, resolve_values(declared, supplied))
 
 
+def public(jobs: dict) -> dict:
+    """The jobs a consumer can see and depend on.
+
+    A name beginning with `.` is hidden: GitLab never creates it, and a
+    consumer must not reference it (section 5). A component that selects
+    between two shapes, as docs-wiki-sync does for the docker and shell
+    executors, carries hidden parents beside its one public job.
+    """
+    return {name: job for name, job in jobs.items() if not name.startswith(".")}
+
+
+
+
 def merged_config(includes: list[tuple[str, dict]], *, stages: list[str], workflow=None) -> str:
     """Render the configuration a composition of these includes would produce."""
     config: dict[str, Any] = {}

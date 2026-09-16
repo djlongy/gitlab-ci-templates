@@ -20,17 +20,19 @@ required_secrets:
       Clones and pushes the wiki, and pushes pulled wiki edits to the default branch.
     protected_ref_required: false
 runtime_image:
-  reference: 'per component: every include forwards a digest-pinned execution image, and the
-    ones a consumer may need to change are inputs of this composition'
+  reference: 'per component: the include forwards execution-image, whose default is
+    digest-pinned. A consumer may pass a name:tag reference, or select executor shell and
+    run in no image at all'
   pinning: input
 trust:
   privileged: false
   network_egress:
     - gitlab.example.com
-    - registry.example.com
-    - the configured Python package index
+    - registry.example.com, only when executor is docker
+    - the configured Python package index, only when python3 cannot already import yaml
   runner_profile: shared-docker, the estate instance runners. They are registered untagged,
-    so runner-tags selects nothing today and a tag is not a permission boundary.
+    so runner-tags selects nothing on that estate and a tag is not a permission boundary. A
+    site whose runners are shell executors passes executor shell and selects them by tag.
   protected_ref_required: false
 validation:
   evidence:
@@ -45,6 +47,22 @@ validation:
     ref 1.0.0-rc.2 by consumer pipelines on the originating estate, 2026/09: three
     wiki-sync consumers and a documentation consumer. Every job the composition creates
     ran green, on the push and the schedule sources.
+
+    Executed on a shell-executor runner on the originating estate, 2026/09: a
+    throwaway project runner on EL9 with python 3.9 and gitlab-runner 19.3,
+    tagged and refusing untagged jobs, against a documentation consumer pinned
+    to the branch carrying this change. Six pipelines, in this order. The job
+    renders with no image and the runner logs "Preparing the shell executor",
+    "Using Shell (bash) executor" and the host's python version. The three
+    pyyaml paths each ran: the OS package already importable, the OS package
+    removed with a package index configured, and neither, which failed on the
+    one-line error and nothing else. The round trip followed on the same runner
+    with pypi.org blackholed in the host's /etc/hosts and no index configured,
+    so none of it reached the internet: the wiki was wiped to zero pages and
+    reseeded from docs/, a wiki edit that also changed the page title became a
+    repository commit authored by the wiki editor and renaming the page's file,
+    and a repository edit reached the wiki. The pull's own push to the default
+    branch was skipped by its ci.skip, as designed.
   notes: 'Three pipeline sources and no others: a default-branch push, the wiki-page-event
     webhook that calls the trigger API, and the schedule that is the safety net. WIKI_TOKEN
     is required by every rule, so a project without it skips the job rather than failing partway

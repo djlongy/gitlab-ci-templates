@@ -50,12 +50,26 @@ spec:
         mkdocs.yml to read exclude_docs / not_in_nav from. Empty means the
         repository root mkdocs.yml when one exists, and no filtering otherwise.
       default: ''
+    executor:
+      type: string
+      description: >-
+        Which runner executor the job is going to land on. `docker` puts
+        `execution-image` in the job's `image:`; `shell` emits no `image:` key at
+        all, because a shell executor ignores one and the job then runs on the
+        host's own python3, git and tar. Section 12: the estate prefers a
+        digest-pinned image, and a site with no reachable registry is not thereby
+        excluded from the sync.
+      default: docker
+      options: [docker, shell]
     execution-image:
       type: string
       description: >-
-        Approved Python execution image pinned by digest. Needs python3, pip,
-        git, tar, base64 and sha256sum.
-      regex: '^.+@sha256:[0-9a-f]{64}$'
+        Python execution image, ignored when `executor` is `shell`. Needs
+        python3, pip, git, tar, base64 and sha256sum. A digest is the estate's
+        preferred form and the default; `name:tag` is accepted for a site whose
+        internal mirror cannot serve a digest, and an empty value for a shell
+        executor that will not pull an image at all.
+      regex: '^$|^[A-Za-z0-9][A-Za-z0-9._\-/:]*$|^[A-Za-z0-9][A-Za-z0-9._\-/:]*@sha256:[0-9a-f]{64}$'
       default: 'docker.io/python@sha256:cd7c412d000912f29075a1b8803e43cb2f38bb67f104019df526df5ceaf30569'
     runner-tags:
       type: array
@@ -84,12 +98,45 @@ spec:
         - if: '$CI_PIPELINE_SOURCE == "schedule" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $WIKI_TOKEN'
 ---
 
-#### Executable capability ####
-"$[[ inputs.instance ]]:docs-wiki-sync":
-  stage: $[[ inputs.stage ]]
+#### Executor selection ####
+# GitLab cannot omit a key conditionally. `image:` is either in the job or it is
+# not, and an empty value does not stand in for absent: `image: ''` and
+# `image: {name: ''}` are both rejected with "image name can't be blank",
+# measured against the CI Lint API on 18.9.1-ee. Two hidden bases and
+# an `extends:` that takes the input like any other string are the smallest
+# thing that renders one job carrying an image and one carrying none.
+#
+# Each base repeats the build-directory flag, the retry policy and the
+# inheritance list because the contract tests read every job in this file,
+# hidden ones included, and a hidden parent is exactly where an omission would
+# hide.
+".ci:$[[ inputs.instance ]]:docs-wiki-sync:docker":
   image:
     name: $[[ inputs.execution-image ]]
     entrypoint: ['']
+  variables:
+    FF_DISABLE_UMASK_FOR_DOCKER_EXECUTOR: 'true'
+    CI_TPL_EXECUTOR: docker
+  retry:
+    max: $[[ inputs.max-retries ]]
+    when: [runner_system_failure]
+  inherit:
+    default: [tags, timeout, interruptible, retry, id_tokens]
+
+".ci:$[[ inputs.instance ]]:docs-wiki-sync:shell":
+  variables:
+    FF_DISABLE_UMASK_FOR_DOCKER_EXECUTOR: 'true'
+    CI_TPL_EXECUTOR: shell
+  retry:
+    max: $[[ inputs.max-retries ]]
+    when: [runner_system_failure]
+  inherit:
+    default: [tags, timeout, interruptible, retry, id_tokens]
+
+#### Executable capability ####
+"$[[ inputs.instance ]]:docs-wiki-sync":
+  extends: '.ci:$[[ inputs.instance ]]:docs-wiki-sync:$[[ inputs.executor ]]'
+  stage: $[[ inputs.stage ]]
   tags: $[[ inputs.runner-tags ]]
   variables:
     # Non-root execution images own their build directory: the runner reads the
@@ -1235,29 +1282,43 @@ spec:
           return Filter(args.include, exclude, not_in_nav)
       CI_TPL_EMBED_EOF
       cat > "$CI_TPL_RUNTIME_DIR/requirements.txt" <<'CI_TPL_EMBED_EOF' || exit 1
-      # Python dependencies of the wiki runtime, pinned by version and hash.
+      # Python dependencies of the wiki runtime, pinned by version.
       #
       # docfilter.py and wiki-sync.py import yaml to read exclude_docs / not_in_nav
       # from a consumer's mkdocs.yml. That is the only third-party import in the
-      # runtime, and the component installs it with --require-hashes so an index
-      # serving a different artefact for this version fails the job instead of
-      # running. Section 12: pin runtime tools and dependency sources.
+      # runtime, and the job installs this file only after `python3 -c 'import yaml'`
+      # has already failed, so a host or image carrying python3-pyyaml fetches
+      # nothing.
       #
       # Install exactly as the component does:
-      #   pip install --no-deps --require-hashes -r requirements.txt
+      #   pip install --user -r requirements.txt
       #
-      # Hashes are the PyPI sha256 digests for 6.0.2: the source distribution and the
-      # two CPython 3.12 manylinux wheels (x86_64, aarch64). Add a hash when the
-      # execution image's interpreter or architecture changes, or the install fails
-      # closed — which is the intended behaviour, not a bug to work around.
-      pyyaml==6.0.2 \
-          --hash=sha256:d584d9ec91ad65861cc08d42e834324ef890a082e591037abe114850ff7bbc3e \
-          --hash=sha256:80bab7bfc629882493af4aa31a4cfa43a4c57c83813253626916b8c7ada83476 \
-          --hash=sha256:1f71ea527786de97d1a0cc0eacd1defc0985dcf6b3f17bb77dcfc8c34bec4dc5
+      # Until 1.1.0 this file also carried sha256 hashes and the job installed it with
+      # --require-hashes. The hashes were the source distribution and the two CPython
+      # 3.12 manylinux wheels, which is every artefact the digest-pinned python:3.12
+      # execution image could resolve. On a shell executor the interpreter is whatever
+      # the host has -- EL9 ships 3.9 -- and pip resolves the wheel built for it,
+      # which is not in that set, so --require-hashes failed on exactly the air-gapped
+      # hosts it was meant to protect. A version pin holds on every interpreter; the
+      # artefact's provenance comes from the index the estate points PIP_INDEX_URL at.
+      pyyaml==6.0.2
       CI_TPL_EMBED_EOF
       # END embed
-      python3 -m pip install --quiet --no-deps --require-hashes \
-        -r "$CI_TPL_RUNTIME_DIR/requirements.txt"
+      # pyyaml, in the order a host is most likely to already satisfy. A shell
+      # executor on an air-gapped EL9 host has no registry and no index, but it
+      # does have dnf, and python3-pyyaml is in AppStream. Only when the import
+      # fails does anything reach the network, and then pip uses whatever
+      # PIP_INDEX_URL and PIP_TRUSTED_HOST the estate set, which is how an
+      # internal mirror is reached without this component knowing its address.
+      echo "executor: $CI_TPL_EXECUTOR, $(python3 --version 2>&1)"
+      if python3 -c 'import yaml' 2>/dev/null; then
+        echo "pyyaml: already importable, installing nothing"
+      elif python3 -m pip install --user --quiet -r "$CI_TPL_RUNTIME_DIR/requirements.txt"; then
+        echo "pyyaml: installed with pip from ${PIP_INDEX_URL:-the default index}"
+      else
+        echo "ERROR: pyyaml is missing and pip could not install it. Either install the OS package on the runner host (dnf install python3-pyyaml, apt-get install python3-yaml), or point PIP_INDEX_URL at a reachable Python index and set PIP_TRUSTED_HOST if it serves plain HTTP."
+        exit 1
+      fi
   script:
     - bash "$CI_TPL_RUNTIME_DIR/wiki-deploy.sh" "$CI_TPL_WORKING_DIRECTORY" "$CI_TPL_WIKI_CLONE"
   rules: $[[ inputs.run-rules ]]
