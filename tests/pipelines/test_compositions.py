@@ -25,11 +25,16 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import sys
 from pathlib import Path
 
 import pytest
 
-import composition
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+# The resolvers live in tools/resolve/ so the lint harness and the local
+# runner share one implementation; see that package's docstring.
+from tools.resolve import composition  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 EXAMPLES = REPO_ROOT / "examples"

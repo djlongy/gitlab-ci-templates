@@ -6,3 +6,6 @@ __pycache__/
 .agent/
 .agents/
 release-description.md
+# A filled-in tools/ci-local.env.example carries real credentials.
+.ci-local.env
+ci-local.env

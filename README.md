@@ -23,6 +23,20 @@ This is the public copy of a library that runs on a private GitLab. Host names,
 registries, project ids and consumer names throughout are illustrative — see
 **Forking** below for what to change.
 
+## Start here: two-way wiki sync in five minutes
+
+The most-adopted thing here mirrors a repository's `docs/` folder to its GitLab
+wiki and brings wiki edits back as commits by their author. Set `WIKI_TOKEN` as
+a group CI variable, add three lines to a repository's `.gitlab-ci.yml`, and the
+job wires its own webhook on the first default-branch run.
+
+[**`docs/howto/docs-wiki-sync.md`**](docs/howto/docs-wiki-sync.md) is the whole
+adoption, for a reader with no context: what it mirrors, how conflicts resolve,
+every input, the token and its scope, how to verify a first run, rolling it out
+across many repositories, and a troubleshooting table. Getting the library onto
+your own GitLab first is
+[**`docs/howto/consuming-the-library.md`**](docs/howto/consuming-the-library.md).
+
 ## Usage
 
 Pick a composition from the table below, include it, and supply its inputs.
@@ -53,6 +67,11 @@ is equally valid. A branch name is a moving target and section 14.2 forbids it.
 
 A worked example for every composition, with the comments explaining each
 input, is in [`examples/`](examples/).
+
+New here? [`docs/howto/consuming-the-library.md`](docs/howto/consuming-the-library.md)
+explains why components and compositions are separate, how the naming works, why
+`ref: main` is refused, what `.ci/estate.yml` and `.ci/project.yml` are for, and
+the two ways to consume this library from a GitLab that is not this host.
 
 ## Supported compositions
 
@@ -118,7 +137,10 @@ Per composition, not universally:
   gated on a protected tag and, where the composition says so, on `when:
   manual` as well.
 - **`WIKI_TOKEN`**, for `docs-wiki`: a group access token, masked and
-  protected, which means the default branch must be protected.
+  protected, which means the default branch must be protected. Give it the `api`
+  scope, or set an `api` token in `WIKI_ADMIN_TOKEN`, if the sync job is to
+  repair its own wiki webhook. Step by step:
+  [`docs/howto/docs-wiki-sync.md`](docs/howto/docs-wiki-sync.md).
 
 Which of these your estate actually provides is recorded in
 [`.ci/estate.yml`](.ci/estate.yml). A value marked `unresolved` there was not
@@ -200,6 +222,20 @@ replaced it. Pin the 1.0.0 tag, migrate, then move off the old ref.
 removed path to its replacement and works through three real consumer
 pipelines.
 
+## Guides
+
+- [`docs/howto/docs-wiki-sync.md`](docs/howto/docs-wiki-sync.md) — mirroring a
+  repository's `docs/` to its wiki, end to end: adoption, the token, the
+  webhook, verification and troubleshooting.
+- [`docs/howto/consuming-the-library.md`](docs/howto/consuming-the-library.md) —
+  the structure of this library, how to get it onto your GitLab, and how to pin
+  and adopt it.
+- [`docs/howto/new-admin-quickstart.md`](docs/howto/new-admin-quickstart.md) — a
+  numbered walkthrough from `git clone` to a cut release, every command run from
+  a fresh clone.
+- [`docs/howto/local-testing.md`](docs/howto/local-testing.md) — running a
+  component's job locally, in its own image, before pushing.
+
 ## Working in this repository
 
 - [`AGENTS.md`](AGENTS.md) — what to read before editing, and the verification
@@ -207,6 +243,8 @@ pipelines.
 - [`CHANGELOG.md`](CHANGELOG.md) — release changes and deprecation deadlines.
 - [`docs/gitlab-ci-agent-standard.md`](docs/gitlab-ci-agent-standard.md) — the
   standard itself.
+- [`docs/howto/local-testing.md`](docs/howto/local-testing.md) — the three tiers
+  of local check, and what each one is still silent about.
 
 ## Running the tests
 
@@ -222,6 +260,11 @@ yamllint -d "{extends: default, rules: {line-length: disable, truthy: disable}}"
 python3 runtime/catalog/generate.py --check     # catalogue drift
 python3 runtime/embed/generate.py --check       # embedded-runtime drift
 GIT_CONFIG_GLOBAL=/dev/null python3 -m pytest -q tests/
+
+# One job's script, in the image the component pins. See docs/howto/local-testing.md.
+python3 tools/ci-local.py --template quality-dependency-lockfiles \
+  --input instance=demo --input lockfiles=none \
+  --job demo:quality-dependency-lockfiles --checkout ~/src/myapp
 ```
 
 `GIT_CONFIG_GLOBAL=/dev/null` isolates the tests from your own git config; set

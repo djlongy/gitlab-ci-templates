@@ -34,7 +34,7 @@ from typing import Any
 
 import yaml
 
-import render_component
+from . import render_component
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PIPELINES_DIR = REPO_ROOT / "pipelines"

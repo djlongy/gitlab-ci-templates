@@ -1887,6 +1887,20 @@ components:
         type: array
         description: Runner selection from the estate profile.
         default: []
+      webhook-reconcile:
+        type: string
+        description: Whether this job repairs its own wiki webhook and pipeline trigger token
+          before syncing. On, it compares the project's `wiki-sync` webhook with the trigger
+          URL built from this job's own CI_API_V4_URL, CI_PROJECT_ID and CI_DEFAULT_BRANCH,
+          and writes only on a difference, so a project that is renamed, moved or migrated
+          to another server name keeps working without anyone re-running the bootstrap script.
+          It needs a token with the api scope and the Maintainer role, in WIKI_ADMIN_TOKEN
+          or, failing that, in WIKI_TOKEN; a token that is narrower than that is reported
+          and the wiring is left alone. Off leaves the webhook entirely to the operator.
+        default: 'on'
+        options:
+          - 'on'
+          - 'off'
       max-retries:
         type: number
         description: How many times the runner may retry this job. The condition is runner_system_failure
@@ -1923,6 +1937,16 @@ components:
         kind: ci-variable
         scope: write_repository on the project, Maintainer when the default branch is protected.
           Clones and pushes the wiki, and pushes pulled wiki edits to the default branch.
+          It is also the fallback identity for the webhook reconcile step, which needs api
+          rather than write_repository; a project that does not want to widen this token sets
+          WIKI_ADMIN_TOKEN instead.
+        protected_ref_required: false
+      - name: WIKI_ADMIN_TOKEN
+        kind: ci-variable
+        scope: api on the project, Maintainer role. Used only by the webhook-reconcile step,
+          to list and write the project's webhooks and pipeline trigger tokens. Separate from
+          WIKI_TOKEN because api can do anything its user can and the sync itself needs no
+          more than write_repository.
         protected_ref_required: false
     runtime_image:
       reference: docker.io/python@sha256:cd7c412d000912f29075a1b8803e43cb2f38bb67f104019df526df5ceaf30569
@@ -1950,10 +1974,24 @@ components:
         - runtime-tested
         - integration-tested
       verified_at: 2026/09/16
-      revision: 1.0.0-rc.2
-      environment: 'gitlab.example.com 18.9.1-ee, POST /api/v4/projects/:id/ci/lint. Executed
-        on shared ref 1.0.0-rc.2 by consumer pipelines on the originating estate, 2026/09:
-        three wiki-sync consumers, all three docs:docs-wiki-sync green, and a documentation
+      revision: 1.1.0
+      environment: 'Webhook reconcile (1.1.0) executed against a GitLab 18.9.1-ee server on
+        the originating estate, 2026/09, on one wiki-sync consumer, authenticated as the same
+        kind of identity the job itself uses: a group access token bot holding the Maintainer
+        role. That project''s existing hook carried an invalid trigger token. The first run
+        created a trigger token owned by that bot, rewrote the hook URL, and reported an operator''s
+        leftover trigger token, which it cannot read and did not delete; the second run wrote
+        nothing and reported "webhook already correct". Firing the hook''s own wiki_page_events
+        test then returned 201 and created a pipeline whose source was `trigger`, so the repaired
+        wiring delivers. Two behaviours measured on the same server and relied on by the implementation:
+        GET /hooks returns the hook URL with its trigger token in clear, and GET /triggers
+        shortens a token created by another user to four characters. That run exercised runtime/wiki/reconcile.py
+        through runtime/wiki/wiki-bootstrap.sh; the component''s own job has not yet run it
+        on a default branch, which needs a consumer pinned at a ref carrying 1.1.0.
+
+        Earlier evidence, for the sync itself: gitlab.example.com 18.9.1-ee, POST /api/v4/projects/:id/ci/lint.
+        Executed on shared ref 1.0.0-rc.2 by consumer pipelines on the originating estate,
+        2026/09: three wiki-sync consumers, all three docs:docs-wiki-sync green, and a documentation
         consumer on its merge-request, default-branch and scheduled pipelines. Both directions
         ran: the pull step reached its decision and reported "wiki has no edits since the
         last sync", which rc.1 skipped entirely through a swallowed failure. Importing an
@@ -1972,7 +2010,21 @@ components:
         a wiki edit that also changed the page title became a repository commit authored by
         the wiki editor and renaming the page''s file, and a repository edit reached the wiki.
         The pull''s own push to the default branch was skipped by its ci.skip, as designed.'
-      notes: 'Failure semantics (section 10.1): a missing WIKI_TOKEN excludes the job through
+      notes: 'Webhook reconcile ownership (1.1.1): the step keeps the trigger token the webhook
+        already carries and rewrites only the address around it, minting one only when there
+        is none to keep. A trigger pipeline runs as its token''s owner, so replacing a working
+        token changes which identity the delivery runs as; on a group-level protected WIKI_TOKEN
+        and a project access token, that produced trigger pipelines containing no jobs at
+        all, while the same hook seconds later through a group member''s token ran the sync
+        green. Webhook reconcile failure semantics (section 10.1): the step''s first call
+        is a capability probe. An authorization failure there is a fact about the token rather
+        than an outage, so the run names the variable and the scope it needs and leaves the
+        wiring untouched; every API failure after that probe fails the job. It writes only
+        on a difference, so a second run reports "already correct" and touches nothing, and
+        it runs only on the default branch, since a URL built from a feature branch would
+        point the hook at a ref that is about to disappear. It never deletes a trigger token
+        belonging to another user and never prints a token, including the one inside the hook
+        URL. Failure semantics (section 10.1): a missing WIKI_TOKEN excludes the job through
         run-rules rather than failing it; once the job runs, an absent token, an unreachable
         wiki, a rejected push after the bounded retries, a payload whose sha256 does not match,
         or a pyyaml that is neither importable nor installable all fail the job. Compatibility:
@@ -6377,6 +6429,18 @@ pipelines:
           from the wiki, relative to the consumer checkout. Empty means the repository root
           mkdocs.yml when one exists, and no filtering otherwise.
         default: ''
+      webhook-reconcile:
+        type: string
+        description: Whether the sync job repairs its own wiki webhook and pipeline trigger
+          token on each default-branch run, so a project that is renamed, moved or migrated
+          to another server name keeps delivering wiki edits to CI without anyone re-running
+          the bootstrap script. Needs a token with the api scope and the Maintainer role in
+          WIKI_ADMIN_TOKEN, or failing that in WIKI_TOKEN; a narrower token is reported and
+          the wiring is left alone.
+        default: 'on'
+        options:
+          - 'on'
+          - 'off'
       runner-tags:
         type: array
         description: Approved runner selection from the estate profile.
@@ -6411,6 +6475,15 @@ pipelines:
         kind: ci-variable
         scope: write_repository on the project, Maintainer when the default branch is protected.
           Clones and pushes the wiki, and pushes pulled wiki edits to the default branch.
+          Also the fallback identity for the webhook-reconcile step, which needs api rather
+          than write_repository.
+        protected_ref_required: false
+      - name: WIKI_ADMIN_TOKEN
+        kind: ci-variable
+        scope: api on the project, Maintainer role. Optional, and used only by the webhook-reconcile
+          step to list and write the project's webhooks and pipeline trigger tokens. Set it
+          when WIKI_TOKEN should stay at write_repository; absent, the step falls back to
+          WIKI_TOKEN and reports the shortfall instead of failing.
         protected_ref_required: false
     runtime_image:
       reference: 'per component: the include forwards execution-image, whose default is digest-pinned.

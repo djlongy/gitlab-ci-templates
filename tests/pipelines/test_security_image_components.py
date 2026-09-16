@@ -3,7 +3,7 @@
 Two halves. The offline half reads the eight templates and asserts what sections
 5 to 10 require of every public component: job naming, artifact roots,
 digest-pinned images, no suppressed failure, no secret in an input. The online
-half renders the inputs with tests/pipelines/render_component.py and sends the
+half renders the inputs with tools/resolve/render_component.py and sends the
 result to the CI Lint API, which is the only check here that compiles a
 component the way GitLab will.
 
@@ -22,12 +22,14 @@ from __future__ import annotations
 import importlib.util
 import os
 import re
+import sys
 from pathlib import Path
 
 import pytest
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO_ROOT))
 TEMPLATES = REPO_ROOT / "templates"
 FIXTURES = Path(__file__).parent / "fixtures" / "security-image-components.yml"
 
@@ -40,7 +42,10 @@ def load(name: str, filename: str):
 
 
 lint_module = load("ci_lint", "lint.py")
-render = load("render_component", "render_component.py")
+
+# render_component moved to tools/resolve/ so the lint harness and the local
+# runner share one implementation; `load()` still reaches lint.py beside this file.
+from tools.resolve import render_component as render  # noqa: E402
 
 FIXTURE_DATA = yaml.safe_load(FIXTURES.read_text())["components"]
 COMPONENTS = sorted(FIXTURE_DATA)

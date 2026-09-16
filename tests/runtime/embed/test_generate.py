@@ -99,6 +99,7 @@ def run_region(body: str, tmp_path: Path) -> tuple[subprocess.CompletedProcess, 
         "PATH": "/usr/bin:/bin",
         "CI_PROJECT_DIR": str(tmp_path),
         "CI_TPL_RUNTIME_DIR": str(tmp_path / "runtime"),
+        "CI_TPL_RECONCILE_DIR": str(tmp_path / "reconcile"),
         "CI_TPL_HELPER": str(tmp_path / "helper.sh"),
         "CI_TPL_RUNTIME": str(tmp_path / "tfguard.sh"),
     }
@@ -183,6 +184,8 @@ def test_the_inventory_of_embedded_regions_is_the_expected_one():
          "dir $CI_TPL_RUNTIME_DIR runtime/httpjson.py runtime/sign/cosign_attest.py "
          "runtime/sign/cosign_checksums.txt"),
         ("container-smoke-test", "file $CI_TPL_HELPER runtime/registry/image-json.sh"),
+        ("docs-wiki-sync",
+         "dir $CI_TPL_RECONCILE_DIR runtime/httpjson.py runtime/wiki/reconcile.py"),
         ("docs-wiki-sync",
          "dir $CI_TPL_RUNTIME_DIR runtime/wiki/wiki-deploy.sh runtime/wiki/wiki-pull.py "
          "runtime/wiki/wiki-import.py runtime/wiki/wiki-sync.py runtime/wiki/docfilter.py "
