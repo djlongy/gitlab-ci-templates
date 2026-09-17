@@ -412,7 +412,7 @@ components:
   - name: container-build-buildkit
     kind: component
     path: templates/container-build-buildkit/template.yml
-    status: experimental
+    status: released
     inputs:
       instance:
         type: string
@@ -424,10 +424,35 @@ components:
         default: build
       execution-image:
         type: string
-        description: Approved BuildKit execution image pinned by digest. The default is moby/buildkit:v0.18.2
-          through the estate's Docker Hub mirror.
-        default: docker.io/moby/buildkit@sha256:86c0ad9d1137c186e9d455912167df20e530bdf7f7c19de802e892bb8ca16552
-        regex: ^.+@sha256:[0-9a-f]{64}$
+        description: Approved BuildKit execution image. A digest pins exactly what runs; a
+          tag is accepted because a site whose only path to an image is a proxy cache names
+          <mirror>/moby/buildkit:v0.33.0 and lets the cache resolve it, and refusing that
+          would push the site into editing this file. A reference with neither is refused
+          rather than silently becoming :latest. The default is moby/buildkit v0.33.0, by
+          digest.
+        default: docker.io/moby/buildkit@sha256:6c2fa84a6b61ccd72899dde4239f8d5717f05f9a8ca6f3cad185fb1a95a94de3
+        regex: ^.+(@sha256:[0-9a-f]{64}|:[A-Za-z0-9._-]{1,128})$
+      registry-username-variable:
+        type: string
+        description: Name of the CI variable holding the registry username. The name, never
+          the value. The default is the name this library read before the input existed, so
+          a consumer already using it passes nothing here.
+        regex: ^[A-Z][A-Z0-9_]*$
+        default: HARBOR_USER
+      registry-password-variable:
+        type: string
+        description: Name of the CI variable holding the registry password or robot token.
+          The name, never the value.
+        regex: ^[A-Z][A-Z0-9_]*$
+        default: HARBOR_PASSWORD
+      ca-bundle-variable:
+        type: string
+        description: Name of a CI variable holding a PEM bundle to trust before any registry
+          call, for a registry whose certificate an internal authority issued. A file variable
+          (the value is a path) or an ordinary one (the value is the PEM) both work. Empty
+          skips it, and nothing is downloaded either way.
+        regex: ^$|^[A-Z][A-Z0-9_]*$
+        default: ''
       runner-tags:
         type: array
         description: Runner selection from the estate profile. The estate's instance runners
@@ -512,22 +537,25 @@ components:
     required_secrets:
       - name: HARBOR_USER
         kind: ci-variable
-        scope: push to the candidate registry project
+        scope: push to the candidate registry, default name of registry-username-variable
         protected_ref_required: false
       - name: HARBOR_PASSWORD
         kind: ci-variable
-        scope: push to the candidate registry project
+        scope: push to the candidate registry, default name of registry-password-variable
         protected_ref_required: false
     runtime_image:
-      reference: docker.io/moby/buildkit@sha256:86c0ad9d1137c186e9d455912167df20e530bdf7f7c19de802e892bb8ca16552
+      reference: docker.io/moby/buildkit@sha256:6c2fa84a6b61ccd72899dde4239f8d5717f05f9a8ca6f3cad185fb1a95a94de3
       pinning: digest
       tool_versions:
-        buildkit: v0.18.2
+        buildkit: v0.33.0
     trust:
       privileged: false
       network_egress:
-        - 'registry.example.com: candidate registry push'
-        - every registry named in a FROM line of the consumer Dockerfile
+        - 'the registry host in image-repository: manifest and blob push'
+        - every registry named in a FROM line of the consumer Dockerfile, and every host that
+          Dockerfile fetches from while it builds
+        - 'nothing else: the execution image carries buildctl, the trust anchor comes from
+          a CI variable rather than a download, and the credentials come from the environment'
       runner_profile: Docker executor running buildctl-daemonless.sh. The estate's instance
         runners are unprivileged and registered untagged, which is what the current template
         already builds on. A rootless or privileged BuildKit daemon is not required and not
@@ -538,7 +566,14 @@ components:
         - source-reviewed
         - yaml-parsed
         - gitlab-linted
-      verified_at: 2026/09/15
+        - integration-tested
+      verified_at: 2026/09/17
+      revision: 1.2.0
+      environment: 'gitlab.example.com 18.9.1-ee, POST /api/v4/projects/:id/ci/lint. Executed
+        on the originating estate, 2026/09: three consumer projects built and pushed to a
+        Quay 3.15.7 registry with an internally issued certificate, one of them running every
+        job this composition creates on a default-branch push, green through to a signature
+        and two attestations in the registry.'
       notes: 'Failure semantics (section 10.1). The job fails when the image repository carries
         a tag or digest, when a tag alias is not a usable tag, when a build argument is not
         NAME=VALUE, when the registry credentials are absent, when BuildKit exits non-zero,
@@ -546,7 +581,12 @@ components:
         fallback and no tag fallback: the previous template wrote the tag into a field named
         digest and exited 0. With push-candidate false the job records CI_TPL_IMAGE_PUSHED=false,
         writes no image.json, and every downstream component then fails its own identity validation.
-        Not runtime-tested: no pipeline has executed this component.'
+        Evidence: the job built a Dockerfile whose base came from a proxy cache and pushed
+        the result to a registry whose certificate an internal authority issued, with the
+        credentials named through registry-username-variable and registry-password-variable
+        and the trust anchor through ca-bundle-variable. The trace carries buildctl v0.33.0
+        and the digest it recorded in image.json; a second job then read the same digest back
+        from the registry with regctl.'
   - name: container-build-jib
     kind: component
     path: templates/container-build-jib/template.yml
@@ -566,6 +606,27 @@ components:
           through the estate's Docker Hub mirror.
         default: docker.io/gradle@sha256:eb2209db6d5a025a0a8711a6f1a5556b654ecc07f05dc8703d2317eab410aa8e
         regex: ^.+@sha256:[0-9a-f]{64}$
+      registry-username-variable:
+        type: string
+        description: Name of the CI variable holding the registry username. The name, never
+          the value. The default is the name this library read before the input existed, so
+          a consumer already using it passes nothing here.
+        regex: ^[A-Z][A-Z0-9_]*$
+        default: HARBOR_USER
+      registry-password-variable:
+        type: string
+        description: Name of the CI variable holding the registry password or robot token.
+          The name, never the value.
+        regex: ^[A-Z][A-Z0-9_]*$
+        default: HARBOR_PASSWORD
+      ca-bundle-variable:
+        type: string
+        description: Name of a CI variable holding a PEM bundle to trust before any registry
+          call, for a registry whose certificate an internal authority issued. A file variable
+          (the value is a path) or an ordinary one (the value is the PEM) both work. Empty
+          skips it, and nothing is downloaded either way.
+        regex: ^$|^[A-Z][A-Z0-9_]*$
+        default: ''
       runner-tags:
         type: array
         description: Runner selection from the estate profile.
@@ -712,6 +773,27 @@ components:
           through the estate's Docker Hub mirror.
         default: docker.io/golang@sha256:383395b794dffa5b53012a212365d40c8e37109a626ca30d6151c8348d380b5f
         regex: ^.+@sha256:[0-9a-f]{64}$
+      registry-username-variable:
+        type: string
+        description: Name of the CI variable holding the registry username. The name, never
+          the value. The default is the name this library read before the input existed, so
+          a consumer already using it passes nothing here.
+        regex: ^[A-Z][A-Z0-9_]*$
+        default: HARBOR_USER
+      registry-password-variable:
+        type: string
+        description: Name of the CI variable holding the registry password or robot token.
+          The name, never the value.
+        regex: ^[A-Z][A-Z0-9_]*$
+        default: HARBOR_PASSWORD
+      ca-bundle-variable:
+        type: string
+        description: Name of a CI variable holding a PEM bundle to trust before any registry
+          call, for a registry whose certificate an internal authority issued. A file variable
+          (the value is a path) or an ordinary one (the value is the PEM) both work. Empty
+          skips it, and nothing is downloaded either way.
+        regex: ^$|^[A-Z][A-Z0-9_]*$
+        default: ''
       runner-tags:
         type: array
         description: Runner selection from the estate profile.
@@ -1538,7 +1620,7 @@ components:
   - name: container-sign-attest-cosign
     kind: component
     path: templates/container-sign-attest-cosign/template.yml
-    status: experimental
+    status: released
     inputs:
       instance:
         type: string
@@ -1554,6 +1636,34 @@ components:
           at a pinned version and verified against the checksums committed in runtime/sign/.
         default: docker.io/python@sha256:cd7c412d000912f29075a1b8803e43cb2f38bb67f104019df526df5ceaf30569
         regex: ^.+@sha256:[0-9a-f]{64}$
+      registry-username-variable:
+        type: string
+        description: Name of the CI variable holding the registry username. The name, never
+          the value. The default is the name this library read before the input existed, so
+          a consumer already using it passes nothing here.
+        regex: ^[A-Z][A-Z0-9_]*$
+        default: HARBOR_USER
+      registry-password-variable:
+        type: string
+        description: Name of the CI variable holding the registry password or robot token.
+          The name, never the value.
+        regex: ^[A-Z][A-Z0-9_]*$
+        default: HARBOR_PASSWORD
+      ca-bundle-variable:
+        type: string
+        description: Name of a CI variable holding a PEM bundle to trust before any registry
+          call, for a registry whose certificate an internal authority issued. A file variable
+          (the value is a path) or an ordinary one (the value is the PEM) both work. Empty
+          skips it, and nothing is downloaded either way.
+        regex: ^$|^[A-Z][A-Z0-9_]*$
+        default: ''
+      cosign-release-url:
+        type: string
+        description: Base URL the pinned cosign binary is downloaded from, one directory above
+          the version. A site with no path to the upstream releases points this at its own
+          mirror; the checksum is pinned either way, so a mirror cannot serve a different
+          binary.
+        default: https://github.com/sigstore/cosign/releases/download
       runner-tags:
         type: array
         description: Runner selection from the estate profile.
@@ -1695,8 +1805,14 @@ components:
         - yaml-parsed
         - gitlab-linted
         - runtime-tested
-      verified_at: 2026/09/15
-      environment: gitlab.example.com 18.9.1-ee, project 18
+        - integration-tested
+      verified_at: 2026/09/17
+      revision: 1.2.0
+      environment: 'gitlab.example.com 18.9.1-ee, POST /api/v4/projects/:id/ci/lint. Executed
+        on the originating estate, 2026/09: three consumer projects built and pushed to a
+        Quay 3.15.7 registry with an internally issued certificate, one of them running every
+        job this composition creates on a default-branch push, green through to a signature
+        and two attestations in the registry.'
       notes: 'Failure semantics, all hard: no ID token, a rejected Vault login, a login without
         a client token, a cosign download whose sha256 does not match runtime/sign/cosign_checksums.txt,
         an unreadable Transit key, a missing SBOM or vulnerability record while its attestation
@@ -1711,7 +1827,11 @@ components:
         on 2026/09/15. Status: experimental, because no consumer pipeline has run this component
         on 1.0.0-rc.2. `released` in this repository means a consumer job executed green,
         not that the component looks finished. a consumer''s build source is tags-only, so
-        no candidate chain job was created.'
+        no candidate chain job was created. Evidence: signed an image in a Quay 3.15.7 registry
+        and pushed two attestations. Quay stores them as the tags sha256-<digest>.sig and
+        sha256-<digest>.att and reports an EMPTY OCI referrers list for the image, so discovery
+        by referrer finds nothing there while cosign verify does. The cosign binary came from
+        the pinned upstream release URL and matched its pinned checksum.'
   - name: container-smoke-test
     kind: component
     path: templates/container-smoke-test/template.yml
@@ -1737,6 +1857,27 @@ components:
           resolve to the same index, so the default matches execution-image.
         default: docker.io/docker@sha256:aa3df78ecf320f5fafdce71c659f1629e96e9de0968305fe1de670e0ca9176ce
         regex: ^.+@sha256:[0-9a-f]{64}$
+      registry-username-variable:
+        type: string
+        description: Name of the CI variable holding the registry username. The name, never
+          the value. The default is the name this library read before the input existed, so
+          a consumer already using it passes nothing here.
+        regex: ^[A-Z][A-Z0-9_]*$
+        default: HARBOR_USER
+      registry-password-variable:
+        type: string
+        description: Name of the CI variable holding the registry password or robot token.
+          The name, never the value.
+        regex: ^[A-Z][A-Z0-9_]*$
+        default: HARBOR_PASSWORD
+      ca-bundle-variable:
+        type: string
+        description: Name of a CI variable holding a PEM bundle to trust before any registry
+          call, for a registry whose certificate an internal authority issued. A file variable
+          (the value is a path) or an ordinary one (the value is the PEM) both work. Empty
+          skips it, and nothing is downloaded either way.
+        regex: ^$|^[A-Z][A-Z0-9_]*$
+        default: ''
       runner-tags:
         type: array
         description: Runner selection from the estate profile. This component needs a privileged
@@ -2408,7 +2549,7 @@ components:
   - name: quality-dependency-lockfiles
     kind: component
     path: templates/quality-dependency-lockfiles/template.yml
-    status: experimental
+    status: released
     inputs:
       instance:
         type: string
@@ -2495,8 +2636,14 @@ components:
         - yaml-parsed
         - gitlab-linted
         - runtime-tested
-      verified_at: 2026/09/15
-      environment: gitlab.example.com 18.9.1-ee, project 18
+        - integration-tested
+      verified_at: 2026/09/17
+      revision: 1.2.0
+      environment: 'gitlab.example.com 18.9.1-ee, POST /api/v4/projects/:id/ci/lint. Executed
+        on the originating estate, 2026/09: three consumer projects built and pushed to a
+        Quay 3.15.7 registry with an internally issued certificate, one of them running every
+        job this composition creates on a default-branch push, green through to a signature
+        and two attestations in the registry.'
       notes: 'Scope. Checks that every lockfile the consumer declares exists, is non-empty,
         and where it is a requirements-style file, that every requirement line is pinned.
         Nothing is inferred from the checkout: the template this replaces detected languages
@@ -2522,7 +2669,8 @@ components:
         HAS run in a consumer pipeline and failed: a consumer, a job, because a stdlib-only
         Go module had no lockfile to declare and an empty declaration is a usage error. The
         `none` sentinel added in 1.0.0 is the fix, and it has not itself been run in a pipeline,
-        so there is still no green consumer run to promote on.'
+        so there is still no green consumer run to promote on. Evidence: green on an earlier
+        consumer run and again on two of the three container consumers, with the `none` sentinel.'
   - name: quality-sonarqube
     kind: component
     path: templates/quality-sonarqube/template.yml
@@ -3152,6 +3300,17 @@ components:
           of aquasec/trivy:0.69.3, the last release before the 0.69.4 supply-chain compromise.
         regex: ^.+@sha256:[0-9a-f]{64}$
         default: docker.io/aquasec/trivy@sha256:bcc376de8d77cfe086a917230e818dc9f8528e3c852f7b1aff648949b6258d1c
+      db-repository:
+        type: string
+        description: OCI repository the vulnerability database is pulled from, passed as TRIVY_DB_REPOSITORY.
+          Empty keeps trivy's own default, which reaches ghcr.io directly; a site with no
+          egress points this at its mirror of that repository.
+        default: ''
+      java-db-repository:
+        type: string
+        description: OCI repository for the Java database, passed as TRIVY_JAVA_DB_REPOSITORY.
+          Only fetched when a scan finds a jar. Empty keeps trivy's default.
+        default: ''
       runner-tags:
         type: array
         description: Runner selection from the estate profile.
@@ -3441,7 +3600,7 @@ components:
   - name: security-image-trivy
     kind: component
     path: templates/security-image-trivy/template.yml
-    status: experimental
+    status: released
     inputs:
       instance:
         type: string
@@ -3457,6 +3616,38 @@ components:
           the March 2026 supply-chain compromise of 0.69.4 to 0.69.6.
         default: docker.io/aquasec/trivy@sha256:bcc376de8d77cfe086a917230e818dc9f8528e3c852f7b1aff648949b6258d1c
         regex: ^.+@sha256:[0-9a-f]{64}$
+      registry-username-variable:
+        type: string
+        description: Name of the CI variable holding the registry username. The name, never
+          the value. The default is the name this library read before the input existed, so
+          a consumer already using it passes nothing here.
+        regex: ^[A-Z][A-Z0-9_]*$
+        default: HARBOR_USER
+      registry-password-variable:
+        type: string
+        description: Name of the CI variable holding the registry password or robot token.
+          The name, never the value.
+        regex: ^[A-Z][A-Z0-9_]*$
+        default: HARBOR_PASSWORD
+      ca-bundle-variable:
+        type: string
+        description: Name of a CI variable holding a PEM bundle to trust before any registry
+          call, for a registry whose certificate an internal authority issued. A file variable
+          (the value is a path) or an ordinary one (the value is the PEM) both work. Empty
+          skips it, and nothing is downloaded either way.
+        regex: ^$|^[A-Z][A-Z0-9_]*$
+        default: ''
+      db-repository:
+        type: string
+        description: OCI repository the vulnerability database is pulled from, passed as TRIVY_DB_REPOSITORY.
+          Empty keeps trivy's own default, which reaches ghcr.io directly; a site with no
+          egress points this at its mirror of that repository.
+        default: ''
+      java-db-repository:
+        type: string
+        description: OCI repository for the Java database, passed as TRIVY_JAVA_DB_REPOSITORY.
+          Only fetched when a scan finds a jar. Empty keeps trivy's default.
+        default: ''
       runner-tags:
         type: array
         description: Runner selection from the estate profile.
@@ -3575,8 +3766,14 @@ components:
         - yaml-parsed
         - gitlab-linted
         - runtime-tested
-      verified_at: 2026/09/15
-      environment: gitlab.example.com 18.9.1-ee, project 18
+        - integration-tested
+      verified_at: 2026/09/17
+      revision: 1.2.0
+      environment: 'gitlab.example.com 18.9.1-ee, POST /api/v4/projects/:id/ci/lint. Executed
+        on the originating estate, 2026/09: three consumer projects built and pushed to a
+        Quay 3.15.7 registry with an internally issued certificate, one of them running every
+        job this composition creates on a default-branch push, green through to a signature
+        and two attestations in the registry.'
       notes: 'Failure semantics: a finding at or above severity-threshold fails the job in
         blocking mode and is recorded in advisory mode. A scanner crash, a database that did
         not download, an empty report or a report missing its SchemaVersion marker fails the
@@ -3587,7 +3784,10 @@ components:
         the pinned image digest on 2026/09/15. Status: experimental, because no consumer pipeline
         has run this component on 1.0.0-rc.2. `released` in this repository means a consumer
         job executed green, not that the component looks finished. a consumer''s build source
-        is tags-only, so nothing was built for it to scan.'
+        is tags-only, so nothing was built for it to scan. Evidence: green against an image
+        in that registry, and blocking on a second consumer whose upstream base carried 7
+        critical and 121 high findings, where it stopped the chain. Both are runs; the second
+        is the one that shows the gate is not decorative.'
   - name: security-repository-audit
     kind: component
     path: templates/security-repository-audit/template.yml
@@ -3886,7 +4086,7 @@ components:
   - name: security-sbom-syft
     kind: component
     path: templates/security-sbom-syft/template.yml
-    status: experimental
+    status: released
     inputs:
       instance:
         type: string
@@ -3903,6 +4103,27 @@ components:
           a script with.'
         default: docker.io/anchore/syft@sha256:c5a32143787730c72c58aee4227d9b0242ccc463aa42214b26e2b18f692c1a71
         regex: ^.+@sha256:[0-9a-f]{64}$
+      registry-username-variable:
+        type: string
+        description: Name of the CI variable holding the registry username. The name, never
+          the value. The default is the name this library read before the input existed, so
+          a consumer already using it passes nothing here.
+        regex: ^[A-Z][A-Z0-9_]*$
+        default: HARBOR_USER
+      registry-password-variable:
+        type: string
+        description: Name of the CI variable holding the registry password or robot token.
+          The name, never the value.
+        regex: ^[A-Z][A-Z0-9_]*$
+        default: HARBOR_PASSWORD
+      ca-bundle-variable:
+        type: string
+        description: Name of a CI variable holding a PEM bundle to trust before any registry
+          call, for a registry whose certificate an internal authority issued. A file variable
+          (the value is a path) or an ordinary one (the value is the PEM) both work. Empty
+          skips it, and nothing is downloaded either way.
+        regex: ^$|^[A-Z][A-Z0-9_]*$
+        default: ''
       runner-tags:
         type: array
         description: Runner selection from the estate profile.
@@ -3985,8 +4206,14 @@ components:
         - yaml-parsed
         - gitlab-linted
         - runtime-tested
-      verified_at: 2026/09/15
-      environment: gitlab.example.com 18.9.1-ee, project 18
+        - integration-tested
+      verified_at: 2026/09/17
+      revision: 1.2.0
+      environment: 'gitlab.example.com 18.9.1-ee, POST /api/v4/projects/:id/ci/lint. Executed
+        on the originating estate, 2026/09: three consumer projects built and pushed to a
+        Quay 3.15.7 registry with an internally issued certificate, one of them running every
+        job this composition creates on a default-branch push, green through to a signature
+        and two attestations in the registry.'
       notes: 'gitlab-linted: the merged configuration was compiled through the CI Lint API
         with defaults, with two instances, and with the producer removed. No job ran. runtime-tested:
         runtime/scan/scan.sh has unit tests for the identity, subject and completeness checks,
@@ -3995,7 +4222,9 @@ components:
         been executed in CI. Status: experimental, because no consumer pipeline has run this
         component on 1.0.0-rc.2. `released` in this repository means a consumer job executed
         green, not that the component looks finished. a consumer''s build source is tags-only,
-        so no image existed to describe.'
+        so no image existed to describe. Evidence: catalogued an image held in that registry.
+        The SBOM stays a job artifact; the signing job is what puts it in the registry, as
+        a cosign attestation.'
   - name: security-sbom-upload-dtrack
     kind: component
     path: templates/security-sbom-upload-dtrack/template.yml
@@ -5342,15 +5571,55 @@ pipelines:
           - dev
           - prod
         default: prod
+      registry-username-variable:
+        type: string
+        description: 'Name of the CI variable holding the registry username. The name, never
+          the value: the build, test, scan and signing jobs read it with printenv at job time.
+          The default is the name this library read before the input existed.'
+        regex: ^[A-Z][A-Z0-9_]*$
+        default: HARBOR_USER
+      registry-password-variable:
+        type: string
+        description: Name of the CI variable holding the registry password or robot token.
+          The name, never the value.
+        regex: ^[A-Z][A-Z0-9_]*$
+        default: HARBOR_PASSWORD
+      ca-bundle-variable:
+        type: string
+        description: Name of a CI variable holding a PEM bundle every registry-facing job
+          trusts before its first call, for a registry whose certificate an internal authority
+          issued. A file variable (the value is a path) or an ordinary one (the value is the
+          PEM). Empty skips it and downloads nothing.
+        regex: ^$|^[A-Z][A-Z0-9_]*$
+        default: ''
+      trivy-db-repository:
+        type: string
+        description: OCI repository both trivy scans pull the vulnerability database from.
+          Empty keeps trivy's default, which reaches ghcr.io directly. A site with no egress
+          points this at its own mirror of that repository.
+        default: ''
+      trivy-java-db-repository:
+        type: string
+        description: OCI repository for trivy's Java database, fetched only when a scan finds
+          a jar. Empty keeps trivy's default.
+        default: ''
+      cosign-release-url:
+        type: string
+        description: Base URL the signing job downloads the pinned cosign binary from. The
+          checksum is pinned, so a mirror changes where the bytes come from and not which
+          bytes are accepted.
+        default: https://github.com/sigstore/cosign/releases/download
       runner-tags:
         type: array
         description: Approved runner selection from the estate profile.
         default: []
       build-image:
         type: string
-        description: Approved BuildKit image pinned by digest.
-        regex: ^.+@sha256:[0-9a-f]{64}$
-        default: docker.io/moby/buildkit@sha256:86c0ad9d1137c186e9d455912167df20e530bdf7f7c19de802e892bb8ca16552
+        description: Approved BuildKit image. A digest pins what runs; a tag is accepted so
+          a site whose only path to an image is a proxy cache can name <mirror>/moby/buildkit:v0.33.0
+          and let the cache resolve it. The default is moby/buildkit v0.33.0, by digest.
+        regex: ^.+(@sha256:[0-9a-f]{64}|:[A-Za-z0-9._-]{1,128})$
+        default: docker.io/moby/buildkit@sha256:6c2fa84a6b61ccd72899dde4239f8d5717f05f9a8ca6f3cad185fb1a95a94de3
       trivy-image:
         type: string
         description: Approved Trivy image pinned by digest, used by both scans.
@@ -5466,11 +5735,11 @@ pipelines:
     required_secrets:
       - name: HARBOR_USER
         kind: ci-variable
-        scope: push to the candidate registry project
+        scope: push to the candidate registry project, default of registry-username-variable
         protected_ref_required: false
       - name: HARBOR_PASSWORD
         kind: ci-variable
-        scope: push to the candidate registry project
+        scope: push to the candidate registry project, default of registry-password-variable
         protected_ref_required: false
       - name: DTRACK_API_KEY
         kind: ci-variable
@@ -5497,10 +5766,12 @@ pipelines:
         - 'registry.example.com: candidate registry push'
         - every registry named in a FROM line of the consumer Dockerfile
         - 'registry.example.com: pull the images under test'
-        - Trivy vulnerability database source (ghcr.io by default)
+        - 'Trivy vulnerability database source: mirror.gcr.io by default, or the repository
+          named by trivy-db-repository'
         - The Dependency-Track instance named by the api-url input
         - vault.example.com
-        - github.com (the pinned cosign release asset)
+        - 'github.com, or the host named by cosign-release-url: the pinned cosign release
+          asset, accepted only against its pinned checksum'
         - The Vigil instance named by the vigil-url input
       runner_profile: shared-docker, the estate instance runners. They are registered untagged,
         so runner-tags selects nothing today and a tag is not a permission boundary.
@@ -5510,8 +5781,17 @@ pipelines:
         - source-reviewed
         - yaml-parsed
         - gitlab-linted
-      verified_at: 2026/09/15
-      environment: gitlab.example.com 18.9.1-ee, project 18, POST /api/v4/projects/<project-id>/ci/lint
+      verified_at: 2026/09/17
+      revision: 1.2.0
+      environment: 'gitlab.example.com 18.9.1-ee, POST /api/v4/projects/:id/ci/lint. On the
+        originating estate a consumer ran all eight jobs this composition creates on a default-branch
+        push, against a Quay 3.15.7 registry, and every one went green through to a signature
+        and two attestations in the registry. That is the verify, build, scan and attest halves;
+        the publish half is a protected-tag manual job nobody has started, so the composition
+        stays experimental and its status understates what has run rather than overstating
+        it. A second consumer is the same composition stopping at a real finding: the image
+        scan refused an upstream base carrying 7 critical findings and the signing job never
+        ran.'
       notes: 'The release chain is verify -> build -> scan -> attest -> publish, and each
         link is a declared `needs:` edge rather than a stage name: promotion needs the image
         scan and the signing job, and signing needs the build, the SBOM, the scan and all

@@ -85,14 +85,17 @@ outputs:
     schema: schema_version 1; the destination digest read back after the copy
     subject_identity: repository@sha256 digest, verified in the destination project.
     retention: 1 week
+# The two registry names below are the DEFAULTS of registry-username-variable
+# and registry-password-variable. A consumer pushing elsewhere passes its own
+# two names instead, and the jobs resolve whatever they are given at job time.
 required_secrets:
   - name: HARBOR_USER
     kind: ci-variable
-    scope: push to the candidate registry project
+    scope: push to the candidate registry project, default of registry-username-variable
     protected_ref_required: false
   - name: HARBOR_PASSWORD
     kind: ci-variable
-    scope: push to the candidate registry project
+    scope: push to the candidate registry project, default of registry-password-variable
     protected_ref_required: false
   - name: DTRACK_API_KEY
     kind: ci-variable
@@ -119,10 +122,12 @@ trust:
     - 'registry.example.com: candidate registry push'
     - every registry named in a FROM line of the consumer Dockerfile
     - 'registry.example.com: pull the images under test'
-    - Trivy vulnerability database source (ghcr.io by default)
+    - 'Trivy vulnerability database source: mirror.gcr.io by default, or the
+       repository named by trivy-db-repository'
     - The Dependency-Track instance named by the api-url input
     - vault.example.com
-    - github.com (the pinned cosign release asset)
+    - 'github.com, or the host named by cosign-release-url: the pinned cosign
+       release asset, accepted only against its pinned checksum'
     - The Vigil instance named by the vigil-url input
   runner_profile: shared-docker, the estate instance runners. They are registered untagged,
     so runner-tags selects nothing today and a tag is not a permission boundary.
@@ -132,8 +137,19 @@ validation:
     - source-reviewed
     - yaml-parsed
     - gitlab-linted
-  verified_at: 2026/09/15
-  environment: gitlab.example.com 18.9.1-ee, project 18, POST /api/v4/projects/<project-id>/ci/lint
+  verified_at: 2026/09/17
+  revision: '1.2.0'
+  environment: >-
+    gitlab.example.com 18.9.1-ee, POST /api/v4/projects/:id/ci/lint. On the
+    originating estate a consumer ran all eight jobs this composition
+    creates on a default-branch push, against a Quay 3.15.7 registry, and
+    every one went green through to a signature and two attestations in the
+    registry. That is the verify, build, scan and attest halves; the publish
+    half is a protected-tag manual job nobody has started, so the
+    composition stays experimental and its status understates what has run
+    rather than overstating it. A second consumer is the same composition
+    stopping at a real finding: the image scan refused an upstream base
+    carrying 7 critical findings and the signing job never ran.
   notes: >-
     The release chain is verify -> build -> scan -> attest -> publish, and each link is
     a declared `needs:` edge rather than a stage name: promotion needs the image scan

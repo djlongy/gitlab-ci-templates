@@ -1,7 +1,7 @@
 ---
 name: security-image-trivy
 kind: component
-status: experimental
+status: released
 introduced_in: 1.0.0
 minimum_gitlab: '18.9'
 # Retry policy: the `max-retries` input (0, 1 or 2, default 1) sets `retry: max`,
@@ -61,8 +61,16 @@ validation:
     - yaml-parsed
     - gitlab-linted
     - runtime-tested
-  verified_at: 2026/09/15
-  environment: gitlab.example.com 18.9.1-ee, project 18
+    - integration-tested
+  verified_at: 2026/09/17
+  revision: '1.2.0'
+  environment: >-
+    gitlab.example.com 18.9.1-ee, POST /api/v4/projects/:id/ci/lint.
+    Executed on the originating estate, 2026/09: three consumer projects
+    built and pushed to a Quay 3.15.7 registry with an internally issued
+    certificate, one of them running every job this composition creates on a
+    default-branch push, green through to a signature and two attestations
+    in the registry.
   notes: >-
     Failure semantics: a finding at or above severity-threshold fails the job in
     blocking mode and is recorded in advisory mode. A scanner crash, a database that
@@ -76,3 +84,7 @@ validation:
     `released` in this repository means a consumer job executed green, not that the
     component looks finished. a consumer's build source is tags-only, so nothing was
     built for it to scan.
+    Evidence: green against an image in that registry, and blocking on a
+    second consumer whose upstream base carried 7 critical and 121 high
+    findings, where it stopped the chain. Both are runs; the second is the
+    one that shows the gate is not decorative.

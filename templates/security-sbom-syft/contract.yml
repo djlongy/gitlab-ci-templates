@@ -1,7 +1,7 @@
 ---
 name: security-sbom-syft
 kind: component
-status: experimental
+status: released
 introduced_in: 1.0.0
 minimum_gitlab: '18.9'
 # Retry policy: the `max-retries` input (0, 1 or 2, default 1) sets `retry: max`,
@@ -55,8 +55,16 @@ validation:
     - yaml-parsed
     - gitlab-linted
     - runtime-tested
-  verified_at: 2026/09/15
-  environment: gitlab.example.com 18.9.1-ee, project 18
+    - integration-tested
+  verified_at: 2026/09/17
+  revision: '1.2.0'
+  environment: >-
+    gitlab.example.com 18.9.1-ee, POST /api/v4/projects/:id/ci/lint.
+    Executed on the originating estate, 2026/09: three consumer projects
+    built and pushed to a Quay 3.15.7 registry with an internally issued
+    certificate, one of them running every job this composition creates on a
+    default-branch push, green through to a signature and two attestations
+    in the registry.
   notes: >-
     gitlab-linted: the merged configuration was compiled through the CI Lint API with
     defaults, with two instances, and with the producer removed. No job ran.
@@ -67,3 +75,6 @@ validation:
     consumer pipeline has run this component on 1.0.0-rc.2. `released` in this
     repository means a consumer job executed green, not that the component looks
     finished. a consumer's build source is tags-only, so no image existed to describe.
+    Evidence: catalogued an image held in that registry. The SBOM stays a
+    job artifact; the signing job is what puts it in the registry, as a
+    cosign attestation.

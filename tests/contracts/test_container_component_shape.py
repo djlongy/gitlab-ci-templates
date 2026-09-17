@@ -31,6 +31,16 @@ STAGES = {
     "attest", "publish", "deploy", "verify-deploy",
 }
 DIGEST_REGEX = "^.+@sha256:[0-9a-f]{64}$"
+# Standard 1.0.5, section 12: a component may accept `name:tag` where its
+# contract says which executor and which site the form is for. BuildKit does,
+# because a site that mirrors an image into its own registry gets a digest of
+# its own, so the estate's digest names nothing there and a tag is the only
+# reference both sides can agree on. The shipped DEFAULT is still digest-pinned
+# below, for every component including this one.
+TAG_OR_DIGEST_REGEX = "^.+(@sha256:[0-9a-f]{64}|:[A-Za-z0-9._-]{1,128})$"
+EXECUTION_IMAGE_REGEX = {
+    "container-build-buildkit": TAG_OR_DIGEST_REGEX,
+}
 INSTANCE_REGEX = "^[a-z][a-z0-9-]{0,47}$"
 FORBIDDEN_TOP_LEVEL = {
     "stages", "workflow", "default", "variables", "image", "cache", "before_script",
@@ -115,7 +125,9 @@ def test_the_mandatory_inputs_are_declared(component: str):
     assert declared["instance"]["regex"] == INSTANCE_REGEX
     assert "default" not in declared["instance"], "instance is required"
     assert declared["stage"]["default"] in STAGES
-    assert declared["execution-image"]["regex"] == DIGEST_REGEX
+    assert declared["execution-image"]["regex"] == EXECUTION_IMAGE_REGEX.get(
+        component, DIGEST_REGEX
+    )
     assert re.match(DIGEST_REGEX, declared["execution-image"]["default"]), (
         "the shipped default must itself be digest-pinned; section 1 forbids "
         "calling a tag a digest"

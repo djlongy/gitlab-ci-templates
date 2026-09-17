@@ -4,7 +4,7 @@
 # generator, so it is not restated here.
 name: container-build-buildkit
 kind: component
-status: experimental
+status: released
 introduced_in: 1.0.0
 minimum_gitlab: '18.9'
 # Retry policy: the `max-retries` input (0, 1 or 2, default 1) sets `retry: max`,
@@ -32,25 +32,33 @@ outputs:
     format: json
     schema: 'BuildKit --metadata-file output, kept as the evidence the digest came from'
     retention: 1 week
+# The names below are the DEFAULTS of the registry-username-variable and
+# registry-password-variable inputs. A consumer that holds its credentials under
+# other names passes those names instead; the job resolves whatever it is given
+# with printenv and fails naming both variables when either is empty.
 required_secrets:
   - name: HARBOR_USER
     kind: ci-variable
-    scope: 'push to the candidate registry project'
+    scope: 'push to the candidate registry, default name of registry-username-variable'
     protected_ref_required: false
   - name: HARBOR_PASSWORD
     kind: ci-variable
-    scope: 'push to the candidate registry project'
+    scope: 'push to the candidate registry, default name of registry-password-variable'
     protected_ref_required: false
 runtime_image:
-  reference: 'docker.io/moby/buildkit@sha256:86c0ad9d1137c186e9d455912167df20e530bdf7f7c19de802e892bb8ca16552'
+  reference: 'docker.io/moby/buildkit@sha256:6c2fa84a6b61ccd72899dde4239f8d5717f05f9a8ca6f3cad185fb1a95a94de3'
   pinning: digest
   tool_versions:
-    buildkit: v0.18.2
+    buildkit: v0.33.0
 trust:
   privileged: false
   network_egress:
-    - 'registry.example.com: candidate registry push'
-    - 'every registry named in a FROM line of the consumer Dockerfile'
+    - 'the registry host in image-repository: manifest and blob push'
+    - 'every registry named in a FROM line of the consumer Dockerfile, and every
+       host that Dockerfile fetches from while it builds'
+    - 'nothing else: the execution image carries buildctl, the trust anchor
+       comes from a CI variable rather than a download, and the credentials come
+       from the environment'
   runner_profile: >-
     Docker executor running buildctl-daemonless.sh. The estate's instance
     runners are unprivileged and registered untagged, which is what the current
@@ -62,7 +70,16 @@ validation:
     - source-reviewed
     - yaml-parsed
     - gitlab-linted
-  verified_at: 2026/09/15
+    - integration-tested
+  verified_at: 2026/09/17
+  revision: '1.2.0'
+  environment: >-
+    gitlab.example.com 18.9.1-ee, POST /api/v4/projects/:id/ci/lint.
+    Executed on the originating estate, 2026/09: three consumer projects
+    built and pushed to a Quay 3.15.7 registry with an internally issued
+    certificate, one of them running every job this composition creates on a
+    default-branch push, green through to a signature and two attestations
+    in the registry.
   notes: >-
     Failure semantics (section 10.1). The job fails when the image repository
     carries a tag or digest, when a tag alias is not a usable tag, when a build
@@ -72,4 +89,11 @@ validation:
     previous template wrote the tag into a field named digest and exited 0.
     With push-candidate false the job records CI_TPL_IMAGE_PUSHED=false, writes
     no image.json, and every downstream component then fails its own identity
-    validation. Not runtime-tested: no pipeline has executed this component.
+    validation.
+    Evidence: the job built a Dockerfile whose base came from a proxy cache
+    and pushed the result to a registry whose certificate an internal
+    authority issued, with the credentials named through
+    registry-username-variable and registry-password-variable and the trust
+    anchor through ca-bundle-variable. The trace carries buildctl v0.33.0
+    and the digest it recorded in image.json; a second job then read the
+    same digest back from the registry with regctl.

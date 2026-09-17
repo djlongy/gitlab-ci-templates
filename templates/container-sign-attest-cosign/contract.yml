@@ -1,7 +1,7 @@
 ---
 name: container-sign-attest-cosign
 kind: component
-status: experimental
+status: released
 introduced_in: 1.0.0
 minimum_gitlab: '18.9'
 # Retry policy: the `max-retries` input (0, 1 or 2, default 1) sets `retry: max`,
@@ -59,8 +59,16 @@ validation:
     - yaml-parsed
     - gitlab-linted
     - runtime-tested
-  verified_at: 2026/09/15
-  environment: gitlab.example.com 18.9.1-ee, project 18
+    - integration-tested
+  verified_at: 2026/09/17
+  revision: '1.2.0'
+  environment: >-
+    gitlab.example.com 18.9.1-ee, POST /api/v4/projects/:id/ci/lint.
+    Executed on the originating estate, 2026/09: three consumer projects
+    built and pushed to a Quay 3.15.7 registry with an internally issued
+    certificate, one of them running every job this composition creates on a
+    default-branch push, green through to a signature and two attestations
+    in the registry.
   notes: >-
     Failure semantics, all hard: no ID token, a rejected Vault login, a login without a
     client token, a cosign download whose sha256 does not match
@@ -78,3 +86,9 @@ validation:
     component on 1.0.0-rc.2. `released` in this repository means a consumer job
     executed green, not that the component looks finished. a consumer's build source is
     tags-only, so no candidate chain job was created.
+    Evidence: signed an image in a Quay 3.15.7 registry and pushed two
+    attestations. Quay stores them as the tags sha256-<digest>.sig and
+    sha256-<digest>.att and reports an EMPTY OCI referrers list for the
+    image, so discovery by referrer finds nothing there while cosign verify
+    does. The cosign binary came from the pinned upstream release URL and
+    matched its pinned checksum.

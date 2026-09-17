@@ -26,6 +26,30 @@ spec:
         to execute a script with.
       default: 'docker.io/anchore/syft@sha256:c5a32143787730c72c58aee4227d9b0242ccc463aa42214b26e2b18f692c1a71'
       regex: '^.+@sha256:[0-9a-f]{64}$'
+    registry-username-variable:
+      type: string
+      description: >-
+        Name of the CI variable holding the registry username. The name, never
+        the value. The default is the name this library read before the input
+        existed, so a consumer already using it passes nothing here.
+      regex: '^[A-Z][A-Z0-9_]*$'
+      default: 'HARBOR_USER'
+    registry-password-variable:
+      type: string
+      description: >-
+        Name of the CI variable holding the registry password or robot token.
+        The name, never the value.
+      regex: '^[A-Z][A-Z0-9_]*$'
+      default: 'HARBOR_PASSWORD'
+    ca-bundle-variable:
+      type: string
+      description: >-
+        Name of a CI variable holding a PEM bundle to trust before any registry
+        call, for a registry whose certificate an internal authority issued. A
+        file variable (the value is a path) or an ordinary one (the value is the
+        PEM) both work. Empty skips it, and nothing is downloaded either way.
+      regex: '^$|^[A-Z][A-Z0-9_]*$'
+      default: ''
     runner-tags:
       type: array
       description: Runner selection from the estate profile.
@@ -79,8 +103,12 @@ spec:
     CI_TPL_RUNTIME_DIR: /tmp/ci-runtime
     CI_TPL_ARTIFACT_DIR: '.ci-artifacts/$[[ inputs.instance ]]/security-sbom-syft'
     CI_TPL_IDENTITY_FILE: '.ci-artifacts/$[[ inputs.instance ]]/$[[ inputs.build-component ]]/image.json'
-    CI_TPL_REGISTRY_USER: '$HARBOR_USER'
-    CI_TPL_REGISTRY_PASSWORD: '$HARBOR_PASSWORD'
+    # Credential variable NAMES, never values. The runtime resolves them with
+    # printenv, so a consumer names the variables it already has instead of
+    # adopting the two this library used to read.
+    CI_TPL_REGISTRY_USERNAME_VARIABLE: '$[[ inputs.registry-username-variable ]]'
+    CI_TPL_REGISTRY_PASSWORD_VARIABLE: '$[[ inputs.registry-password-variable ]]'
+    CI_TPL_CA_BUNDLE_VARIABLE: '$[[ inputs.ca-bundle-variable ]]'
   needs:
     - job: $[[ inputs.build-job ]]
       artifacts: true
@@ -334,16 +362,60 @@ spec:
           ci_tpl_json_string "$1" reference
       }
 
-      # Write a registry auth file from CI_TPL_REGISTRY_USER and
-      # CI_TPL_REGISTRY_PASSWORD. The credentials are read from the environment, never
-      # passed as arguments, so they do not appear in the process table. base64 wraps
-      # at 76 columns in both busybox and coreutils, so the newlines are stripped:
-      # a wrapped credential produces a config.json that no client can parse.
+      # Read the registry credentials from the CI variables the consumer named.
+      # CI_TPL_REGISTRY_USERNAME_VARIABLE and CI_TPL_REGISTRY_PASSWORD_VARIABLE hold
+      # variable NAMES, never values, and printenv resolves them: an input must not
+      # become code, which is what eval or an indirect expansion would make it. The
+      # estate's own names are the defaults, so a consumer that passes neither input
+      # keeps the behaviour it had.
+      #
+      # Sets CI_TPL_REGISTRY_USER and CI_TPL_REGISTRY_PASSWORD, either of which may be
+      # empty. A job that may run unauthenticated tests them; a job that must push
+      # calls ci_tpl_write_registry_auth, which refuses an empty one.
+      ci_tpl_load_registry_credentials() {
+          CI_TPL_REGISTRY_USERNAME_VARIABLE=${CI_TPL_REGISTRY_USERNAME_VARIABLE:-HARBOR_USER}
+          CI_TPL_REGISTRY_PASSWORD_VARIABLE=${CI_TPL_REGISTRY_PASSWORD_VARIABLE:-HARBOR_PASSWORD}
+          CI_TPL_REGISTRY_USER=$(printenv "$CI_TPL_REGISTRY_USERNAME_VARIABLE") ||
+              CI_TPL_REGISTRY_USER=''
+          CI_TPL_REGISTRY_PASSWORD=$(printenv "$CI_TPL_REGISTRY_PASSWORD_VARIABLE") ||
+              CI_TPL_REGISTRY_PASSWORD=''
+      }
+
+      # "set" or "empty or not defined" for one credential. The state, never the value.
+      ci_tpl_credential_state() {
+          if [ -n "$1" ]; then
+              echo 'set'
+          else
+              echo 'empty or not defined'
+          fi
+      }
+
+      # Write a registry auth file for one registry host. The credentials are read
+      # from the environment, never passed as arguments, so they do not appear in the
+      # process table. base64 wraps at 76 columns in both busybox and coreutils, so
+      # the newlines are stripped: a wrapped credential produces a config.json that no
+      # client can parse.
+      #
+      # The failure names the two variables it read and which of them was empty.
+      # "registry credentials are not set" on its own is what made a consumer who had
+      # set its own variables believe the component could not see them, when the
+      # component was reading two names that consumer had never heard of.
       ci_tpl_write_registry_auth() {
           config_dir=$1
           registry=$2
-          [ -n "$CI_TPL_REGISTRY_USER" ] && [ -n "$CI_TPL_REGISTRY_PASSWORD" ] ||
-              { ci_tpl_fail "registry credentials are not set; this job cannot push"; return 1; }
+          ci_tpl_load_registry_credentials
+          user_state=$(ci_tpl_credential_state "$CI_TPL_REGISTRY_USER")
+          secret_state=$(ci_tpl_credential_state "$CI_TPL_REGISTRY_PASSWORD")
+          if [ "$user_state" != 'set' ] || [ "$secret_state" != 'set' ]; then
+              ci_tpl_fail "registry credentials are not set; this job cannot push to ${registry}"
+              echo "ERROR: username, from \$${CI_TPL_REGISTRY_USERNAME_VARIABLE}: ${user_state}" >&2
+              echo "ERROR: password, from \$${CI_TPL_REGISTRY_PASSWORD_VARIABLE}: ${secret_state}" >&2
+              echo 'ERROR: define both as CI variables on this project, or name the variables you' >&2
+              echo 'ERROR: already have through the registry-username-variable and' >&2
+              echo 'ERROR: registry-password-variable inputs. A protected variable reaches' >&2
+              echo 'ERROR: protected branches and protected tags only.' >&2
+              return 1
+          fi
           mkdir -p "$config_dir"
           auth=$(printf '%s:%s' "$CI_TPL_REGISTRY_USER" "$CI_TPL_REGISTRY_PASSWORD" | base64 | tr -d '\n')
           printf '{"auths":{"%s":{"auth":"%s"}}}' "$registry" "$auth" > "$config_dir/config.json"
@@ -354,6 +426,75 @@ spec:
           echo "${1%%/*}"
       }
       # END embed
+    - |
+      # BEGIN embed inline runtime/registry/ca-bundle.sh
+      #!/bin/sh
+      # Trust an extra certificate authority inside a job container.
+      #
+      # Its own file rather than part of image-json.sh because the signing component
+      # needs it and needs nothing else there: that job runs Python, not the shell
+      # image helpers, and embedding 250 lines of JSON handling to reach one function
+      # would be worse than either.
+      #
+      # It depends on nothing else here, deliberately: the signing component embeds
+      # this file and no other.
+      #
+      # Embedded verbatim by every component that talks to a registry over TLS;
+      # tests/runtime/registry/test_ca_bundle.py drives this copy.
+      # Trust one more certificate authority, for a registry issued by an internal
+      # one. The PEM comes from the CI variable named by CI_TPL_CA_BUNDLE_VARIABLE,
+      # which may be a GitLab file variable (the value is a path) or an ordinary one
+      # (the value is the PEM itself). Nothing is downloaded: a job that has to fetch
+      # its trust anchor cannot run at a site with no egress, which is the site that
+      # needs this input.
+      #
+      # Empty or unset skips it. A variable holding no certificate is an error rather
+      # than an empty success, because the job would otherwise fail later with a TLS
+      # error naming the registry instead of the bundle.
+      ci_tpl_trust_ca_bundle() {
+          [ -n "${CI_TPL_CA_BUNDLE_VARIABLE:-}" ] || return 0
+          bundle=$(printenv "$CI_TPL_CA_BUNDLE_VARIABLE") || bundle=''
+          if [ -z "$bundle" ]; then
+              echo "ERROR: ca-bundle-variable names \$${CI_TPL_CA_BUNDLE_VARIABLE}, which is empty or not defined" >&2
+              return 1
+          fi
+          pem=${CI_TPL_WORK:-/tmp}/ci-tpl-ca-bundle.pem
+          if [ -f "$bundle" ]; then
+              cat "$bundle" > "$pem"
+          else
+              printf '%s\n' "$bundle" > "$pem"
+          fi
+          certs=$(grep -c 'BEGIN CERTIFICATE' "$pem") || certs=0
+          if [ "$certs" -eq 0 ]; then
+              echo "ERROR: \$${CI_TPL_CA_BUNDLE_VARIABLE} carries no PEM certificate" >&2
+              return 1
+          fi
+          store=${CI_TPL_CA_STORE:-/etc/ssl/certs/ca-certificates.crt}
+          if cat "$pem" >> "$store" 2>/dev/null; then
+              echo "trusted ${certs} extra certificate(s) from \$${CI_TPL_CA_BUNDLE_VARIABLE}"
+              return 0
+          fi
+          # A non-root execution image cannot write the system store, and refusing
+          # there would mean the input works only for images that run as root.
+          # Combine the store with the extra anchors and name the copy in the three
+          # variables the clients in these jobs read: Go (buildctl, trivy, syft,
+          # cosign) reads SSL_CERT_FILE, python-requests reads REQUESTS_CA_BUNDLE and
+          # curl reads CURL_CA_BUNDLE.
+          combined=${CI_TPL_WORK:-/tmp}/ci-tpl-ca-combined.pem
+          if [ -r "$store" ]; then
+              cat "$store" "$pem" > "$combined"
+          else
+              cat "$pem" > "$combined"
+          fi
+          SSL_CERT_FILE=$combined
+          REQUESTS_CA_BUNDLE=$combined
+          CURL_CA_BUNDLE=$combined
+          export SSL_CERT_FILE REQUESTS_CA_BUNDLE CURL_CA_BUNDLE
+          echo "trusted ${certs} extra certificate(s) from \$${CI_TPL_CA_BUNDLE_VARIABLE}"
+          echo "the trust store at ${store} is not writable here, so SSL_CERT_FILE names ${combined}"
+      }
+      # END embed
+      ci_tpl_trust_ca_bundle || exit 1
     - |
       # BEGIN embed inline runtime/scan/scan.sh
       #!/bin/sh
@@ -636,8 +777,9 @@ spec:
       CI_TPL_SUBJECT=$(ci_tpl_image_reference "$CI_TPL_IDENTITY_FILE") || exit 1
       echo "SBOM subject: $CI_TPL_SUBJECT"
 
-      # Credentials come from the environment, never from an input, and are used
+      # Credentials are read from the variables the consumer named, and are used
       # only when both are present: a public candidate registry needs none.
+      ci_tpl_load_registry_credentials
       if [ -n "$CI_TPL_REGISTRY_USER" ] && [ -n "$CI_TPL_REGISTRY_PASSWORD" ]; then
         SYFT_REGISTRY_AUTH_AUTHORITY=$(ci_tpl_registry_host "$CI_TPL_SUBJECT")
         export SYFT_REGISTRY_AUTH_AUTHORITY

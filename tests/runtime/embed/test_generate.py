@@ -169,8 +169,11 @@ def test_the_inventory_of_embedded_regions_is_the_expected_one():
     assert INVENTORY == [
         ("ansible-lint", "dir $CI_TPL_RUNTIME_DIR runtime/scan/scan-gate.sh"),
         ("container-build-buildkit", "file $CI_TPL_HELPER runtime/registry/image-json.sh"),
+        ("container-build-buildkit", "inline runtime/registry/ca-bundle.sh"),
         ("container-build-jib", "file $CI_TPL_HELPER runtime/registry/image-json.sh"),
+        ("container-build-jib", "inline runtime/registry/ca-bundle.sh"),
         ("container-build-ko", "file $CI_TPL_HELPER runtime/registry/image-json.sh"),
+        ("container-build-ko", "inline runtime/registry/ca-bundle.sh"),
         ("container-export-skopeo", "file $CI_TPL_RUNTIME runtime/mirror/transfer_manifest.py"),
         ("container-export-skopeo", "inline runtime/mirror/egress.sh"),
         ("container-export-skopeo", "inline runtime/mirror/registry.sh"),
@@ -183,7 +186,9 @@ def test_the_inventory_of_embedded_regions_is_the_expected_one():
         ("container-sign-attest-cosign",
          "dir $CI_TPL_RUNTIME_DIR runtime/httpjson.py runtime/sign/cosign_attest.py "
          "runtime/sign/cosign_checksums.txt"),
+        ("container-sign-attest-cosign", "inline runtime/registry/ca-bundle.sh"),
         ("container-smoke-test", "file $CI_TPL_HELPER runtime/registry/image-json.sh"),
+        ("container-smoke-test", "inline runtime/registry/ca-bundle.sh"),
         ("docs-wiki-sync",
          "dir $CI_TPL_RECONCILE_DIR runtime/httpjson.py runtime/wiki/reconcile.py"),
         ("docs-wiki-sync",
@@ -205,6 +210,7 @@ def test_the_inventory_of_embedded_regions_is_the_expected_one():
          "dir $CI_PROJECT_DIR/.ci-tpl runtime/scan/scan-gate.sh"),
         ("security-image-grype", "inline runtime/registry/image-json.sh"),
         ("security-image-grype", "inline runtime/scan/scan.sh"),
+        ("security-image-trivy", "inline runtime/registry/ca-bundle.sh"),
         ("security-image-trivy", "inline runtime/registry/image-json.sh"),
         ("security-image-trivy", "inline runtime/scan/scan.sh"),
         ("security-repository-audit",
@@ -212,6 +218,7 @@ def test_the_inventory_of_embedded_regions_is_the_expected_one():
          "runtime/audit/gitleaks-scan.sh runtime/audit/audit-secrets.sh "
          "runtime/audit/scan-state.sh"),
         ("security-sast-semgrep", "dir $CI_PROJECT_DIR/.ci-tpl runtime/scan/scan-gate.sh"),
+        ("security-sbom-syft", "inline runtime/registry/ca-bundle.sh"),
         ("security-sbom-syft", "inline runtime/registry/image-json.sh"),
         ("security-sbom-syft", "inline runtime/scan/scan.sh"),
         ("security-sbom-upload-dtrack",
