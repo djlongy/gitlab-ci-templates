@@ -39,9 +39,28 @@
 # pipeline that ran the scanners but not the build would ask trivy and syft to
 # consume an artifact no job produced, and pipeline creation would fail.
 #
-# Blocking by default. `sast-policy-mode` is the one gate a project may relax
+# Blocking by default. The `*-policy-mode` inputs are what a project relaxes
 # while it onboards, and doing so is an explicit choice, spelled out in
 # examples/container-buildkit-onboarding/, never a default here.
+#
+# Every brick after the build is an `enable-<brick>` switch, default true, read
+# by that component's include `rules:` -- the same device smoke-test,
+# dependency-track and vigil already use. The whole chain on is what a consumer
+# that names none of them gets, so the defaults are the pipeline as it was.
+#
+# Turning a brick off has to remove it from every `needs:` list that names it,
+# or pipeline creation fails on an undefined need. Section 8.3 rules out an
+# optional need, so a dependant's own include rule carries its producers'
+# switches instead, and the dependant is not created when they are off. That is
+# why the cosign rule names enable-syft and enable-image-trivy, and why the
+# promotion requires the whole release chain rather than only enable-promote.
+#
+# The four verify bricks gate the signing job through the verify stage barrier
+# rather than through `needs:`. The builder has no `needs:`, so it waits for the
+# whole verify stage, and everything downstream of the builder waits with it.
+# Naming those four in the signing job's `gate-jobs` as well would mean one
+# include entry per subset of them -- thirty-two -- for an ordering the barrier
+# already provides. docs/howto/pick-your-bricks.md states the rules of the set.
 
 #### Consumer interface ####
 spec:
@@ -108,22 +127,88 @@ spec:
         or promoted.
       options: ['default-branch-and-tags', 'tags-only']
       default: 'default-branch-and-tags'
+    enable-gitleaks:
+      type: boolean
+      description: >-
+        Run secret detection. Off drops the job and its gate on the signing job.
+      default: true
+    enable-semgrep:
+      type: boolean
+      description: >-
+        Run the SAST scan. Off drops the job and its gate on the signing job.
+        An empty semgrep-rules has the same effect, so a project that has not
+        chosen a ruleset gets no scan rather than an uncompilable pipeline.
+      default: true
+    enable-filesystem-trivy:
+      type: boolean
+      description: >-
+        Run the filesystem scan. Off drops the job and its gate on the signing
+        job.
+      default: true
+    enable-lockfiles:
+      type: boolean
+      description: >-
+        Run the lockfile reproducibility check. Off drops the job and its gate
+        on the signing job. An empty lockfiles has the same effect.
+      default: true
+    enable-syft:
+      type: boolean
+      description: >-
+        Produce the authoritative SBOM. Off also drops the signing job, the
+        Dependency-Track upload and the Vigil jobs, which read the SBOM or
+        depend on something that does: nothing signs or publishes evidence that
+        was never produced.
+      default: true
+    enable-image-trivy:
+      type: boolean
+      description: >-
+        Scan the built image. Off also drops the signing job and the Vigil
+        jobs, which attest the scan result, and removes the scan gate from the
+        promotion. An image no one scanned can then be promoted: that is the
+        consequence of turning this off, not an oversight.
+      default: true
+    enable-cosign:
+      type: boolean
+      description: >-
+        Sign the digest and attach the SBOM and scan attestations. Off also
+        drops the Vigil jobs and the signature gate on the promotion; set
+        require-signatures to false as well, or the promotion refuses a digest
+        with no signature beside it.
+      default: true
+    enable-promote:
+      type: boolean
+      description: >-
+        Promote the digest that passed into the release project. Off ends the
+        pipeline after attest, leaving the candidate where the build pushed it.
+      default: true
     semgrep-rules:
       type: string
       description: >-
-        Rule source for the SAST scan, passed to `semgrep --config`. Required,
-        with no default, so the ruleset is a deliberate choice: a path in the
-        consumer checkout is pinned, a registry pack is fetched live.
+        Rule source for the SAST scan, passed to `semgrep --config`. A path in
+        the consumer checkout is pinned, a registry pack is fetched live. Empty
+        skips the scan, the same as enable-semgrep false; a project that runs
+        the SAST brick states its ruleset, since inferring one is a choice made
+        on the project's behalf.
+      default: ''
     lockfiles:
       type: string
       description: >-
         Comma-separated list of every lockfile that must exist and be pinned,
-        each relative to working-directory. Required: inferring the set from the
-        checkout root reports a monorepo as having no dependencies at all. A
-        project that genuinely has none -- a stdlib-only Go module, whose go.sum
-        is empty -- declares the literal `none`, which cannot be combined with a
-        path. An empty value stays an error: not filling this in and having
-        nothing to fill in are different answers.
+        each relative to working-directory. Inferring the set from the checkout
+        root reports a monorepo as having no dependencies at all, so the set is
+        declared. A project that genuinely has none -- a stdlib-only Go module,
+        whose go.sum is empty -- declares the literal `none`, which cannot be
+        combined with a path. Empty skips the check, the same as
+        enable-lockfiles false.
+      default: ''
+    secrets-policy-mode:
+      type: string
+      description: >-
+        `blocking` fails the pipeline on a secret-detection finding.
+        `advisory` records findings and still fails on a scanner that could
+        not run.
+      options: ['blocking', 'advisory']
+      default: 'blocking'
     sast-policy-mode:
       type: string
       description: >-
@@ -138,6 +223,46 @@ spec:
       description: Lowest severity that fails a filesystem or image scan.
       options: ['critical', 'high', 'medium', 'low']
       default: 'high'
+    filesystem-policy-mode:
+      type: string
+      description: >-
+        `blocking` fails the pipeline on a filesystem finding at or above
+        scan-severity. `advisory` records findings and still fails on a scanner
+        that could not run.
+      options: ['blocking', 'advisory']
+      default: 'blocking'
+    image-policy-mode:
+      type: string
+      description: >-
+        `blocking` fails the pipeline on an image finding at or above
+        scan-severity, which is what keeps an unfit digest out of the release
+        project. `advisory` records findings and still fails on a scanner that
+        could not run.
+      options: ['blocking', 'advisory']
+      default: 'blocking'
+    filesystem-ignore-unfixed:
+      type: boolean
+      description: >-
+        Ignore filesystem findings with no fix available. The default keeps them
+        gating. Two inputs rather than one because the two bricks declare the
+        input with different types: security-filesystem-trivy takes a boolean
+        and security-image-trivy takes a string, and an input forwarded at the
+        wrong type is rejected when the include resolves.
+      default: false
+    image-ignore-unfixed:
+      type: string
+      description: >-
+        Ignore image findings with no fix available. The default keeps them
+        gating.
+      options: ['true', 'false']
+      default: 'false'
+    push-candidate:
+      type: boolean
+      description: >-
+        Push the build result to the candidate registry. False builds only,
+        produces no image.json and leaves nothing for the rest of the chain to
+        consume, so it is useful with every brick after build switched off.
+      default: true
     smoke-test:
       type: string
       description: >-
@@ -173,6 +298,17 @@ spec:
       description: >-
         Dependency-Track API base URL. Only read when dependency-track is true.
       default: ''
+    dependency-track-wait:
+      type: string
+      description: >-
+        Wait for Dependency-Track to finish analysing the uploaded SBOM. False
+        uploads and returns, which makes the upload a record rather than a gate.
+      options: ['true', 'false']
+      default: 'true'
+    dependency-track-timeout:
+      type: number
+      description: Seconds to wait for that analysis before failing the job.
+      default: 600
     vigil:
       type: string
       description: >-
@@ -184,6 +320,23 @@ spec:
       type: string
       description: Vigil base URL. Only read when vigil is true.
       default: ''
+    vigil-request-timeout:
+      type: number
+      description: Seconds the release-record publish waits for Vigil.
+      default: 120
+    vigil-require-readiness:
+      type: string
+      description: Lowest readiness verdict that lets the promotion proceed.
+      options: ['green', 'amber', 'yellow']
+      default: 'green'
+    vigil-max-wait:
+      type: number
+      description: Seconds to wait for that verdict before failing the job.
+      default: 300
+    vigil-poll-interval:
+      type: number
+      description: Seconds between readiness polls.
+      default: 15
     destination-project:
       type: string
       description: Harbor project the release is promoted into.
@@ -192,6 +345,14 @@ spec:
       type: string
       description: Tags applied to the promoted digest in the release project.
       default: '$CI_COMMIT_TAG'
+    require-signatures:
+      type: string
+      description: >-
+        Refuse to promote a digest with no cosign signature beside it in the
+        candidate project. Leave it true unless enable-cosign is false, in which
+        case the promotion would refuse every digest.
+      options: ['true', 'false']
+      default: 'true'
     environment:
       type: string
       description: >-
@@ -325,19 +486,23 @@ stages:
 include:
   #### verify ####
   - local: '/templates/security-secrets-gitleaks/template.yml'
+    rules:
+      - if: '"$[[ inputs.enable-gitleaks ]]" == "true"'
     inputs:
       instance: $[[ inputs.instance ]]
       stage: verify
       working-directory: $[[ inputs.working-directory ]]
       execution-image: $[[ inputs.gitleaks-image ]]
       runner-tags: $[[ inputs.runner-tags ]]
-      policy-mode: blocking
+      policy-mode: $[[ inputs.secrets-policy-mode ]]
       run-rules:
         - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
         - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
         - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG'
 
   - local: '/templates/security-sast-semgrep/template.yml'
+    rules:
+      - if: '"$[[ inputs.enable-semgrep ]]" == "true" && "$[[ inputs.semgrep-rules ]]" != ""'
     inputs:
       instance: $[[ inputs.instance ]]
       stage: verify
@@ -353,6 +518,8 @@ include:
         - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG'
 
   - local: '/templates/security-filesystem-trivy/template.yml'
+    rules:
+      - if: '"$[[ inputs.enable-filesystem-trivy ]]" == "true"'
     inputs:
       instance: $[[ inputs.instance ]]
       stage: verify
@@ -361,8 +528,8 @@ include:
       runner-tags: $[[ inputs.runner-tags ]]
       severity-threshold: $[[ inputs.scan-severity ]]
       scanners: 'vuln,secret,misconfig'
-      ignore-unfixed: false
-      policy-mode: blocking
+      ignore-unfixed: $[[ inputs.filesystem-ignore-unfixed ]]
+      policy-mode: $[[ inputs.filesystem-policy-mode ]]
       run-rules:
         - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
         - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
@@ -371,6 +538,8 @@ include:
       java-db-repository: $[[ inputs.trivy-java-db-repository ]]
 
   - local: '/templates/quality-dependency-lockfiles/template.yml'
+    rules:
+      - if: '"$[[ inputs.enable-lockfiles ]]" == "true" && "$[[ inputs.lockfiles ]]" != ""'
     inputs:
       instance: $[[ inputs.instance ]]
       stage: verify
@@ -402,7 +571,7 @@ include:
       tags: $[[ inputs.tags ]]
       build-args: $[[ inputs.build-args ]]
       platforms: $[[ inputs.platforms ]]
-      push-candidate: true
+      push-candidate: $[[ inputs.push-candidate ]]
       registry-username-variable: $[[ inputs.registry-username-variable ]]
       registry-password-variable: $[[ inputs.registry-password-variable ]]
       ca-bundle-variable: $[[ inputs.ca-bundle-variable ]]
@@ -425,7 +594,7 @@ include:
       tags: $[[ inputs.tags ]]
       build-args: $[[ inputs.build-args ]]
       platforms: $[[ inputs.platforms ]]
-      push-candidate: true
+      push-candidate: $[[ inputs.push-candidate ]]
       registry-username-variable: $[[ inputs.registry-username-variable ]]
       registry-password-variable: $[[ inputs.registry-password-variable ]]
       ca-bundle-variable: $[[ inputs.ca-bundle-variable ]]
@@ -483,7 +652,7 @@ include:
   # not write a second sbom.cdx.json.
   - local: '/templates/security-sbom-syft/template.yml'
     rules:
-      - if: '"$[[ inputs.build-sources ]]" == "default-branch-and-tags"'
+      - if: '"$[[ inputs.enable-syft ]]" == "true" && "$[[ inputs.build-sources ]]" == "default-branch-and-tags"'
     inputs:
       instance: $[[ inputs.instance ]]
       stage: scan
@@ -501,7 +670,7 @@ include:
 
   - local: '/templates/security-sbom-syft/template.yml'
     rules:
-      - if: '"$[[ inputs.build-sources ]]" == "tags-only"'
+      - if: '"$[[ inputs.enable-syft ]]" == "true" && "$[[ inputs.build-sources ]]" == "tags-only"'
     inputs:
       instance: $[[ inputs.instance ]]
       stage: scan
@@ -518,7 +687,7 @@ include:
 
   - local: '/templates/security-image-trivy/template.yml'
     rules:
-      - if: '"$[[ inputs.build-sources ]]" == "default-branch-and-tags"'
+      - if: '"$[[ inputs.enable-image-trivy ]]" == "true" && "$[[ inputs.build-sources ]]" == "default-branch-and-tags"'
     inputs:
       instance: $[[ inputs.instance ]]
       stage: scan
@@ -527,9 +696,9 @@ include:
       build-job: '$[[ inputs.instance ]]:container-build-buildkit'
       build-component: container-build-buildkit
       gate-jobs: []
-      policy-mode: blocking
+      policy-mode: $[[ inputs.image-policy-mode ]]
       severity-threshold: $[[ inputs.scan-severity ]]
-      ignore-unfixed: 'false'
+      ignore-unfixed: $[[ inputs.image-ignore-unfixed ]]
       scanners: vuln
       run-rules:
         - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
@@ -542,7 +711,7 @@ include:
 
   - local: '/templates/security-image-trivy/template.yml'
     rules:
-      - if: '"$[[ inputs.build-sources ]]" == "tags-only"'
+      - if: '"$[[ inputs.enable-image-trivy ]]" == "true" && "$[[ inputs.build-sources ]]" == "tags-only"'
     inputs:
       instance: $[[ inputs.instance ]]
       stage: scan
@@ -551,9 +720,9 @@ include:
       build-job: '$[[ inputs.instance ]]:container-build-buildkit'
       build-component: container-build-buildkit
       gate-jobs: []
-      policy-mode: blocking
+      policy-mode: $[[ inputs.image-policy-mode ]]
       severity-threshold: $[[ inputs.scan-severity ]]
-      ignore-unfixed: 'false'
+      ignore-unfixed: $[[ inputs.image-ignore-unfixed ]]
       scanners: vuln
       run-rules:
         - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG && $CI_COMMIT_REF_PROTECTED == "true"'
@@ -563,9 +732,21 @@ include:
       db-repository: $[[ inputs.trivy-db-repository ]]
       java-db-repository: $[[ inputs.trivy-java-db-repository ]]
 
+  # Every rule below that names another brick's switch is doing one job: the
+  # include's own `inputs:` hard-code that brick's job name, into sbom-job,
+  # scan-job, sign-job or gate-jobs, and a `needs:` entry cannot name a job the
+  # pipeline does not create. 1.3.0 made those inputs optional on the
+  # COMPONENTS, which is what lets a consumer including bricks directly drop
+  # one; it does not make these conjuncts removable, because the composition
+  # still forwards a literal name and has no way to forward an empty one
+  # conditionally. Measured 2026/09/18: deleting any of them and resolving with
+  # the guarded brick off gives `undefined need` from the CI Lint API.
+  # Chasing the alternative — an include entry per producer subset — is sixteen
+  # copies of the cosign entry, and it would let a promotion publish an image
+  # whose scan was switched off.
   - local: '/templates/security-sbom-upload-dtrack/template.yml'
     rules:
-      - if: '"$[[ inputs.dependency-track ]]" == "true" && "$[[ inputs.build-sources ]]" == "default-branch-and-tags"'
+      - if: '"$[[ inputs.dependency-track ]]" == "true" && "$[[ inputs.enable-syft ]]" == "true" && "$[[ inputs.build-sources ]]" == "default-branch-and-tags"'
     inputs:
       instance: $[[ inputs.instance ]]
       stage: scan
@@ -576,15 +757,15 @@ include:
       api-url: $[[ inputs.dependency-track-api-url ]]
       project-name: '$CI_PROJECT_NAME'
       project-version: '$CI_COMMIT_SHA'
-      wait-for-analysis: 'true'
-      analysis-timeout: 600
+      wait-for-analysis: $[[ inputs.dependency-track-wait ]]
+      analysis-timeout: $[[ inputs.dependency-track-timeout ]]
       run-rules:
         - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
         - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG'
 
   - local: '/templates/security-sbom-upload-dtrack/template.yml'
     rules:
-      - if: '"$[[ inputs.dependency-track ]]" == "true" && "$[[ inputs.build-sources ]]" == "tags-only"'
+      - if: '"$[[ inputs.dependency-track ]]" == "true" && "$[[ inputs.enable-syft ]]" == "true" && "$[[ inputs.build-sources ]]" == "tags-only"'
     inputs:
       instance: $[[ inputs.instance ]]
       stage: scan
@@ -595,8 +776,8 @@ include:
       api-url: $[[ inputs.dependency-track-api-url ]]
       project-name: '$CI_PROJECT_NAME'
       project-version: '$CI_COMMIT_SHA'
-      wait-for-analysis: 'true'
-      analysis-timeout: 600
+      wait-for-analysis: $[[ inputs.dependency-track-wait ]]
+      analysis-timeout: $[[ inputs.dependency-track-timeout ]]
       run-rules:
         - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG && $CI_COMMIT_REF_PROTECTED == "true"'
 
@@ -607,7 +788,7 @@ include:
   # which would fail pipeline creation — is to choose between two lists here.
   - local: '/templates/container-sign-attest-cosign/template.yml'
     rules:
-      - if: '"$[[ inputs.smoke-test ]]" == "false" && "$[[ inputs.build-sources ]]" == "default-branch-and-tags"'
+      - if: '"$[[ inputs.enable-cosign ]]" == "true" && "$[[ inputs.enable-syft ]]" == "true" && "$[[ inputs.enable-image-trivy ]]" == "true" && "$[[ inputs.smoke-test ]]" == "false" && "$[[ inputs.build-sources ]]" == "default-branch-and-tags"'
     inputs:
       instance: $[[ inputs.instance ]]
       stage: attest
@@ -618,15 +799,7 @@ include:
       sbom-job: '$[[ inputs.instance ]]:security-sbom-syft'
       scan-job: '$[[ inputs.instance ]]:security-image-trivy'
       scan-component: security-image-trivy
-      gate-jobs:
-        - job: '$[[ inputs.instance ]]:security-secrets-gitleaks'
-          artifacts: false
-        - job: '$[[ inputs.instance ]]:security-sast-semgrep'
-          artifacts: false
-        - job: '$[[ inputs.instance ]]:security-filesystem-trivy'
-          artifacts: false
-        - job: '$[[ inputs.instance ]]:quality-dependency-lockfiles'
-          artifacts: false
+      gate-jobs: []
       run-rules:
         - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
         - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG'
@@ -637,7 +810,7 @@ include:
 
   - local: '/templates/container-sign-attest-cosign/template.yml'
     rules:
-      - if: '"$[[ inputs.smoke-test ]]" == "false" && "$[[ inputs.build-sources ]]" == "tags-only"'
+      - if: '"$[[ inputs.enable-cosign ]]" == "true" && "$[[ inputs.enable-syft ]]" == "true" && "$[[ inputs.enable-image-trivy ]]" == "true" && "$[[ inputs.smoke-test ]]" == "false" && "$[[ inputs.build-sources ]]" == "tags-only"'
     inputs:
       instance: $[[ inputs.instance ]]
       stage: attest
@@ -648,15 +821,7 @@ include:
       sbom-job: '$[[ inputs.instance ]]:security-sbom-syft'
       scan-job: '$[[ inputs.instance ]]:security-image-trivy'
       scan-component: security-image-trivy
-      gate-jobs:
-        - job: '$[[ inputs.instance ]]:security-secrets-gitleaks'
-          artifacts: false
-        - job: '$[[ inputs.instance ]]:security-sast-semgrep'
-          artifacts: false
-        - job: '$[[ inputs.instance ]]:security-filesystem-trivy'
-          artifacts: false
-        - job: '$[[ inputs.instance ]]:quality-dependency-lockfiles'
-          artifacts: false
+      gate-jobs: []
       run-rules:
         - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG && $CI_COMMIT_REF_PROTECTED == "true"'
       registry-username-variable: $[[ inputs.registry-username-variable ]]
@@ -666,7 +831,7 @@ include:
 
   - local: '/templates/container-sign-attest-cosign/template.yml'
     rules:
-      - if: '"$[[ inputs.smoke-test ]]" == "true" && "$[[ inputs.build-sources ]]" == "default-branch-and-tags"'
+      - if: '"$[[ inputs.enable-cosign ]]" == "true" && "$[[ inputs.enable-syft ]]" == "true" && "$[[ inputs.enable-image-trivy ]]" == "true" && "$[[ inputs.smoke-test ]]" == "true" && "$[[ inputs.build-sources ]]" == "default-branch-and-tags"'
     inputs:
       instance: $[[ inputs.instance ]]
       stage: attest
@@ -678,14 +843,6 @@ include:
       scan-job: '$[[ inputs.instance ]]:security-image-trivy'
       scan-component: security-image-trivy
       gate-jobs:
-        - job: '$[[ inputs.instance ]]:security-secrets-gitleaks'
-          artifacts: false
-        - job: '$[[ inputs.instance ]]:security-sast-semgrep'
-          artifacts: false
-        - job: '$[[ inputs.instance ]]:security-filesystem-trivy'
-          artifacts: false
-        - job: '$[[ inputs.instance ]]:quality-dependency-lockfiles'
-          artifacts: false
         - job: '$[[ inputs.instance ]]:container-smoke-test'
           artifacts: false
       run-rules:
@@ -698,7 +855,7 @@ include:
 
   - local: '/templates/container-sign-attest-cosign/template.yml'
     rules:
-      - if: '"$[[ inputs.smoke-test ]]" == "true" && "$[[ inputs.build-sources ]]" == "tags-only"'
+      - if: '"$[[ inputs.enable-cosign ]]" == "true" && "$[[ inputs.enable-syft ]]" == "true" && "$[[ inputs.enable-image-trivy ]]" == "true" && "$[[ inputs.smoke-test ]]" == "true" && "$[[ inputs.build-sources ]]" == "tags-only"'
     inputs:
       instance: $[[ inputs.instance ]]
       stage: attest
@@ -710,14 +867,6 @@ include:
       scan-job: '$[[ inputs.instance ]]:security-image-trivy'
       scan-component: security-image-trivy
       gate-jobs:
-        - job: '$[[ inputs.instance ]]:security-secrets-gitleaks'
-          artifacts: false
-        - job: '$[[ inputs.instance ]]:security-sast-semgrep'
-          artifacts: false
-        - job: '$[[ inputs.instance ]]:security-filesystem-trivy'
-          artifacts: false
-        - job: '$[[ inputs.instance ]]:quality-dependency-lockfiles'
-          artifacts: false
         - job: '$[[ inputs.instance ]]:container-smoke-test'
           artifacts: false
       run-rules:
@@ -729,7 +878,7 @@ include:
 
   - local: '/templates/security-sync-vigil/template.yml'
     rules:
-      - if: '"$[[ inputs.vigil ]]" == "true" && "$[[ inputs.build-sources ]]" == "default-branch-and-tags"'
+      - if: '"$[[ inputs.vigil ]]" == "true" && "$[[ inputs.enable-cosign ]]" == "true" && "$[[ inputs.enable-syft ]]" == "true" && "$[[ inputs.enable-image-trivy ]]" == "true" && "$[[ inputs.build-sources ]]" == "default-branch-and-tags"'
     inputs:
       instance: $[[ inputs.instance ]]
       stage: attest
@@ -740,14 +889,14 @@ include:
       sign-job: '$[[ inputs.instance ]]:container-sign-attest-cosign'
       gate-jobs: []
       vigil-url: $[[ inputs.vigil-url ]]
-      request-timeout: 120
+      request-timeout: $[[ inputs.vigil-request-timeout ]]
       run-rules:
         - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
         - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG'
 
   - local: '/templates/security-sync-vigil/template.yml'
     rules:
-      - if: '"$[[ inputs.vigil ]]" == "true" && "$[[ inputs.build-sources ]]" == "tags-only"'
+      - if: '"$[[ inputs.vigil ]]" == "true" && "$[[ inputs.enable-cosign ]]" == "true" && "$[[ inputs.enable-syft ]]" == "true" && "$[[ inputs.enable-image-trivy ]]" == "true" && "$[[ inputs.build-sources ]]" == "tags-only"'
     inputs:
       instance: $[[ inputs.instance ]]
       stage: attest
@@ -758,13 +907,13 @@ include:
       sign-job: '$[[ inputs.instance ]]:container-sign-attest-cosign'
       gate-jobs: []
       vigil-url: $[[ inputs.vigil-url ]]
-      request-timeout: 120
+      request-timeout: $[[ inputs.vigil-request-timeout ]]
       run-rules:
         - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG && $CI_COMMIT_REF_PROTECTED == "true"'
 
   - local: '/templates/security-verify-vigil/template.yml'
     rules:
-      - if: '"$[[ inputs.vigil ]]" == "true" && "$[[ inputs.build-sources ]]" == "default-branch-and-tags"'
+      - if: '"$[[ inputs.vigil ]]" == "true" && "$[[ inputs.enable-cosign ]]" == "true" && "$[[ inputs.enable-syft ]]" == "true" && "$[[ inputs.enable-image-trivy ]]" == "true" && "$[[ inputs.build-sources ]]" == "default-branch-and-tags"'
     inputs:
       instance: $[[ inputs.instance ]]
       stage: attest
@@ -775,16 +924,16 @@ include:
       sync-job: '$[[ inputs.instance ]]:security-sync-vigil'
       gate-jobs: []
       vigil-url: $[[ inputs.vigil-url ]]
-      require-readiness: green
-      max-wait: 300
-      poll-interval: 15
+      require-readiness: $[[ inputs.vigil-require-readiness ]]
+      max-wait: $[[ inputs.vigil-max-wait ]]
+      poll-interval: $[[ inputs.vigil-poll-interval ]]
       run-rules:
         - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
         - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG'
 
   - local: '/templates/security-verify-vigil/template.yml'
     rules:
-      - if: '"$[[ inputs.vigil ]]" == "true" && "$[[ inputs.build-sources ]]" == "tags-only"'
+      - if: '"$[[ inputs.vigil ]]" == "true" && "$[[ inputs.enable-cosign ]]" == "true" && "$[[ inputs.enable-syft ]]" == "true" && "$[[ inputs.enable-image-trivy ]]" == "true" && "$[[ inputs.build-sources ]]" == "tags-only"'
     inputs:
       instance: $[[ inputs.instance ]]
       stage: attest
@@ -795,9 +944,9 @@ include:
       sync-job: '$[[ inputs.instance ]]:security-sync-vigil'
       gate-jobs: []
       vigil-url: $[[ inputs.vigil-url ]]
-      require-readiness: green
-      max-wait: 300
-      poll-interval: 15
+      require-readiness: $[[ inputs.vigil-require-readiness ]]
+      max-wait: $[[ inputs.vigil-max-wait ]]
+      poll-interval: $[[ inputs.vigil-poll-interval ]]
       run-rules:
         - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG && $CI_COMMIT_REF_PROTECTED == "true"'
 
@@ -806,9 +955,14 @@ include:
   # release gates are in its transitive chain rather than merely in an earlier
   # stage (section 8.8). The Vigil branch adds the readiness verdict; without
   # it, enabling Vigil would produce a verdict nothing waits for.
+  #
+  # Both entries require the whole release chain, not only enable-promote. A
+  # promotion whose scan and signature gates were switched off would publish on
+  # no evidence at all, so switching one of those off ends the pipeline at
+  # attest instead of promoting something nothing checked.
   - local: '/templates/container-promote-harbor/template.yml'
     rules:
-      - if: '"$[[ inputs.vigil ]]" == "false"'
+      - if: '"$[[ inputs.enable-promote ]]" == "true" && "$[[ inputs.vigil ]]" == "false" && "$[[ inputs.enable-cosign ]]" == "true" && "$[[ inputs.enable-syft ]]" == "true" && "$[[ inputs.enable-image-trivy ]]" == "true"'
     inputs:
       instance: $[[ inputs.instance ]]
       stage: publish
@@ -823,7 +977,7 @@ include:
           artifacts: false
       destination-project: $[[ inputs.destination-project ]]
       destination-tags: $[[ inputs.destination-tags ]]
-      require-signatures: 'true'
+      require-signatures: $[[ inputs.require-signatures ]]
       environment: $[[ inputs.environment ]]
       run-rules:
         # The same protected-tag gate the other publish jobs in this repository
@@ -834,7 +988,7 @@ include:
 
   - local: '/templates/container-promote-harbor/template.yml'
     rules:
-      - if: '"$[[ inputs.vigil ]]" == "true"'
+      - if: '"$[[ inputs.enable-promote ]]" == "true" && "$[[ inputs.vigil ]]" == "true" && "$[[ inputs.enable-cosign ]]" == "true" && "$[[ inputs.enable-syft ]]" == "true" && "$[[ inputs.enable-image-trivy ]]" == "true"'
     inputs:
       instance: $[[ inputs.instance ]]
       stage: publish
@@ -851,7 +1005,7 @@ include:
           artifacts: false
       destination-project: $[[ inputs.destination-project ]]
       destination-tags: $[[ inputs.destination-tags ]]
-      require-signatures: 'true'
+      require-signatures: $[[ inputs.require-signatures ]]
       environment: $[[ inputs.environment ]]
       run-rules:
         # The same protected-tag gate the other publish jobs in this repository

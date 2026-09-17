@@ -30,14 +30,20 @@ STAGES = {
     "verify", "build", "test", "scan", "plan",
     "attest", "publish", "deploy", "verify-deploy",
 }
-DIGEST_REGEX = "^.+@sha256:[0-9a-f]{64}$"
+DIGEST_REGEX = r"^(\$[A-Z][A-Z0-9_]*/)?[A-Za-z0-9][A-Za-z0-9._/:-]*@sha256:[0-9a-f]{64}$"
 # Standard 1.0.5, section 12: a component may accept `name:tag` where its
 # contract says which executor and which site the form is for. BuildKit does,
 # because a site that mirrors an image into its own registry gets a digest of
 # its own, so the estate's digest names nothing there and a tag is the only
 # reference both sides can agree on. The shipped DEFAULT is still digest-pinned
 # below, for every component including this one.
-TAG_OR_DIGEST_REGEX = "^.+(@sha256:[0-9a-f]{64}|:[A-Za-z0-9._-]{1,128})$"
+# The leading `$UPPER_SNAKE/` both patterns admit is the mirror prefix a site
+# names once as a group variable; tests/contracts/test_execution_image_regex.py
+# drives that form against every component.
+TAG_OR_DIGEST_REGEX = (
+    r"^(\$[A-Z][A-Z0-9_]*/)?[A-Za-z0-9][A-Za-z0-9._/:-]*"
+    r"(@sha256:[0-9a-f]{64}|:[A-Za-z0-9._-]{1,128})$"
+)
 EXECUTION_IMAGE_REGEX = {
     "container-build-buildkit": TAG_OR_DIGEST_REGEX,
 }
@@ -72,7 +78,10 @@ def template_path(component: str) -> Path:
 def documents(component: str) -> tuple[dict, dict]:
     parsed = list(yaml.safe_load_all(template_path(component).read_text()))
     assert len(parsed) == 2, "a component is exactly two documents: spec, then jobs"
-    return parsed[0], parsed[1]
+    # `include:` is not a job. A component that chooses its ordering from its
+    # inputs includes one of the files under templates/_needs/ to carry it.
+    jobs = {name: job for name, job in parsed[1].items() if name != "include"}
+    return parsed[0], jobs
 
 
 def inputs(component: str) -> dict:
@@ -83,6 +92,34 @@ def only_job(component: str) -> tuple[str, dict]:
     jobs = documents(component)[1]
     assert len(jobs) == 1, f"{component} emits {len(jobs)} jobs; these components emit one"
     return next(iter(jobs.items()))
+
+
+NEEDS_ASSEMBLER = "/templates/_needs/needs.yml"
+STAGE_BARRIER = "/templates/_needs/barrier.yml"
+
+
+def needs_variants(component: str) -> list[list]:
+    """Every `needs:` list this component can produce, as the template writes it.
+
+    A component whose producers are all required writes one list in its job. A
+    component with an optional producer, or with `subject-reference` as the
+    alternative to `build-job`, cannot: a needs entry cannot name an empty job.
+    It includes templates/_needs/needs.yml once per combination instead, and
+    the assertions below hold for every combination.
+    """
+    parsed = list(yaml.safe_load_all(template_path(component).read_text()))
+    _, job = only_job(component)
+    if "needs" in job:
+        return [job["needs"]]
+    variants = []
+    for entry in parsed[1].get("include", []) or []:
+        assert entry["local"] in (NEEDS_ASSEMBLER, STAGE_BARRIER), entry
+        if entry["local"] == STAGE_BARRIER:
+            # That combination has no `needs:` at all; it is the stage barrier.
+            continue
+        supplied = entry["inputs"]
+        variants.append([*supplied.get("producer-needs", []), supplied["gate-jobs"]])
+    return variants
 
 
 EMBED_OPEN = "# BEGIN embed "
@@ -189,14 +226,49 @@ def test_failures_are_never_swallowed(component: str):
 
 @pytest.mark.parametrize("component", COMPONENTS)
 def test_the_dependency_declaration_is_one_of_the_two_allowed_shapes(component: str):
-    """Section 8.5 and 8.6: never both, never `needs: []`, and a source-only job
-    carries `dependencies: []` so it downloads nothing incidentally."""
+    """Section 8.5 and 8.6: never both, never `needs: []` without cause, and a
+    source-only job carries `dependencies: []` so it downloads nothing
+    incidentally.
+
+    A component that chooses between the two from its inputs cannot write either
+    key here, because YAML has no conditional key and the including file wins
+    whatever it sets. It includes one file per combination from
+    templates/_needs/ instead, so the rule becomes: this body declares neither,
+    and every file it includes declares exactly one of the two.
+
+    A component that offers `subject-reference` has one combination with no
+    entries at all: the consumer named the image rather than a producer, and
+    passed no gates either, so there is nothing in this pipeline to wait for.
+    That case renders as `needs: []`, which downloads no artifacts and starts
+    the job at once. Any other component reaching it would be bypassing a stage
+    barrier it needs, so only these may.
+    """
+    # The unfiltered second document: `documents()` drops `include:` for every
+    # other test, and this is the one test that is about it.
+    body = list(yaml.safe_load_all(template_path(component).read_text()))[1]
     _, job = only_job(component)
     assert not ("needs" in job and "dependencies" in job)
-    if "needs" in job:
-        assert job["needs"], "needs: [] bypasses the stage barrier"
-    else:
+    if "include" in body:
+        assert "needs" not in job and "dependencies" not in job, (
+            f"{component} declares an ordering key and includes one; the body "
+            "would win and the include would be dead"
+        )
+        for entry in body["include"]:
+            fragment = list(
+                yaml.safe_load_all((REPO_ROOT / entry["local"].lstrip("/")).read_text())
+            )
+            (supplied,) = fragment[1].values()
+            assert set(supplied) in ({"needs"}, {"dependencies"}), (
+                f"{entry['local']} supplies {sorted(supplied)}"
+            )
+    elif "needs" not in job:
         assert job["dependencies"] == []
+    for entries in needs_variants(component):
+        if entries:
+            continue
+        assert "subject-reference" in inputs(component), (
+            f"{component}: needs: [] bypasses the stage barrier"
+        )
 
 
 @pytest.mark.parametrize("component", COMPONENTS)
@@ -264,15 +336,17 @@ def test_an_array_input_reaches_the_shell_as_a_json_literal(component: str):
 
 def test_the_smoke_test_declares_its_producers_and_consumes_their_artifacts():
     """Section 8.1 and 8.3: the exact producer, artifacts on, never optional."""
-    _, job = only_job("container-smoke-test")
-    assert job["needs"][0] == {
-        "job": "$[[ inputs.build-job ]]",
-        "artifacts": True,
-    }
-    assert job["needs"][1] == "$[[ inputs.service-image-jobs ]]"
-    assert "optional" not in str(job["needs"])
+    variants = needs_variants("container-smoke-test")
+    # With a build job: the exact producer, artifacts on. Without one, the
+    # consumer named the image with subject-reference and there is no producer
+    # to consume. Either way the service producers are spliced in.
+    assert variants[0][0] == {"job": "$[[ inputs.build-job ]]", "artifacts": True}
+    for entries in variants:
+        assert entries[-1] == "$[[ inputs.service-image-jobs ]]"
+        assert "optional" not in str(entries)
     declared = inputs("container-smoke-test")
-    assert "default" not in declared["build-job"], "the producer is never optional"
+    assert declared["build-job"]["default"] == ""
+    assert declared["subject-reference"]["default"] == ""
     assert "default" not in declared["image-identities"]
 
 

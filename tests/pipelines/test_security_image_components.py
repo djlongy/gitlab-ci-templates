@@ -49,6 +49,7 @@ from tools.resolve import render_component as render  # noqa: E402
 
 FIXTURE_DATA = yaml.safe_load(FIXTURES.read_text())["components"]
 COMPONENTS = sorted(FIXTURE_DATA)
+SUBJECT_REFERENCE = "quay.example.com/platform/demo@sha256:" + "ab" * 32
 
 STAGE_VOCABULARY = {
     "verify", "build", "test", "scan", "plan",
@@ -57,7 +58,9 @@ STAGE_VOCABULARY = {
 FORBIDDEN_TOP_LEVEL = {
     "stages", "workflow", "default", "variables", "image", "cache", "before_script",
 }
-DIGEST_REGEX = r"^.+@sha256:[0-9a-f]{64}$"
+DIGEST_REGEX = (
+    r"^(\$[A-Z][A-Z0-9_]*/)?[A-Za-z0-9][A-Za-z0-9._/:-]*@sha256:[0-9a-f]{64}$"
+)
 
 needs_token = pytest.mark.skipif(
     not os.environ.get("GITLAB_TOKEN"),
@@ -77,14 +80,42 @@ def body(component: str) -> dict:
     return render.load(template_path(component))[1]
 
 
+NEEDS_ASSEMBLER = "/templates/_needs/needs.yml"
+
+
+def includes(component: str) -> list:
+    return body(component).get("include", []) or []
+
+
 def job(component: str) -> dict:
-    jobs = body(component)
+    jobs = {name: value for name, value in body(component).items() if name != "include"}
     assert len(jobs) == 1, f"{component} declares {len(jobs)} top-level keys; expected one job"
     return next(iter(jobs.values()))
 
 
 def job_name(component: str) -> str:
-    return next(iter(body(component)))
+    return next(name for name in body(component) if name != "include")
+
+
+def needs_variants(component: str) -> list[list]:
+    """Every `needs:` list this component can produce, as the template writes it.
+
+    A component whose producers are all required writes one list in its job. A
+    component with an optional producer cannot -- a needs entry cannot name an
+    empty job -- so it includes templates/_needs/needs.yml once per combination
+    of producers it accepts. The properties below hold for every combination,
+    so they are asserted against all of them.
+    """
+    definition = job(component)
+    if "needs" in definition:
+        return [definition["needs"]]
+    variants = []
+    for entry in includes(component):
+        assert entry["local"] == NEEDS_ASSEMBLER, entry
+        inputs = entry["inputs"]
+        variants.append([*inputs.get("producer-needs", []), inputs["gate-jobs"]])
+    assert variants, f"{component} declares neither needs nor a needs include"
+    return variants
 
 
 def resolve(value, instance: str):
@@ -163,7 +194,10 @@ def test_no_forbidden_top_level_keys(component: str):
 @pytest.mark.parametrize("component", COMPONENTS)
 def test_the_runtime_arrives_through_an_embedded_block_not_an_include(component: str):
     """Section 12: a component include imports YAML, never this repository."""
-    assert "include" not in body(component)
+    # The needs assembler is the one include a component makes, and it carries
+    # no runtime: it is a needs list and nothing else.
+    for entry in includes(component):
+        assert entry["local"] == NEEDS_ASSEMBLER, entry
     assert "extends" not in job(component)
     text = template_path(component).read_text()
     assert "# BEGIN embed " in text
@@ -193,26 +227,29 @@ def test_failure_is_never_suppressed(component: str):
 def test_needs_are_explicit_and_never_optional(component: str):
     definition = job(component)
     assert "dependencies" not in definition, "needs and dependencies must not both appear"
-    entries = definition["needs"]
-    assert entries, "no component here is source-only"
-    for entry in entries:
-        if isinstance(entry, str):
-            continue  # the interpolated gate-jobs array
-        assert "optional" not in entry, "a required producer is never optional"
-        assert entry["job"].startswith("$[[ inputs.")
+    for entries in needs_variants(component):
+        assert entries, "no component here is source-only"
+        for entry in entries:
+            if isinstance(entry, str):
+                continue  # the interpolated gate-jobs array
+            assert "optional" not in entry, "a required producer is never optional"
+            assert entry["job"].startswith("$[[ inputs.")
 
 
 @pytest.mark.parametrize("component", COMPONENTS)
 def test_gate_jobs_is_spliced_into_needs(component: str):
     """One deliberate list: producers stay, gates are added (section 8)."""
-    assert "$[[ inputs.gate-jobs ]]" in job(component)["needs"]
+    for entries in needs_variants(component):
+        assert "$[[ inputs.gate-jobs ]]" in entries
 
 
 @pytest.mark.parametrize("component", COMPONENTS)
 def test_artifact_producers_are_declared_with_artifacts_true(component: str):
     definition = job(component)
     producing = [
-        entry for entry in definition["needs"]
+        entry
+        for entries in needs_variants(component)
+        for entry in entries
         if isinstance(entry, dict) and entry.get("artifacts") is True
     ]
     reads = any(
@@ -224,11 +261,12 @@ def test_artifact_producers_are_declared_with_artifacts_true(component: str):
 
 @pytest.mark.parametrize("component", COMPONENTS)
 def test_gate_only_needs_declare_artifacts_false(component: str):
-    for entry in job(component)["needs"]:
-        if isinstance(entry, dict) and entry["job"] in (
-            "$[[ inputs.sign-job ]]", "$[[ inputs.sync-job ]]"
-        ):
-            assert entry["artifacts"] is False
+    for entries in needs_variants(component):
+        for entry in entries:
+            if isinstance(entry, dict) and entry["job"] in (
+                "$[[ inputs.sign-job ]]", "$[[ inputs.sync-job ]]"
+            ):
+                assert entry["artifacts"] is False
 
 
 @pytest.mark.parametrize("component", COMPONENTS)
@@ -364,7 +402,17 @@ def test_gitlab_and_the_renderer_agree_on_the_job_name(component: str):
         spec["spec"]["inputs"][name]["default"] = value
     stages = yaml.safe_dump({"stages": FIXTURE_DATA[component]["stages"]})
     stubs = yaml.safe_dump(producers_for(component, ["api"]))
-    payload = yaml.safe_dump(spec) + "---\n" + stages + stubs + template_body
+    # The needs assembler is dropped: `include: local:` resolves against what
+    # the server holds on the default branch, so a fragment on this branch is
+    # not reachable. The job name, which is what this control compares, does
+    # not come from it. The assembled needs are linted through
+    # `rendered()` in the tests below instead.
+    jobs = yaml.safe_dump(
+        {name: value for name, value in yaml.safe_load(template_body).items()
+         if name != "include"},
+        width=10_000,
+    )
+    payload = yaml.safe_dump(spec) + "---\n" + stages + stubs + jobs
 
     through_gitlab = lint_module.lint(payload, include_jobs=True, dry_run=True)
     assert through_gitlab["valid"], through_gitlab.get("errors")
@@ -398,6 +446,135 @@ def test_two_instances_emit_distinct_job_names(component: str):
     names = lint_module.job_names(result)
     assert f"api:{component}" in names
     assert f"web:{component}" in names
+
+
+@needs_token
+def test_cosign_signs_with_neither_an_sbom_nor_a_scan_producer():
+    """A consumer running neither syft nor trivy still gets a signed image."""
+    component = "container-sign-attest-cosign"
+    inputs = {**inputs_for(component, "api"), "sbom-job": "", "scan-job": ""}
+    jobs = render.render(template_path(component), **inputs)
+    assert jobs[f"api:{component}"]["needs"] == [
+        {"job": "api:container-build-buildkit", "artifacts": True}
+    ]
+    payload = render.compose(
+        FIXTURE_DATA[component]["stages"],
+        {"api:container-build-buildkit": {"stage": "build", "script": ["true"]}},
+        jobs,
+    )
+    result = lint_module.lint(payload, include_jobs=True, dry_run=True)
+    assert result["valid"], result.get("errors")
+    assert lint_module.job_names(result) == [
+        "api:container-build-buildkit",
+        f"api:{component}",
+    ]
+
+
+@needs_token
+def test_the_vigil_sync_runs_without_a_signing_job():
+    """Coupling: syncing an unsigned image is a choice, not a lint error."""
+    component = "security-sync-vigil"
+    inputs = {**inputs_for(component, "api"), "sign-job": ""}
+    jobs = render.render(template_path(component), **inputs)
+    assert jobs[f"api:{component}"]["needs"] == [
+        {"job": "api:container-build-buildkit", "artifacts": True}
+    ]
+    assert "no sign-job is set" in "\n".join(jobs[f"api:{component}"]["script"])
+    payload = render.compose(
+        FIXTURE_DATA[component]["stages"],
+        {"api:container-build-buildkit": {"stage": "build", "script": ["true"]}},
+        jobs,
+    )
+    result = lint_module.lint(payload, include_jobs=True, dry_run=True)
+    assert result["valid"], result.get("errors")
+
+
+@needs_token
+def test_grype_scans_the_image_when_no_sbom_producer_is_named():
+    """Coupling: grype was an SBOM consumer with no way to scan an image."""
+    component = "security-image-grype"
+    inputs = {**inputs_for(component, "api"), "sbom-job": ""}
+    jobs = render.render(template_path(component), **inputs)
+    definition = jobs[f"api:{component}"]
+    assert definition["needs"] == [
+        {"job": "api:container-build-buildkit", "artifacts": True}
+    ]
+    script = "\n".join(definition["script"])
+    assert 'CI_TPL_SCAN_TARGET="registry:$CI_TPL_SUBJECT"' in script
+    assert 'ci_tpl_image_reference "$CI_TPL_IDENTITY_FILE"' in script
+    payload = render.compose(
+        FIXTURE_DATA[component]["stages"],
+        {"api:container-build-buildkit": {"stage": "build", "script": ["true"]}},
+        jobs,
+    )
+    result = lint_module.lint(payload, include_jobs=True, dry_run=True)
+    assert result["valid"], result.get("errors")
+
+
+def test_grype_picks_its_mode_from_the_input_not_from_a_file():
+    """Audit 5.2: the predecessor chose its target with `if [ -f ... ]`."""
+    component = "security-image-grype"
+    script = "\n".join(rendered(component, "api")[f"api:{component}"]["script"])
+    assert 'if [ -n "$CI_TPL_SBOM_JOB" ]; then' in script
+    assert "[ -f" not in script
+    assert 'CI_TPL_SCAN_TARGET="sbom:$CI_TPL_SBOM_DIR/sbom.cdx.json"' in script
+
+
+SUBJECT_COMPONENTS = sorted(
+    component for component in COMPONENTS if "subject-reference" in declared(component)
+)
+
+
+def test_the_subject_input_is_the_alternative_to_the_build_job(component=None):
+    """Every component that acts on an image takes one or the other."""
+    assert SUBJECT_COMPONENTS == sorted(
+        component for component in COMPONENTS if "build-job" in declared(component)
+    )
+    for component in SUBJECT_COMPONENTS:
+        inputs = declared(component)
+        assert inputs["build-job"]["default"] == ""
+        assert inputs["subject-reference"]["default"] == ""
+        # Empty, or a repository and a digest. Never a tag.
+        pattern = inputs["subject-reference"]["regex"]
+        assert re.fullmatch(pattern.split("|")[1], SUBJECT_REFERENCE)
+        assert not re.fullmatch(pattern.split("|")[1], "quay.example.com/platform/demo:1.2.3")
+
+
+@needs_token
+@pytest.mark.parametrize("component", SUBJECT_COMPONENTS)
+def test_a_named_subject_stands_in_for_the_build_job(component: str):
+    """Coupling: a consumer scanning an image it did not build here."""
+    inputs = {
+        **inputs_for(component, "api"),
+        "build-job": "",
+        "subject-reference": SUBJECT_REFERENCE,
+    }
+    jobs = render.render(template_path(component), **inputs)
+    named = [
+        entry["job"] for entry in jobs[f"api:{component}"]["needs"]
+        if isinstance(entry, dict)
+    ]
+    assert "api:container-build-buildkit" not in named
+
+    producers = producers_for(component, ["api"])
+    producers.pop("api:container-build-buildkit", None)
+    payload = render.compose(FIXTURE_DATA[component]["stages"], producers, jobs)
+    result = lint_module.lint(payload, include_jobs=True, dry_run=True)
+    assert result["valid"], result.get("errors")
+    assert f"api:{component}" in lint_module.job_names(result)
+
+
+def test_a_publishing_component_refuses_an_empty_gate_list():
+    """Coupling: `gate-jobs: []` compiled, ran and published, gating nothing."""
+    for component in ("container-promote-harbor", "container-export-skopeo"):
+        declared_inputs = declared(component)
+        assert declared_inputs["allow-ungated"]["default"] == "false"
+        assert declared_inputs["allow-ungated"]["options"] == ["true", "false"]
+        parsed = list(yaml.safe_load_all(template_path(component).read_text()))
+        job = next(v for k, v in parsed[1].items() if k != "include")
+        assert job["variables"]["CI_TPL_GATE_JOBS"] == "json $[[ inputs.gate-jobs ]]"
+        assert "ci_tpl_require_gate" in "\n".join(job["script"])
+        assert "BEGIN embed inline runtime/publish/gate.sh" in "\n".join(job["before_script"])
 
 
 @needs_token
@@ -459,3 +636,30 @@ def test_a_policy_mode_outside_the_options_is_rejected(component: str):
     result = lint_module.lint(payload, include_jobs=True, dry_run=True)
     assert not result["valid"], "the server accepted a policy mode outside the options"
     assert any("policy-mode" in message for message in result["errors"]), result["errors"]
+
+
+# ------------------------------------------------- offline grype database
+
+
+@needs_token
+def test_grype_takes_a_database_mirror_and_an_archive():
+    """O4: the one network call this scan cannot avoid becomes a pipeline input,
+    the way db-repository did for trivy in 1.2.0. Grype's database v6 is served
+    over HTTPS rather than as an OCI artifact, so the mirror is a URL."""
+    values = inputs_for("security-image-grype", "api")
+    values.update(
+        {
+            "db-update-url": "https://artifactory.example.com/grype/databases",
+            "db-archive": "/opt/grype-db/vulnerability-db.tar.zst",
+        }
+    )
+    payload = render.compose(
+        FIXTURE_DATA["security-image-grype"]["stages"],
+        producers_for("security-image-grype", ["api"]),
+        render.render(template_path("security-image-grype"), **values),
+    )
+    result = lint_module.lint(payload, include_jobs=True, dry_run=True)
+    assert result["valid"], result.get("errors")
+    merged = result["merged_yaml"]
+    assert "CI_TPL_DB_UPDATE_URL: https://artifactory.example.com/grype/databases" in merged
+    assert 'CI_TPL_DB_ARCHIVE: "/opt/grype-db/vulnerability-db.tar.zst"' in merged

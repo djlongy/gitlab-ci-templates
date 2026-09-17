@@ -7,6 +7,14 @@ minimum_gitlab: '18.9'
 # Retry policy: the `max-retries` input (0, 1 or 2, default 1) sets `retry: max`,
 # and `retry: when` is `runner_system_failure` and nothing else. A job killed by
 # its runner runs again; a failed gate never does.
+# Vulnerability database: `db-update-url` sets GRYPE_DB_UPDATE_URL, and
+# `db-archive` is imported with `grype db import` and turns GRYPE_DB_AUTO_UPDATE
+# and GRYPE_DB_REQUIRE_UPDATE_CHECK off, so an imported database means the scan
+# makes no call of its own. Both empty keeps `grype db update` against grype's
+# default listing. A mirror is a URL, not an OCI repository: grype's database v6
+# has no OCI distribution (grype v0.118.0). An archive older than grype's
+# max-allowed-built-age (120h) still fails the scan; that limit is deliberately
+# not an input.
 emitted_jobs:
   - pattern: '{instance}:security-image-grype'
     stage: scan
@@ -60,6 +68,16 @@ validation:
   verified_at: 2026/09/15
   environment: gitlab.example.com 18.9.1-ee, project 18
   notes: >-
+    Exactly one of build-job and subject-reference. build-job reads the
+    producer's image.json from its artifacts; subject-reference names an image
+    this pipeline did not build, and the job then writes the same record into
+    its own artefact root. Neither or both fails the job, naming both inputs.
+    Two modes, chosen by sbom-job and by nothing else. Set: the target is
+    security-sbom-syft's sbom.cdx.json, scanned only once its subject record
+    agrees with the build's image.json. Empty: the target is the image
+    reference in image.json, pulled from the registry, and scan-result.json
+    records the target kind as image. Image mode has not run in a consumer
+    pipeline.
     Scans the authoritative SBOM only; there is no image-scanning mode and no
     file-existence fallback. Failure semantics match security-image-trivy, plus:
     an SBOM whose subject does not match the build's image.json fails before the

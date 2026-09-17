@@ -1,0 +1,90 @@
+---
+name: container-promote-skopeo
+kind: component
+status: released
+introduced_in: 1.3.0
+minimum_gitlab: '18.9'
+# Retry policy: the `max-retries` input (0, 1 or 2, default 1) sets `retry: max`,
+# and `retry: when` is `runner_system_failure` and nothing else. A job killed by
+# its runner runs again; a failed gate never does.
+emitted_jobs:
+  - pattern: '{instance}:container-promote-skopeo'
+    stage: publish
+    blocking: true
+outputs:
+  - path: .ci-artifacts/{instance}/container-promote-skopeo/promote-result.json
+    producer: '{instance}:container-promote-skopeo'
+    format: JSON
+    schema: 'schema_version 1; source, target, digest, tags, created_at.'
+    subject_identity: >-
+      repository@sha256 digest. The source digest is an input or comes from the
+      build's image.json; the target digest is the sha256 of the manifest read
+      back from the target repository, so the two are compared as content and
+      not as a field the registry reported.
+    retention: 1 week
+required_secrets:
+  - name: HARBOR_USER
+    kind: ci-variable
+    scope: >-
+      Default only. The four credential-variable inputs name the variables this
+      job reads, so a consumer with QUAY_USER and an Artifactory identity names
+      those instead and defines neither of these. Pull on the source repository,
+      push on the target.
+    protected_ref_required: true
+  - name: HARBOR_PASSWORD
+    kind: ci-variable
+    scope: Default only; the password or robot token for the above.
+    protected_ref_required: true
+runtime_image:
+  reference: 'docker.io/alpine@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d'
+  pinning: digest
+  tool_versions:
+    alpine: '3.22'
+    skopeo: from the image's own package repositories
+# No checkout: the digest is an input or an artifact of the named producer, and
+# the copy is registry to registry. tests/contracts/test_git_strategy.py holds
+# both halves together.
+trust:
+  privileged: false
+  network_egress:
+    - the source registry
+    - the target registry
+    - the Alpine package mirror the execution image is configured with
+  runner_profile: >-
+    Any unprivileged Docker executor. No image is built or loaded: skopeo streams
+    blobs the registries already hold, and mounts them where both ends are the
+    same registry.
+  protected_ref_required: true
+validation:
+  evidence:
+    - source-reviewed
+    - yaml-parsed
+    - gitlab-linted
+    - runtime-tested
+    - integration-tested
+  verified_at: 2026/09/18
+  revision: '1.3.0'
+  environment: >-
+    gitlab.example.com 18.9.1-ee, POST /api/v4/projects/:id/ci/lint.
+    Executed on the originating estate, 2026/09: a consumer project promoted a
+    digest between two repositories of a Quay 3.15.7 registry, first on the
+    branch this component was written on and then again on the 1.3.0 tag.
+  notes: >-
+    Failure semantics: neither source-digest nor a readable image.json, an
+    image.json that fails its own schema check, a digest that is not sha256 and
+    64 hex, an empty target-tags, a tag outside [A-Za-z0-9._-], either
+    credential pair empty, a CA bundle variable carrying no certificate, a
+    refused copy, a target that cannot be read back, and a target digest that
+    differs from the source. Verification hashes the raw target manifest rather
+    than reading a field, because `skopeo inspect` without --raw resolves an
+    index to the runner's own platform and would report a child digest.
+    Referrers: cosign stores a signature as the separate tag sha256-<hex>.sig,
+    which a digest copy does not carry. container-promote-harbor copies those
+    explicitly through the Harbor API; this component does not, so a signed
+    release promoted here is signed again at the target or has its referrer tags
+    promoted as further tags.
+    integration-tested: a consumer job copied a built image by digest between
+    two repositories of a Quay registry, tagged the target, read the target
+    manifest back and got the same digest. Repeated on the 1.3.0 tag with a
+    second image. No composition ships it, so no pipeline in pipelines/
+    includes it yet.

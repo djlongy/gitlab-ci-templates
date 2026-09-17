@@ -47,7 +47,9 @@ def jobs(component: str) -> dict:
         yaml.safe_load_all((TEMPLATES_DIR / component / "template.yml").read_text())
     )
     assert len(documents) == 2, "a component is exactly two documents: spec, then jobs"
-    return documents[1]
+    # `include:` is not a job. A component that chooses its ordering from its
+    # inputs includes one of the files under templates/_needs/ to carry it.
+    return {name: job for name, job in documents[1].items() if name != "include"}
 
 
 def test_there_are_components_to_check():

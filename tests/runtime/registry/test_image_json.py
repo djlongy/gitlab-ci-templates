@@ -277,7 +277,7 @@ def test_a_well_formed_image_json_validates(tmp_path):
         ({"reference": f"{REPOSITORY}@{OTHER_DIGEST}"}, "disagrees"),
         ({"digest": f"{REPOSITORY}:1.2.3"}, "not a sha256 digest"),
         ({"source_commit": "abc"}, "not a full commit sha"),
-        ({"subject_kind": "blob"}, "neither manifest nor index"),
+        ({"subject_kind": "blob"}, "is not manifest, index or unresolved"),
         ({"schema_version": 2}, "not image.json schema 1"),
         ({"created_at": ""}, "records no created_at"),
     ],
@@ -489,3 +489,67 @@ def test_a_build_that_did_not_push_records_that_and_writes_no_image_json(tmp_pat
     assert result.returncode == 0, result.stderr
     assert (out / "build.env").read_text().strip() == "CI_TPL_IMAGE_PUSHED=false"
     assert not (out / "image.json").exists()
+
+
+# --- the subject a consumer names, rather than one this pipeline built ---
+
+
+def test_a_named_subject_is_recorded_in_the_job_s_own_artefact_root(tmp_path):
+    """Section 9.1: one contract, whichever way the subject arrived."""
+    reference = f"{REPOSITORY}@{VALID_DIGEST}"
+    result = run(
+        f"ci_tpl_resolve_identity_file '' '{reference}' '/nowhere/image.json' '{tmp_path}/own'",
+        tmp_path,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == f"{tmp_path}/own/image.json"
+    written = json.loads((tmp_path / "own" / "image.json").read_text())
+    assert written["reference"] == reference
+    assert written["repository"] == REPOSITORY
+    assert written["digest"] == VALID_DIGEST
+    # Not facts this job has: nothing called the registry.
+    assert written["platforms"] == ["unresolved"]
+    assert written["subject_kind"] == "unresolved"
+
+
+def test_a_named_subject_record_passes_the_same_validation_a_build_s_does(tmp_path):
+    reference = f"{REPOSITORY}@{VALID_DIGEST}"
+    run(f"ci_tpl_write_subject_record '{tmp_path}/own' '{reference}'", tmp_path)
+    result = run(f"ci_tpl_validate_image_json '{tmp_path}/own/image.json'", tmp_path)
+    assert result.returncode == 0, result.stderr
+
+
+def test_a_build_job_reads_the_build_s_record_and_writes_nothing(tmp_path):
+    result = run(
+        f"ci_tpl_resolve_identity_file 'api:container-build-buildkit' '' "
+        f"'{tmp_path}/build/image.json' '{tmp_path}/own'",
+        tmp_path,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == f"{tmp_path}/build/image.json"
+    assert not (tmp_path / "own").exists()
+
+
+def test_naming_both_a_build_job_and_a_subject_is_refused(tmp_path):
+    result = run(
+        f"ci_tpl_resolve_identity_file 'api:build' '{REPOSITORY}@{VALID_DIGEST}' 'x' '{tmp_path}/own'",
+        tmp_path,
+    )
+    assert result.returncode != 0
+    assert "both set" in result.stderr
+    assert "build-job" in result.stderr and "subject-reference" in result.stderr
+
+
+def test_naming_neither_is_refused_with_a_message_naming_both(tmp_path):
+    result = run(f"ci_tpl_resolve_identity_file '' '' 'x' '{tmp_path}/own'", tmp_path)
+    assert result.returncode != 0
+    assert "build-job" in result.stderr and "subject-reference" in result.stderr
+
+
+def test_a_subject_record_with_a_tag_instead_of_a_digest_is_refused(tmp_path):
+    result = run(
+        f"ci_tpl_write_subject_record '{tmp_path}/own' '{REPOSITORY}:1.2.3'", tmp_path
+    )
+    assert result.returncode != 0
+    assert "carries a tag" in result.stderr
+    assert not (tmp_path / "own" / "image.json").exists()

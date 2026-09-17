@@ -28,7 +28,6 @@ no test here claims them.
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 from typing import Any
 
@@ -38,14 +37,6 @@ from . import render_component
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PIPELINES_DIR = REPO_ROOT / "pipelines"
-
-# The only include-rule form these compositions use: a toggle input compared
-# against a literal, optionally several of them joined by `&&` when an include
-# is selected by two inputs at once (smoke-test and build-sources, say).
-# Anything else raises rather than being guessed at, because a rule silently
-# treated as true would put a job in the fixture that the real pipeline would
-# not have.
-TOGGLE_RULE = re.compile(r'^"(?P<left>[^"]*)"\s*==\s*"(?P<right>[^"]*)"$')
 
 PLACEHOLDER = render_component.PLACEHOLDER
 
@@ -110,20 +101,15 @@ def _substitute(node: Any, values: dict) -> Any:
 
 
 def _rule_is_active(rules: list, values: dict) -> bool:
-    for rule in rules:
-        if not isinstance(rule, dict) or set(rule) - {"if", "when"}:
-            raise CompositionError(f"unsupported include rule: {rule!r}")
-        condition = _substitute(rule["if"], values)
-        matches = [TOGGLE_RULE.match(clause.strip()) for clause in condition.split("&&")]
-        if not all(matches):
-            raise CompositionError(
-                f"include rule {condition!r} is not the literal toggle form this "
-                "resolver understands; add support deliberately rather than "
-                "assuming the include is active"
-            )
-        if all(m.group("left") == m.group("right") for m in matches):
-            return rule.get("when") != "never"
-    return False
+    """A toggle input compared against a literal, as the compositions write it.
+
+    The form and its refusals belong to `render_component`, which applies the
+    same rule to the `include:` a component makes; only the error type differs.
+    """
+    try:
+        return render_component.rule_is_active(rules, values)
+    except render_component.InputError as error:
+        raise CompositionError(str(error)) from error
 
 
 def resolve(name: str, **supplied: Any) -> dict:

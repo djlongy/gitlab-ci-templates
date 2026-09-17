@@ -26,6 +26,7 @@ TEMPLATES_DIR = REPO_ROOT / "templates"
 # Every component whose job is artifact-only or API-only.
 NO_CHECKOUT = [
     "container-promote-harbor",
+    "container-promote-skopeo",
     "release-trigger-jenkins",
     "release-trigger-semaphore",
     "security-repository-audit",
@@ -42,8 +43,14 @@ CHECKOUT_PATH = re.compile(r"\$CI_PROJECT_DIR/(?!\.ci-artifacts)")
 def parts(component: str) -> tuple[dict, dict]:
     parsed = list(yaml.safe_load_all((TEMPLATES_DIR / component / "template.yml").read_text()))
     assert len(parsed) == 2, "a component is exactly two documents: spec, then jobs"
-    # A name starting with `.` is a hidden parent, not a job a consumer gets.
-    jobs = {name: job for name, job in parsed[1].items() if not name.startswith(".")}
+    # A name starting with `.` is a hidden parent, not a job a consumer gets,
+    # and `include:` is not a job at all: a component that chooses its
+    # ordering from its inputs includes a file under templates/_needs/.
+    jobs = {
+        name: job
+        for name, job in parsed[1].items()
+        if not name.startswith(".") and name != "include"
+    }
     assert len(jobs) == 1, f"{component} emits {len(jobs)} jobs"
     return parsed[0]["spec"]["inputs"], next(iter(jobs.values()))
 

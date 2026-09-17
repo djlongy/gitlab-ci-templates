@@ -1,0 +1,43 @@
+---
+# Assemble one job's `needs:` out of the producers a consumer actually supplied.
+#
+# Not a component: it declares no job of its own, it is included only by the
+# components beside it, and it is not in the catalogue. `include:` from inside a
+# component is otherwise not done here — tests/pipelines/test_security_image_
+# components.py keeps the embedded runtime out of one — and this file is the
+# single exception.
+#
+# Why it exists. A `needs:` entry cannot name an empty job, so a component whose
+# producer is optional cannot write `- job: $[[ inputs.sbom-job ]]` and leave the
+# input blank: GitLab answers "job can't be blank" and the pipeline is not
+# created. An `include:` carrying `rules:` is dropped when its condition is
+# false (https://docs.gitlab.com/ci/yaml/includes/#use-rules-with-include), and
+# the condition may be a literal an input was interpolated into, so the
+# component includes this file once per combination of producers it accepts,
+# under mutually exclusive rules.
+#
+# The copy that survives carries the WHOLE list. Two included files never
+# concatenate their arrays, and the including file wins any key it sets itself
+# (probed on gitlab.example.com 18.9.1-ee, 2026/09/17), which is why a component
+# using this file declares no `needs:` in its own body.
+spec:
+  inputs:
+    job-name:
+      type: string
+      description: Exact name of the job these needs belong to.
+      regex: '^[a-z][a-z0-9-]{0,47}:[a-z][a-z0-9-]*$'
+    producer-needs:
+      type: array
+      description: >-
+        The artifact producers and required gates this combination has, already
+        written as needs entries. Empty when the consumer supplied none.
+      default: []
+    gate-jobs:
+      type: array
+      description: The component's own gate-jobs input, passed through unchanged.
+      default: []
+---
+"$[[ inputs.job-name ]]":
+  needs:
+    - $[[ inputs.producer-needs ]]
+    - $[[ inputs.gate-jobs ]]

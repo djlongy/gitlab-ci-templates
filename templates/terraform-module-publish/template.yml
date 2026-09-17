@@ -38,7 +38,14 @@ spec:
         Packaging and upload image pinned by digest. The default is
         alpine/curl:8.12.1 through the estate's pull-through mirror: it carries
         curl, tar and awk with no package installation at job time.
-      regex: '^.+@sha256:[0-9a-f]{64}$'
+
+        A leading `$UPPER_SNAKE/` is accepted, so a site that mirrors these
+        images into its own registry names that registry once as a group
+        variable and passes `$CI_TPL_MIRROR/<path>@sha256:...` here.
+        GitLab expands a CI variable in `image:` at job time. The digest stays
+        in this value rather than in the variable: what runs is then still
+        reviewable in the consumer file.
+      regex: '^(\$[A-Z][A-Z0-9_]*/)?[A-Za-z0-9][A-Za-z0-9._/:-]*@sha256:[0-9a-f]{64}$'
       default: 'docker.io/alpine/curl@sha256:edbbe6f64e9890474df2864d7ee92941bb03ce17b07fd9cadc1d14e9453fc031'
     runner-tags:
       type: array

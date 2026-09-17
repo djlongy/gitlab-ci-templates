@@ -25,9 +25,17 @@ spec:
       default: attest
     execution-image:
       type: string
-      description: Approved Python execution image pinned by digest.
+      description: >-
+        Approved Python execution image pinned by digest.
+
+        A leading `$UPPER_SNAKE/` is accepted, so a site that mirrors these
+        images into its own registry names that registry once as a group
+        variable and passes `$CI_TPL_MIRROR/<path>@sha256:...` here.
+        GitLab expands a CI variable in `image:` at job time. The digest stays
+        in this value rather than in the variable: what runs is then still
+        reviewable in the consumer file.
       default: 'docker.io/python@sha256:cd7c412d000912f29075a1b8803e43cb2f38bb67f104019df526df5ceaf30569'
-      regex: '^.+@sha256:[0-9a-f]{64}$'
+      regex: '^(\$[A-Z][A-Z0-9_]*/)?[A-Za-z0-9][A-Za-z0-9._/:-]*@sha256:[0-9a-f]{64}$'
     runner-tags:
       type: array
       description: Runner selection from the estate profile.
@@ -50,7 +58,22 @@ spec:
         - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG'
     build-job:
       type: string
-      description: Exact name of the job whose image.json identifies the subject.
+      description: >-
+        Exact name of the job whose image.json identifies the subject. Empty
+        when the consumer names the image with subject-reference instead;
+        exactly one of the two.
+      default: ''
+    subject-reference:
+      type: string
+      description: >-
+        The image this job acts on, written as repository@sha256:<digest>, for
+        a consumer acting on an image this pipeline did not build. Exactly one
+        of this and build-job: neither is a default the other can imply, so the
+        job checks at run time and names both in either failure. When this is
+        set the job writes the record a build would have written into its own
+        artefact root, so a downstream job reads one shape (section 9.1).
+      regex: '^$|^[a-z0-9.-]+(:[0-9]+)?(/[a-z0-9._-]+)+@sha256:[0-9a-f]{64}$'
+      default: ''
     build-component:
       type: string
       description: Component name the build job writes its artifacts under.
@@ -90,6 +113,31 @@ spec:
       description: Seconds between readiness lookups.
       default: 15
 ---
+# A `needs:` entry cannot name an empty job, so the list is assembled in
+# templates/_needs/needs.yml and this component includes the one
+# combination the consumer's inputs describe.
+include:
+  - local: '/templates/_needs/needs.yml'
+    inputs:
+      job-name: '$[[ inputs.instance ]]:security-verify-vigil'
+      gate-jobs: $[[ inputs.gate-jobs ]]
+      producer-needs:
+        - job: '$[[ inputs.build-job ]]'
+          artifacts: true
+        - job: '$[[ inputs.sync-job ]]'
+          artifacts: false
+    rules:
+      - if: '"$[[ inputs.build-job ]]" != ""'
+  - local: '/templates/_needs/needs.yml'
+    inputs:
+      job-name: '$[[ inputs.instance ]]:security-verify-vigil'
+      gate-jobs: $[[ inputs.gate-jobs ]]
+      producer-needs:
+        - job: '$[[ inputs.sync-job ]]'
+          artifacts: false
+    rules:
+      - if: '"$[[ inputs.build-job ]]" == ""'
+
 "$[[ inputs.instance ]]:security-verify-vigil":
   stage: $[[ inputs.stage ]]
   image:
@@ -108,19 +156,15 @@ spec:
     CI_TPL_RUNTIME_DIR: /tmp/ci-runtime
     CI_TPL_ARTIFACT_DIR: '.ci-artifacts/$[[ inputs.instance ]]/security-verify-vigil'
     CI_TPL_IDENTITY_FILE: '.ci-artifacts/$[[ inputs.instance ]]/$[[ inputs.build-component ]]/image.json'
+    CI_TPL_BUILD_JOB: '$[[ inputs.build-job ]]'
+    CI_TPL_SUBJECT_REFERENCE: '$[[ inputs.subject-reference ]]'
     CI_TPL_VIGIL_URL: $[[ inputs.vigil-url ]]
     CI_TPL_REQUIRE_READINESS: $[[ inputs.require-readiness ]]
     CI_TPL_MAX_WAIT: '$[[ inputs.max-wait ]]'
     CI_TPL_POLL_INTERVAL: '$[[ inputs.poll-interval ]]'
-  needs:
-    - job: $[[ inputs.build-job ]]
-      artifacts: true
-    - job: $[[ inputs.sync-job ]]
-      artifacts: false
-    - $[[ inputs.gate-jobs ]]
   before_script:
     - |
-      # BEGIN embed dir $CI_TPL_RUNTIME_DIR runtime/httpjson.py runtime/vigil/vigil.py
+      # BEGIN embed dir $CI_TPL_RUNTIME_DIR runtime/httpjson.py runtime/vigil/vigil.py runtime/subject.py
       mkdir -p "$CI_TPL_RUNTIME_DIR" "$CI_TPL_RUNTIME_DIR/vigil" || exit 1
       cat > "$CI_TPL_RUNTIME_DIR/httpjson.py" <<'CI_TPL_EMBED_EOF' || exit 1
       """Minimal JSON-over-HTTPS client shared by the runtime helpers.
@@ -439,10 +483,129 @@ spec:
       if __name__ == "__main__":
           raise SystemExit(main())
       CI_TPL_EMBED_EOF
+      cat > "$CI_TPL_RUNTIME_DIR/subject.py" <<'CI_TPL_EMBED_EOF' || exit 1
+      #!/usr/bin/env python3
+      """Which image.json a job acts on, printed as a path.
+
+      A job that signs, publishes or reports on an image usually reads the build
+      job's image.json: the consumer named `build-job`, its artifact arrived, and the
+      record is already on disk. A consumer acting on an image this pipeline did not
+      build names it with `subject-reference` instead, and then there is nothing to
+      read. This writes the same record into the job's OWN artefact root, so a
+      downstream job reads one shape whichever way the subject arrived (section 9.1).
+
+      Exactly one of the two. Both named is a contradiction nobody can resolve;
+      neither leaves the job with no subject at all. Either message names both.
+
+      Its own script rather than an argument to each component's runtime: the four
+      Python components that take a subject already parse their own arguments, and
+      the shell components reach the same behaviour through
+      `ci_tpl_resolve_identity_file` in runtime/registry/image-json.sh, whose record
+      this one matches field for field.
+
+          identity=$(python3 subject.py --build-job "$A" --subject-reference "$B" \
+            --build-identity "$C" --artifact-dir "$D") || exit 1
+      """
+
+      from __future__ import annotations
+
+      import argparse
+      import json
+      import os
+      import re
+      import sys
+      import time
+      from pathlib import Path
+
+      # The same form the components declare as the input's `regex:`. Checked again
+      # here because a runtime that trusts its caller is a runtime that writes a
+      # record naming a tag.
+      REFERENCE = re.compile(
+          r"^[a-z0-9.-]+(:[0-9]+)?(/[a-z0-9._-]+)+@sha256:[0-9a-f]{64}$"
+      )
+
+
+      class SubjectError(ValueError):
+          """The subject is missing, doubled, or not a repository@digest."""
+
+
+      def subject_record(reference: str) -> dict:
+          """An image.json-shaped record for a reference nobody here built."""
+          repository, _, digest = reference.partition("@")
+          return {
+              "schema_version": 1,
+              "repository": repository,
+              "digest": digest,
+              "reference": reference,
+              "source_commit": os.environ.get("CI_COMMIT_SHA", ""),
+              "pipeline_id": os.environ.get("CI_PIPELINE_ID", ""),
+              "job_id": os.environ.get("CI_JOB_ID", ""),
+              # Nothing here called the registry, so the platform list and whether
+              # the reference points at a manifest or an index are not facts.
+              "platforms": ["unresolved"],
+              "subject_kind": "unresolved",
+              "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+          }
+
+
+      def identity_file(build_job: str, reference: str, build_identity: str, artifact_dir: str) -> Path:
+          if build_job and reference:
+              raise SubjectError(
+                  f"build-job and subject-reference are both set; this job takes "
+                  f"exactly one (build-job {build_job!r}, subject-reference {reference!r})"
+              )
+          if not build_job and not reference:
+              raise SubjectError(
+                  "neither build-job nor subject-reference is set; this job takes "
+                  "exactly one: build-job names the job whose image.json states the "
+                  "subject, subject-reference names the image as "
+                  "repository@sha256:<digest>"
+              )
+          if not reference:
+              return Path(build_identity)
+          if not REFERENCE.match(reference):
+              raise SubjectError(
+                  f"subject-reference {reference!r} is not repository@sha256:<64 hex>"
+              )
+          destination = Path(artifact_dir) / "image.json"
+          destination.parent.mkdir(parents=True, exist_ok=True)
+          destination.write_text(json.dumps(subject_record(reference), indent=2, sort_keys=True) + "\n")
+          print(f"subject-reference names {reference}; recorded at {destination}", file=sys.stderr)
+          return destination
+
+
+      def main(argv: list[str] | None = None) -> int:
+          parser = argparse.ArgumentParser(description=__doc__)
+          parser.add_argument("--build-job", default="")
+          parser.add_argument("--subject-reference", default="")
+          parser.add_argument("--build-identity", required=True)
+          parser.add_argument("--artifact-dir", required=True)
+          args = parser.parse_args(argv)
+          try:
+              print(identity_file(
+                  args.build_job, args.subject_reference, args.build_identity, args.artifact_dir
+              ))
+          except SubjectError as error:
+              print(f"ERROR: {error}", file=sys.stderr)
+              return 1
+          return 0
+
+
+      if __name__ == "__main__":
+          raise SystemExit(main())
+      CI_TPL_EMBED_EOF
       # END embed
   script:
     - |
       mkdir -p "$CI_TPL_ARTIFACT_DIR" || exit 1
+      # Exactly one of build-job and subject-reference. With a build job this is
+      # the artefact that arrived; with a reference it is a record written here,
+      # in the shape a build writes, so a downstream job reads one contract.
+      CI_TPL_IDENTITY_FILE=$(python3 "$CI_TPL_RUNTIME_DIR/subject.py" \
+        --build-job "$CI_TPL_BUILD_JOB" \
+        --subject-reference "$CI_TPL_SUBJECT_REFERENCE" \
+        --build-identity "$CI_TPL_IDENTITY_FILE" \
+        --artifact-dir "$CI_TPL_ARTIFACT_DIR") || exit 1
       python3 "$CI_TPL_RUNTIME_DIR/vigil/vigil.py" verify \
         --url "$CI_TPL_VIGIL_URL" \
         --identity "$CI_TPL_IDENTITY_FILE" \

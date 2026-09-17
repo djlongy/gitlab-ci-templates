@@ -1,4 +1,6 @@
 # templates/container-mirror-skopeo/template.yml
+#
+# Copy a reference list from one registry to another with skopeo, by digest.
 
 #### Public interface ####
 spec:
@@ -92,9 +94,18 @@ spec:
       default: ''
     execution-image:
       type: string
-      description: Approved execution image pinned by digest. Needs apk, curl, python3 and skopeo.
+      description: >-
+        Approved execution image pinned by digest. Needs apk, curl, python3 and
+        skopeo.
+
+        A leading `$UPPER_SNAKE/` is accepted, so a site that mirrors these
+        images into its own registry names that registry once as a group
+        variable and passes `$CI_TPL_MIRROR/<path>@sha256:...` here.
+        GitLab expands a CI variable in `image:` at job time. The digest stays
+        in this value rather than in the variable: what runs is then still
+        reviewable in the consumer file.
       default: docker.io/alpine@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
-      regex: '^.+@sha256:[0-9a-f]{64}$'
+      regex: '^(\$[A-Z][A-Z0-9_]*/)?[A-Za-z0-9][A-Za-z0-9._/:-]*@sha256:[0-9a-f]{64}$'
     egress-proxy:
       type: string
       description: HTTP CONNECT proxy for outbound traffic. Empty means direct egress.

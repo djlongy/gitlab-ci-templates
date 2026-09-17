@@ -60,6 +60,13 @@ validation:
   verified_at: 2026/09/15
   environment: gitlab.example.com 18.9.1-ee, project 18
   notes: >-
+    An empty gate-jobs fails the job: nothing in the pipeline checked what is
+    about to be published, and that is a release decision rather than a default.
+    allow-ungated: true turns the failure into a warning.
+    Exactly one of build-job and subject-reference. build-job reads the
+    producer's image.json from its artifacts; subject-reference names an image
+    this pipeline did not build, and the job then writes the same record into
+    its own artefact root. Neither or both fails the job, naming both inputs.
     Failure semantics: an image.json without a digest, a candidate artifact that is not
     there, a destination project equal to the source, a refused copy, a destination
     that cannot be read back or whose digest differs, a missing cosign signature while

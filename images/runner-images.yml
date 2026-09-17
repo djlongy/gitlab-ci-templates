@@ -1,0 +1,39 @@
+---
+# Digest catalogue for the estate's runner job images.
+#
+# NOTHING IN THIS REPOSITORY READS THIS FILE. No component, no composition and
+# no test consumes an entry; the only thing that reads it is a human, and the
+# only thing that checks it is tests/contracts/test_runner_images.py. It exists
+# so that promoting a runner image is a reviewed change in a repository with a
+# merge request, rather than a tag moving in a registry.
+#
+# D10 of the runner-images design: an image factory builds candidates and scans
+# them, and promotion is this file's digest changing. The Harbor promote
+# component speaks an API Quay does not have, so there is no promote job to do
+# it; the merge request is the gate.
+#
+# The catalogue is written by the factory project and reviewed here. It is not
+# generated from templates/, so `runtime/catalog/generate.py` neither reads nor
+# writes it: .ci/catalog.yml inventories what this repository offers, and this
+# inventories what another project built.
+#
+# Schema (tests/contracts/runner-images.schema.json):
+#
+#   schema_version  1
+#   images[]
+#     name          the image, unique in this file, e.g. runner-python
+#     repository    fully qualified, no tag and no digest
+#     digest        sha256: and 64 hex characters, the manifest digest
+#     tag           the human-readable tag that digest was pushed under
+#     built_from    project (path), pipeline_id, commit (full sha)
+#     verified_at   yyyy/mm/dd, the day the entry was checked against the
+#                   registry, not the day it was written
+#
+# A digest, never a tag, is what a consumer pins: section 12. The tag is
+# recorded so a human can find the build, and it is not what anything resolves.
+#
+# The list is empty because no runner-images project exists yet. An empty
+# catalogue is a valid state and says so; a catalogue with a made-up digest in
+# it would not be.
+schema_version: 1
+images: []

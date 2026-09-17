@@ -141,7 +141,9 @@ def test_the_public_input_surface(name: str):
     assert inputs["working-directory"]["default"] == "."
 
     image = inputs["execution-image"]
-    assert image["regex"] == "^.+@sha256:[0-9a-f]{64}$"
+    assert image["regex"] == (
+        r"^(\$[A-Z][A-Z0-9_]*/)?[A-Za-z0-9][A-Za-z0-9._/:-]*@sha256:[0-9a-f]{64}$"
+    )
     assert "@sha256:" in image["default"], "the shipped default must be a digest, not a tag"
 
 
@@ -376,3 +378,21 @@ def test_the_none_sentinel_reaches_the_job_as_written():
     )
     job = next(iter(rendered.values()))
     assert job["variables"]["CI_TPL_LOCKFILES"] == "none"
+
+
+@needs_token
+def test_the_filesystem_grype_scan_takes_a_database_mirror_and_an_archive():
+    """O4, the filesystem half. Same two inputs as security-image-grype, so an
+    estate configures one database source for both."""
+    inputs = dict(
+        MINIMAL["security-filesystem-grype"],
+        **{
+            "db-update-url": "https://artifactory.example.com/grype/databases",
+            "db-archive": "/opt/grype-db/vulnerability-db.tar.zst",
+        },
+    )
+    result = lint(cf.compose(STAGES, [("security-filesystem-grype", inputs)]))
+    assert result["valid"], result.get("errors")
+    merged = result["merged_yaml"]
+    assert "CI_TPL_DB_UPDATE_URL: https://artifactory.example.com/grype/databases" in merged
+    assert 'CI_TPL_DB_ARCHIVE: "/opt/grype-db/vulnerability-db.tar.zst"' in merged

@@ -219,6 +219,20 @@ def sign(args: argparse.Namespace) -> int:
 
     tlog = f"--tlog-upload={'true' if args.tlog_upload else 'false'}"
 
+    # An attestation with no producer is not an attestation the release lost, it
+    # is one the consumer never asked for: the component's sbom-job and scan-job
+    # are empty. Saying so here is the only record a reader of the job log gets,
+    # because attestation-result.json lists what WAS attached and cannot list
+    # what was never wired up.
+    attest_sbom = args.attest_sbom
+    if attest_sbom and not args.sbom_job:
+        print("no sbom-job is set: skipping the CycloneDX attestation")
+        attest_sbom = False
+    attest_vulnerabilities = args.attest_vulnerabilities
+    if attest_vulnerabilities and not args.scan_job:
+        print("no scan-job is set: skipping the vulnerability attestation")
+        attest_vulnerabilities = False
+
     # An unreadable key is a credential failure, caught before anything is
     # signed rather than halfway through.
     run_cosign(binary, ["public-key", "--key", args.key], environment)
@@ -237,7 +251,7 @@ def sign(args: argparse.Namespace) -> int:
 
     attached = [{"kind": "signature", "predicate": None}]
 
-    if args.attest_sbom:
+    if attest_sbom:
         sbom = Path(args.sbom)
         require_evidence(sbom, "the authoritative SBOM")
         check_sbom_subject(Path(args.subject), reference)
@@ -250,7 +264,7 @@ def sign(args: argparse.Namespace) -> int:
         attached.append({"kind": "cyclonedx", "predicate": str(sbom),
                          "sha256": file_digest(sbom)})
 
-    if args.attest_vulnerabilities:
+    if attest_vulnerabilities:
         report = Path(args.vulnerability_report)
         require_evidence(report, "the vulnerability report")
         run_cosign(
@@ -317,6 +331,11 @@ def build_parser() -> argparse.ArgumentParser:
     sign_parser.add_argument("--password-variable", default="HARBOR_PASSWORD")
     sign_parser.add_argument("--checksums", required=True)
     sign_parser.add_argument("--install-dir", default="/usr/local/bin")
+    # The producer job names, not paths: empty means the consumer wired no
+    # producer, which is what separates "not asked for" from "asked for and
+    # missing" -- the second still fails the job.
+    sign_parser.add_argument("--sbom-job", default="")
+    sign_parser.add_argument("--scan-job", default="")
     sign_parser.add_argument("--attest-sbom", default="true")
     sign_parser.add_argument("--attest-vulnerabilities", default="true")
     sign_parser.add_argument("--tlog-upload", default="false")

@@ -3,6 +3,53 @@
 Release changes, migration instructions and deprecation deadlines for
 `platform/gitlab-ci-templates`. Dates are yyyy/mm/dd.
 
+## 1.3.0 — 2026/09/18
+
+Every brick of the container chain can be dropped on its own, a component can
+act on an image this pipeline did not build, and the whole library can be
+pointed at a registry other than the one its defaults name. Every new input
+defaults to what 1.2.0 did, so a consumer that changes nothing sees no change.
+
+### Added
+
+- **`container-promote-skopeo`**, a promotion by digest against any registry speaking the OCI distribution API, which reads the target manifest back and hashes it rather than trusting what the copy reported. It does not carry cosign referrer tags across; `docs/howto/promote-by-digest.md` is the guide.
+- **`subject-reference`, on every component that acts on a built image**: the eight components that required a `build-job` now take either that or an image named directly as `repository@sha256:<digest>`, so a scan, signature, smoke test, promotion or report can act on an image this pipeline did not build.
+- **`security-image-grype` can scan an image**, selected by leaving `sbom-job` empty, and takes `registry-username-variable`, `registry-password-variable` and `ca-bundle-variable` to reach the registry.
+- **`db-update-url` and `db-archive` on the two grype components**, so a site with no egress can scan from a mirrored database instead of leaving grype off its gate.
+- **`upstream-image-job` on the three builders**, naming an earlier build job whose `image.json` supplies the base image by digest, so a child image starts from what this pipeline built rather than from whatever a moving tag points at.
+- **`build-secrets` on `container-build-buildkit`**, taking `NAME=VARIABLE` pairs mounted as `RUN --mount=type=secret,id=NAME`, so a build no longer has to pass a secret as a build argument and record it in the image history.
+- **`resource-group` on the three builders**, so an image factory that must not run two builds of the same image at once no longer has to redefine a component job.
+- **`enable-<brick>` inputs on the `container-buildkit` composition**, one per brick after the build, all defaulting to `true`; a brick that reads another's artefact carries its producer's switches, so switching off the scan or the signature ends the pipeline at attest rather than promoting on no evidence.
+- **The literals the `container-buildkit` composition held became inputs**: the three policy modes beside `sast-policy-mode`, `filesystem-ignore-unfixed` and `image-ignore-unfixed`, `push-candidate`, `require-signatures`, the two Dependency-Track settings and the four Vigil ones, each defaulting to the value the composition used to hold.
+- **`images/runner-images.yml`**, a digest catalogue for an estate's runner job images, enforced by a schema and a drift check and read by nothing in this repository.
+- **`docs/bricks.md`**, a maintenance card per component generated beside the catalogue: purpose, emitted jobs, required and producer inputs, every file the brick is made of, its one pytest command and its network egress.
+- **`docs/howto/pick-your-bricks.md`**: when to switch a brick off and when to include bricks directly, with three assembled kits and the rules of the set.
+
+### Changed
+
+- **Every `execution-image` input accepts a leading `$UPPER_SNAKE/`**, so one group variable carries a site's mirror prefix instead of 37 overridden inputs; the digest stays in the consumer file, and the same change is on jib and ko's `base-image` and the smoke test's `dind-image`.
+- **A publishing job with no gates fails.** `container-promote-harbor` and `container-export-skopeo` refuse an empty `gate-jobs`, naming what has not checked the artefact; `allow-ungated: true` publishes anyway with a warning. A consumer including either component directly with no gates must name them or set that input.
+- **`container-export-skopeo` takes `gate-jobs`**, the array every other component takes, in place of its single scalar `mirror-job`.
+- **`container-sign-attest-cosign` no longer requires an SBOM producer or an image scanner.** `sbom-job` and `scan-job` default to empty: the image is still signed, the matching attestation is skipped, and the job log says which one and why.
+- **`security-sync-vigil` no longer requires the signing job.** `sign-job` defaults to empty, since it was a gate rather than a producer.
+- **`semgrep-rules` and `lockfiles` default to empty** on the `container-buildkit` composition; empty skips that brick instead of failing to compile.
+- **The signing job no longer names the four verify bricks in its `needs:`.** They gated it through the verify stage barrier as well, so the jobs created, and what blocks what, are unchanged.
+- **Every template opens with a line saying what it is for**, which the card generator reads and refuses to invent.
+
+### Deprecated
+
+- **`mirror-job` on `container-export-skopeo`**, which still works and is added to the needs list as a gate, now logs a warning and goes away in the release after this one. Move the value into `gate-jobs` as `- job: <name>` with `artifacts: false`.
+
+### Fixed
+
+- **The three builders refuse a `gate-jobs` and `gate-jobs-set` that disagree**, before anything is built or pushed: a filled list with the boolean false is a list nothing reads, and the boolean true with an empty list renders `needs: []`, which starts the build ahead of every gate its stage used to hold it behind.
+
+### Upgrading from 1.2.0
+
+Change your `ref` to `1.3.0`. Nothing else, unless you include
+`container-export-skopeo` or `container-promote-harbor` directly with an empty
+`gate-jobs`, which now fails, or pass `mirror-job`, which now warns.
+
 ## 1.2.0 — 2026/09/17
 
 The container components can be pointed at any registry: the credential

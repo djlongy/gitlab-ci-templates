@@ -8,6 +8,30 @@ minimum_gitlab: '18.9'
 # Retry policy: the `max-retries` input (0, 1 or 2, default 1) sets `retry: max`,
 # and `retry: when` is `runner_system_failure` and nothing else. A job killed by
 # its runner runs again; a failed gate never does.
+# Resource group: the `resource-group` input sets `resource_group` on the job.
+# Empty is the default and adds no group; a set value serialises this job across
+# every pipeline in the project, because a resource group is project-scoped.
+# Ordering: the job declares neither `needs:` nor `dependencies:`. One of the
+# two files under templates/_needs/ supplies one of them, chosen by mutually
+# exclusive rules on the includes. `gate-jobs-set` false with
+# `upstream-image-job` empty keeps `dependencies: []` and the stage barrier,
+# which is what every consumer gets by default and what the compositions rely
+# on. Either input set instead gives `needs:` and no `dependencies:` (section
+# 8.5), and a job carrying `needs:` is no longer held by its stage, so
+# `gate-jobs` must then name every gate this build must not overtake (section
+# 8.8).
+# `gate-jobs-set` is a boolean beside the array because an array input cannot be
+# tested for emptiness in an include rule: an empty one never matches, and a
+# non-empty one is refused with `include:rule if invalid expression syntax`.
+# Nothing in the YAML can check one against the other, so the job does it:
+# runtime/builder/gate_inputs.sh fails before the build when they disagree, in
+# either direction, naming both inputs.
+# Upstream image: `upstream-image-job` names an earlier build job, and the job
+# reads that job's .ci-artifacts/<instance>/<component>/image.json, derived from
+# the name. Naming it creates the `needs:` edge, with `artifacts: true` and
+# without `optional: true`, so a parent a rule can filter out of the pipeline
+# cannot be used here: the non-optional edge fails pipeline creation for the
+# whole pipeline. Linted, never run: no consumer has built a two-image chain.
 emitted_jobs:
   - pattern: '{instance}:container-build-jib'
     stage: build
