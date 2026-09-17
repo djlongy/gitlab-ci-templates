@@ -43,6 +43,17 @@ import yaml
 
 PLACEHOLDER = re.compile(r"\$\[\[\s*inputs\.([a-zA-Z0-9-]+)\s*\]\]")
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+# The only include-rule form written here: a literal compared against a literal,
+# optionally several of them joined by `&&`. Both sides are literals because the
+# inputs were substituted before the rule was read. Anything else raises rather
+# than being guessed at: a rule silently treated as true would put needs in the
+# rendered job that the real pipeline would not have.
+TOGGLE_RULE = re.compile(
+    r'^"(?P<left>[^"]*)"\s*(?P<operator>==|!=)\s*"(?P<right>[^"]*)"$'
+)
+
 
 class InputError(ValueError):
     """An input was missing, or did not satisfy its declared regex."""
@@ -122,10 +133,58 @@ def lookup(name: str, inputs: dict) -> Any:
     return inputs[name]
 
 
+def rule_is_active(rules: list, inputs: dict) -> bool:
+    """Whether an `include:` carrying these `rules:` is taken."""
+    for rule in rules:
+        if not isinstance(rule, dict) or set(rule) - {"if", "when"}:
+            raise InputError(f"unsupported include rule: {rule!r}")
+        condition = substitute(rule["if"], inputs)
+        clauses = [TOGGLE_RULE.match(clause.strip()) for clause in condition.split("&&")]
+        if not all(clauses):
+            raise InputError(
+                f"include rule {condition!r} is not the literal toggle form this "
+                "resolver understands; add support deliberately rather than "
+                "assuming the include is active"
+            )
+        if all(
+            (match.group("left") == match.group("right"))
+            == (match.group("operator") == "==")
+            for match in clauses
+        ):
+            return rule.get("when") != "never"
+    return False
+
+
 def render(template_path: Path, **supplied: Any) -> dict:
-    """Return the job configuration a consumer would get from this component."""
-    declared, jobs = load(template_path)
-    return substitute(jobs, resolve(declared, supplied))
+    """Return the job configuration a consumer would get from this component.
+
+    A component may include `templates/_needs/needs.yml` to build a `needs:`
+    list whose entries depend on which producers the consumer named. Those
+    includes are resolved here the way GitLab resolves them: a rule that does
+    not match drops its entry, and the including file wins any key it sets
+    itself.
+    """
+    declared, body = load(template_path)
+    inputs = resolve(declared, supplied)
+    jobs = substitute(body, inputs)
+    includes = jobs.pop("include", None)
+    if not includes:
+        return jobs
+
+    merged: dict[str, Any] = {}
+    for entry in includes:
+        if set(entry) - {"local", "inputs", "rules"}:
+            raise InputError(f"{template_path}: unsupported include entry {entry!r}")
+        if "rules" in entry and not rule_is_active(entry["rules"], inputs):
+            continue
+        included = render(
+            REPO_ROOT / entry["local"].lstrip("/"), **(entry.get("inputs") or {})
+        )
+        for name, job in included.items():
+            merged[name] = {**merged.get(name, {}), **job}
+    for name, job in jobs.items():
+        merged[name] = {**merged.get(name, {}), **job}
+    return merged
 
 
 def compose(stages: list[str], *job_maps: dict, workflow: dict | None = None) -> str:

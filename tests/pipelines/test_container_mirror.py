@@ -37,7 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 # The resolvers live in tools/resolve/ so the lint harness and the local
 # runner share one implementation; see that package's docstring.
-from tools.resolve import composition  # noqa: E402
+from tools.resolve import composition, render_component  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TEMPLATES = REPO_ROOT / "templates"
@@ -119,6 +119,52 @@ def test_the_export_gates_on_the_mirror_and_consumes_only_the_list():
         {"job": f"mirror:{LIST_JOB}", "artifacts": True},
         {"job": f"mirror:{MIRROR_JOB}", "artifacts": False},
     ]
+
+
+EXPORT_INPUTS = {
+    "instance": "mirror",
+    "list-job": f"mirror:{LIST_JOB}",
+    "list-files": "images.txt",
+    "repository-prefix": "mirror",
+    "s3-endpoint": "http://s3.invalid:9010",
+    "s3-bucket": "fixture-bucket",
+    "s3-prefix": "transfer/out",
+    "have-key": "transfer/have/blobs.txt",
+}
+
+
+def export_job(**overrides):
+    jobs = render_component.render(
+        TEMPLATES / EXPORT_JOB / "template.yml", **{**EXPORT_INPUTS, **overrides}
+    )
+    return jobs[f"mirror:{EXPORT_JOB}"]
+
+
+def test_the_export_takes_an_array_of_gates():
+    """Coupling: one scalar gate where every other component takes a list."""
+    assert export_job(**{
+        "gate-jobs": [
+            {"job": f"mirror:{MIRROR_JOB}", "artifacts": False},
+            {"job": "mirror:verify", "artifacts": False},
+        ]
+    })["needs"] == [
+        {"job": f"mirror:{LIST_JOB}", "artifacts": True},
+        {"job": f"mirror:{MIRROR_JOB}", "artifacts": False},
+        {"job": "mirror:verify", "artifacts": False},
+    ]
+
+
+def test_the_deprecated_scalar_still_gates_and_says_it_is_deprecated():
+    job = export_job(**{"mirror-job": f"mirror:{MIRROR_JOB}"})
+    assert job["needs"] == [
+        {"job": f"mirror:{LIST_JOB}", "artifacts": True},
+        {"job": f"mirror:{MIRROR_JOB}", "artifacts": False},
+    ]
+    assert "mirror-job is deprecated" in "\n".join(job["script"])
+
+
+def test_no_gate_at_all_leaves_only_the_list_producer():
+    assert export_job()["needs"] == [{"job": f"mirror:{LIST_JOB}", "artifacts": True}]
 
 
 # --------------------------------------------------------------------------

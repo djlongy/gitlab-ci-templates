@@ -28,8 +28,15 @@ spec:
       description: >-
         Approved Trivy image pinned by digest. 0.69.3 is the last release before
         the March 2026 supply-chain compromise of 0.69.4 to 0.69.6.
+
+        A leading `$UPPER_SNAKE/` is accepted, so a site that mirrors these
+        images into its own registry names that registry once as a group
+        variable and passes `$CI_TPL_MIRROR/<path>@sha256:...` here.
+        GitLab expands a CI variable in `image:` at job time. The digest stays
+        in this value rather than in the variable: what runs is then still
+        reviewable in the consumer file.
       default: 'docker.io/aquasec/trivy@sha256:bcc376de8d77cfe086a917230e818dc9f8528e3c852f7b1aff648949b6258d1c'
-      regex: '^.+@sha256:[0-9a-f]{64}$'
+      regex: '^(\$[A-Z][A-Z0-9_]*/)?[A-Za-z0-9][A-Za-z0-9._/:-]*@sha256:[0-9a-f]{64}$'
     registry-username-variable:
       type: string
       description: >-
@@ -89,7 +96,22 @@ spec:
         - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG'
     build-job:
       type: string
-      description: Exact name of the job whose image.json identifies the subject.
+      description: >-
+        Exact name of the job whose image.json identifies the subject. Empty
+        when the consumer names the image with subject-reference instead;
+        exactly one of the two.
+      default: ''
+    subject-reference:
+      type: string
+      description: >-
+        The image this job acts on, written as repository@sha256:<digest>, for
+        a consumer acting on an image this pipeline did not build. Exactly one
+        of this and build-job: neither is a default the other can imply, so the
+        job checks at run time and names both in either failure. When this is
+        set the job writes the record a build would have written into its own
+        artefact root, so a downstream job reads one shape (section 9.1).
+      regex: '^$|^[a-z0-9.-]+(:[0-9]+)?(/[a-z0-9._-]+)+@sha256:[0-9a-f]{64}$'
+      default: ''
     build-component:
       type: string
       description: Component name the build job writes its artifacts under.
@@ -126,6 +148,26 @@ spec:
       description: Trivy scanners to run against the image.
       default: vuln
 ---
+# A `needs:` entry cannot name an empty job, so the list is assembled in
+# templates/_needs/needs.yml and this component includes the one
+# combination the consumer's inputs describe.
+include:
+  - local: '/templates/_needs/needs.yml'
+    inputs:
+      job-name: '$[[ inputs.instance ]]:security-image-trivy'
+      gate-jobs: $[[ inputs.gate-jobs ]]
+      producer-needs:
+        - job: '$[[ inputs.build-job ]]'
+          artifacts: true
+    rules:
+      - if: '"$[[ inputs.build-job ]]" != ""'
+  - local: '/templates/_needs/needs.yml'
+    inputs:
+      job-name: '$[[ inputs.instance ]]:security-image-trivy'
+      gate-jobs: $[[ inputs.gate-jobs ]]
+    rules:
+      - if: '"$[[ inputs.build-job ]]" == ""'
+
 "$[[ inputs.instance ]]:security-image-trivy":
   stage: $[[ inputs.stage ]]
   image:
@@ -141,6 +183,8 @@ spec:
     CI_TPL_RUNTIME_DIR: /tmp/ci-runtime
     CI_TPL_ARTIFACT_DIR: '.ci-artifacts/$[[ inputs.instance ]]/security-image-trivy'
     CI_TPL_IDENTITY_FILE: '.ci-artifacts/$[[ inputs.instance ]]/$[[ inputs.build-component ]]/image.json'
+    CI_TPL_BUILD_JOB: '$[[ inputs.build-job ]]'
+    CI_TPL_SUBJECT_REFERENCE: '$[[ inputs.subject-reference ]]'
     CI_TPL_POLICY_MODE: $[[ inputs.policy-mode ]]
     CI_TPL_SEVERITY_THRESHOLD: $[[ inputs.severity-threshold ]]
     CI_TPL_IGNORE_UNFIXED: '$[[ inputs.ignore-unfixed ]]'
@@ -153,10 +197,6 @@ spec:
     CI_TPL_REGISTRY_USERNAME_VARIABLE: '$[[ inputs.registry-username-variable ]]'
     CI_TPL_REGISTRY_PASSWORD_VARIABLE: '$[[ inputs.registry-password-variable ]]'
     CI_TPL_CA_BUNDLE_VARIABLE: '$[[ inputs.ca-bundle-variable ]]'
-  needs:
-    - job: $[[ inputs.build-job ]]
-      artifacts: true
-    - $[[ inputs.gate-jobs ]]
   before_script:
     - |
       # An explicit database mirror, so the one network call this job cannot
@@ -333,6 +373,39 @@ spec:
           ci_tpl_fail "'$1' is not a NAME=VALUE build argument"
       }
 
+      # A build secret is NAME=VARIABLE: the id BuildKit exposes the secret under, and
+      # the NAME of a file-type CI variable that holds it. The value is never an input
+      # and never a build argument: `--opt build-arg:` is recorded in the image
+      # history, so a certificate or a token passed that way ships inside the image
+      # and stays there. BuildKit mounts a `--secret` for one RUN step and writes it
+      # into no layer.
+      ci_tpl_require_build_secret() {
+          expr "$1" : '^[A-Za-z_][A-Za-z0-9_.-]*=[A-Z][A-Z0-9_]*$' >/dev/null && return 0
+          ci_tpl_fail "'$1' is not a NAME=VARIABLE build secret; VARIABLE names a file-type CI variable, never its value"
+      }
+
+      # Resolve one NAME=VARIABLE pair into the id=<name>,src=<path> form buildctl
+      # takes. printenv, never eval or an indirect expansion: the variable name is
+      # consumer input and must not become code. A GitLab file variable's value IS a
+      # path, so a value that is not a readable file is refused here; handing it to
+      # buildctl would mount the secret's own text as a filename and put it in the
+      # trace. Nothing in this function prints the file's contents.
+      ci_tpl_build_secret_argument() {
+          ci_tpl_require_build_secret "$1" || return 1
+          bs_id=${1%%=*}
+          bs_var=${1#*=}
+          bs_path=$(printenv "$bs_var") || bs_path=''
+          if [ -z "$bs_path" ]; then
+              ci_tpl_fail "build secret '$1' names \$${bs_var}, which is empty or not defined"
+              return 1
+          fi
+          if [ ! -f "$bs_path" ]; then
+              ci_tpl_fail "build secret '$1': \$${bs_var} is not a file-type CI variable, so its value is not a readable path"
+              return 1
+          fi
+          printf 'id=%s,src=%s\n' "$bs_id" "$bs_path"
+      }
+
       ci_tpl_json_array() {
           # Render a comma-separated list as a JSON array of strings.
           echo "$1" | awk -F, '{
@@ -407,12 +480,55 @@ spec:
           [ -n "$platforms" ] ||
               { ci_tpl_fail "$file records no platforms"; return 1; }
           case "$kind" in
-              manifest|index) ;;
-              *) ci_tpl_fail "$file subject_kind '$kind' is neither manifest nor index"; return 1 ;;
+              # `unresolved` is what ci_tpl_write_subject_record writes: the subject
+              # arrived as a reference the consumer typed, so nothing here inspected
+              # the registry and neither manifest nor index would be a fact.
+              manifest|index|unresolved) ;;
+              *) ci_tpl_fail "$file subject_kind '$kind' is not manifest, index or unresolved"; return 1 ;;
           esac
           [ -n "$created" ] ||
               { ci_tpl_fail "$file records no created_at"; return 1; }
           return 0
+      }
+
+      # Record a subject the consumer named rather than one this pipeline built.
+      #
+      # Same shape as a build's image.json so a downstream job reads one contract
+      # (section 9.1), with the two fields nothing here can know written as
+      # `unresolved`: no registry call was made, so the platform list and whether the
+      # reference points at a manifest or an index are not facts this job has.
+      # Arguments: artifact-dir reference
+      ci_tpl_write_subject_record() {
+          ci_tpl_write_image_json "$1" "${2%@*}" "${2##*@}" unresolved unresolved
+      }
+
+      # Which image.json this job acts on.
+      #
+      # Usually the build job's: the consumer named build-job, the artifact arrived,
+      # and the record is already on disk. A consumer scanning, signing or publishing
+      # an image this pipeline did not build names it with subject-reference instead,
+      # and then there is nothing to read: the record is written into this job's own
+      # artefact root.
+      #
+      # Exactly one of the two. Both set is a contradiction nobody can resolve;
+      # neither leaves the job with no subject at all. Either message names both.
+      # Arguments: build-job subject-reference build-identity-file own-artifact-dir
+      # Prints the path of the image.json to use.
+      ci_tpl_resolve_identity_file() {
+          if [ -n "$1" ] && [ -n "$2" ]; then
+              ci_tpl_fail "build-job and subject-reference are both set; this job takes exactly one (build-job '$1', subject-reference '$2')"
+              return 1
+          fi
+          if [ -z "$1" ] && [ -z "$2" ]; then
+              ci_tpl_fail "neither build-job nor subject-reference is set; this job takes exactly one: build-job names the job whose image.json states the subject, subject-reference names the image as repository@sha256:<digest>"
+              return 1
+          fi
+          if [ -z "$2" ]; then
+              echo "$3"
+              return 0
+          fi
+          ci_tpl_write_subject_record "$4" "$2" >&2 || return 1
+          echo "$4/image.json"
       }
 
       # Print the validated reference from an image.json.
@@ -834,6 +950,11 @@ spec:
     - |
       mkdir -p "$CI_TPL_ARTIFACT_DIR" || exit 1
       ci_tpl_write_scan_templates "$CI_TPL_RUNTIME_DIR" || exit 1
+      # Exactly one of build-job and subject-reference. With a build job this is
+      # the artefact that arrived; with a reference it is a record written here.
+      CI_TPL_IDENTITY_FILE=$(ci_tpl_resolve_identity_file \
+        "$CI_TPL_BUILD_JOB" "$CI_TPL_SUBJECT_REFERENCE" \
+        "$CI_TPL_IDENTITY_FILE" "$CI_TPL_ARTIFACT_DIR") || exit 1
       CI_TPL_SUBJECT=$(ci_tpl_image_reference "$CI_TPL_IDENTITY_FILE") || exit 1
       echo "scan subject: $CI_TPL_SUBJECT"
 

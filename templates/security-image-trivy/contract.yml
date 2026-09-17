@@ -62,16 +62,20 @@ validation:
     - gitlab-linted
     - runtime-tested
     - integration-tested
-  verified_at: 2026/09/17
-  revision: '1.2.0'
+  verified_at: 2026/09/18
+  revision: '1.3.0'
   environment: >-
     gitlab.example.com 18.9.1-ee, POST /api/v4/projects/:id/ci/lint.
     Executed on the originating estate, 2026/09: three consumer projects
     built and pushed to a Quay 3.15.7 registry with an internally issued
     certificate, one of them running every job this composition creates on a
     default-branch push, green through to a signature and two attestations
-    in the registry.
+    in the registry. Each was repinned to 1.3.0 and re-run green on that tag.
   notes: >-
+    Exactly one of build-job and subject-reference. build-job reads the
+    producer's image.json from its artifacts; subject-reference names an image
+    this pipeline did not build, and the job then writes the same record into
+    its own artefact root. Neither or both fails the job, naming both inputs.
     Failure semantics: a finding at or above severity-threshold fails the job in
     blocking mode and is recorded in advisory mode. A scanner crash, a database that
     did not download, an empty report or a report missing its SchemaVersion marker
@@ -79,11 +83,16 @@ validation:
     predecessor template, which set TRIVY_IGNORE_UNFIXED true. gitlab-linted through
     the CI Lint API; no job ran. runtime-tested: the scan wrapper has unit tests, and
     trivy's --download-db-only, convert-to-sarif, convert-to-template and version
-    extraction were executed against the pinned image digest on 2026/09/15. Status:
-    experimental, because no consumer pipeline has run this component on 1.0.0-rc.2.
+    extraction were executed against the pinned image digest on 2026/09/15.
     `released` in this repository means a consumer job executed green, not that the
-    component looks finished. a consumer's build source is tags-only, so nothing was
-    built for it to scan.
+    component looks finished.
+    Both halves of the input pair have now run. On the build-job path, as the
+    third brick of kit B included directly rather than through a composition,
+    the job scanned the digest the same pipeline's build wrote into image.json.
+    On the subject-reference path, in a jobset with no build job at all and
+    therefore `needs: []`, it scanned an image an earlier pipeline had promoted
+    and downloaded no artifact from any job. Each run recorded its own reference
+    in scan-result.json's subject.
     Evidence: green against an image in that registry, and blocking on a
     second consumer whose upstream base carried 7 critical and 121 high
     findings, where it stopped the chain. Both are runs; the second is the

@@ -79,12 +79,21 @@ def write_inputs(tmp_path: Path, subject_reference: str = REFERENCE) -> dict:
 
 
 def arguments(tmp_path: Path, files: dict, checksums: Path, *extra: str) -> list[str]:
+    """The invocation the template makes, with both producers wired.
+
+    `--sbom-job` and `--scan-job` carry the job names the component was given.
+    They are what separates evidence a consumer never asked for from evidence
+    that was asked for and is missing, so the default is empty and the template
+    always passes them.
+    """
     return [
         "sign",
         "--identity", str(files["identity"]),
         "--sbom", str(files["sbom"]),
         "--subject", str(files["subject"]),
         "--vulnerability-report", str(files["report"]),
+        "--sbom-job", "api:security-sbom-syft",
+        "--scan-job", "api:security-image-trivy",
         "--output", str(tmp_path / "attestation-result.json"),
         "--key", "hashivault://cosign",
         "--vault-address", "https://vault.example:8200",
@@ -130,6 +139,46 @@ def test_signing_attaches_the_signature_and_both_attestations(tmp_path, monkeypa
     assert record["signer"]["binary_sha256"] == BINARY_SHA256
     assert [item["kind"] for item in record["attached"]] == ["signature", "cyclonedx", "vuln"]
     assert record["transparency_log_upload"] is False
+
+
+def test_no_sbom_job_skips_the_cyclonedx_attestation(tmp_path, monkeypatch, checksums, capsys):
+    """A consumer that runs no SBOM producer still gets a signature."""
+    recorder = install_doubles(monkeypatch)
+    files = write_inputs(tmp_path)
+    argv = [a for a in arguments(tmp_path, files, checksums)]
+    argv[argv.index("--sbom-job") + 1] = ""
+
+    assert cosign.main(argv) == 0
+
+    verbs = [call[1] for call in recorder.calls]
+    assert verbs == ["public-key", "sign", "attest"]
+    assert "cyclonedx" not in " ".join(" ".join(call) for call in recorder.calls)
+    assert "no sbom-job is set" in capsys.readouterr().out
+    record = json.loads((tmp_path / "attestation-result.json").read_text())
+    assert [item["kind"] for item in record["attached"]] == ["signature", "vuln"]
+
+
+def test_no_scan_job_skips_the_vulnerability_attestation(tmp_path, monkeypatch, checksums, capsys):
+    recorder = install_doubles(monkeypatch)
+    files = write_inputs(tmp_path)
+    argv = [a for a in arguments(tmp_path, files, checksums)]
+    argv[argv.index("--scan-job") + 1] = ""
+
+    assert cosign.main(argv) == 0
+
+    assert "vuln" not in " ".join(" ".join(call) for call in recorder.calls)
+    assert "no scan-job is set" in capsys.readouterr().out
+    record = json.loads((tmp_path / "attestation-result.json").read_text())
+    assert [item["kind"] for item in record["attached"]] == ["signature", "cyclonedx"]
+
+
+def test_a_named_sbom_job_whose_evidence_is_missing_still_fails(tmp_path, monkeypatch, checksums):
+    """Skipping is for evidence nobody wired, never for evidence that vanished."""
+    install_doubles(monkeypatch)
+    files = write_inputs(tmp_path)
+    files["sbom"].unlink()
+
+    assert cosign.main(arguments(tmp_path, files, checksums)) == 1
 
 
 def test_no_slsa_provenance_is_fabricated(tmp_path, monkeypatch, checksums):

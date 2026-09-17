@@ -156,6 +156,39 @@ ci_tpl_require_build_arg() {
     ci_tpl_fail "'$1' is not a NAME=VALUE build argument"
 }
 
+# A build secret is NAME=VARIABLE: the id BuildKit exposes the secret under, and
+# the NAME of a file-type CI variable that holds it. The value is never an input
+# and never a build argument: `--opt build-arg:` is recorded in the image
+# history, so a certificate or a token passed that way ships inside the image
+# and stays there. BuildKit mounts a `--secret` for one RUN step and writes it
+# into no layer.
+ci_tpl_require_build_secret() {
+    expr "$1" : '^[A-Za-z_][A-Za-z0-9_.-]*=[A-Z][A-Z0-9_]*$' >/dev/null && return 0
+    ci_tpl_fail "'$1' is not a NAME=VARIABLE build secret; VARIABLE names a file-type CI variable, never its value"
+}
+
+# Resolve one NAME=VARIABLE pair into the id=<name>,src=<path> form buildctl
+# takes. printenv, never eval or an indirect expansion: the variable name is
+# consumer input and must not become code. A GitLab file variable's value IS a
+# path, so a value that is not a readable file is refused here; handing it to
+# buildctl would mount the secret's own text as a filename and put it in the
+# trace. Nothing in this function prints the file's contents.
+ci_tpl_build_secret_argument() {
+    ci_tpl_require_build_secret "$1" || return 1
+    bs_id=${1%%=*}
+    bs_var=${1#*=}
+    bs_path=$(printenv "$bs_var") || bs_path=''
+    if [ -z "$bs_path" ]; then
+        ci_tpl_fail "build secret '$1' names \$${bs_var}, which is empty or not defined"
+        return 1
+    fi
+    if [ ! -f "$bs_path" ]; then
+        ci_tpl_fail "build secret '$1': \$${bs_var} is not a file-type CI variable, so its value is not a readable path"
+        return 1
+    fi
+    printf 'id=%s,src=%s\n' "$bs_id" "$bs_path"
+}
+
 ci_tpl_json_array() {
     # Render a comma-separated list as a JSON array of strings.
     echo "$1" | awk -F, '{
@@ -230,12 +263,55 @@ ci_tpl_validate_image_json() {
     [ -n "$platforms" ] ||
         { ci_tpl_fail "$file records no platforms"; return 1; }
     case "$kind" in
-        manifest|index) ;;
-        *) ci_tpl_fail "$file subject_kind '$kind' is neither manifest nor index"; return 1 ;;
+        # `unresolved` is what ci_tpl_write_subject_record writes: the subject
+        # arrived as a reference the consumer typed, so nothing here inspected
+        # the registry and neither manifest nor index would be a fact.
+        manifest|index|unresolved) ;;
+        *) ci_tpl_fail "$file subject_kind '$kind' is not manifest, index or unresolved"; return 1 ;;
     esac
     [ -n "$created" ] ||
         { ci_tpl_fail "$file records no created_at"; return 1; }
     return 0
+}
+
+# Record a subject the consumer named rather than one this pipeline built.
+#
+# Same shape as a build's image.json so a downstream job reads one contract
+# (section 9.1), with the two fields nothing here can know written as
+# `unresolved`: no registry call was made, so the platform list and whether the
+# reference points at a manifest or an index are not facts this job has.
+# Arguments: artifact-dir reference
+ci_tpl_write_subject_record() {
+    ci_tpl_write_image_json "$1" "${2%@*}" "${2##*@}" unresolved unresolved
+}
+
+# Which image.json this job acts on.
+#
+# Usually the build job's: the consumer named build-job, the artifact arrived,
+# and the record is already on disk. A consumer scanning, signing or publishing
+# an image this pipeline did not build names it with subject-reference instead,
+# and then there is nothing to read: the record is written into this job's own
+# artefact root.
+#
+# Exactly one of the two. Both set is a contradiction nobody can resolve;
+# neither leaves the job with no subject at all. Either message names both.
+# Arguments: build-job subject-reference build-identity-file own-artifact-dir
+# Prints the path of the image.json to use.
+ci_tpl_resolve_identity_file() {
+    if [ -n "$1" ] && [ -n "$2" ]; then
+        ci_tpl_fail "build-job and subject-reference are both set; this job takes exactly one (build-job '$1', subject-reference '$2')"
+        return 1
+    fi
+    if [ -z "$1" ] && [ -z "$2" ]; then
+        ci_tpl_fail "neither build-job nor subject-reference is set; this job takes exactly one: build-job names the job whose image.json states the subject, subject-reference names the image as repository@sha256:<digest>"
+        return 1
+    fi
+    if [ -z "$2" ]; then
+        echo "$3"
+        return 0
+    fi
+    ci_tpl_write_subject_record "$4" "$2" >&2 || return 1
+    echo "$4/image.json"
 }
 
 # Print the validated reference from an image.json.

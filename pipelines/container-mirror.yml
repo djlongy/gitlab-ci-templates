@@ -196,7 +196,9 @@ include:
       instance: $[[ inputs.instance ]]
       stage: publish
       list-job: $[[ inputs.instance ]]:container-list-rke2
-      mirror-job: $[[ inputs.instance ]]:container-mirror-skopeo
+      gate-jobs:
+        - job: '$[[ inputs.instance ]]:container-mirror-skopeo'
+          artifacts: false
       list-files: .ci-artifacts/$[[ inputs.instance ]]/container-list-rke2/images.txt $[[ inputs.extra-list-files ]]
       registry: $[[ inputs.registry ]]
       repository-prefix: $[[ inputs.repository-prefix ]]

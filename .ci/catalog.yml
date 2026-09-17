@@ -64,10 +64,16 @@ components:
         default: false
       execution-image:
         type: string
-        description: Ansible execution environment pinned by digest. The default is the estate
+        description: 'Ansible execution environment pinned by digest. The default is the estate
           image built from the infrastructure repository.
+
+          A leading `$UPPER_SNAKE/` is accepted, so a site that mirrors these images into
+          its own registry names that registry once as a group variable and passes `$CI_TPL_MIRROR/<path>@sha256:...`
+          here. GitLab expands a CI variable in `image:` at job time. The digest stays in
+          this value rather than in the variable: what runs is then still reviewable in the
+          consumer file.'
         default: registry.example.com/shared/base/ansible-ee@sha256:64703d0cec04567ef5b5108b755528ad911db3a6ebb5dfa90d20cabc145d3c9b
-        regex: ^.+@sha256:[0-9a-f]{64}$
+        regex: ^(\$[A-Z][A-Z0-9_]*/)?[A-Za-z0-9][A-Za-z0-9._/:-]*@sha256:[0-9a-f]{64}$
       runner-tags:
         type: array
         description: Runner selection from the estate profile.
@@ -179,11 +185,17 @@ components:
         regex: ^[A-Za-z0-9._/-]{1,200}$
       execution-image:
         type: string
-        description: Image carrying ansible-lint, pinned by digest. The estate execution environment
-          does not contain ansible-lint, so this default is a community image rather than
-          an estate-built one. See contract.yml.
+        description: 'Image carrying ansible-lint, pinned by digest. The estate execution
+          environment does not contain ansible-lint, so this default is a community image
+          rather than an estate-built one. See contract.yml.
+
+          A leading `$UPPER_SNAKE/` is accepted, so a site that mirrors these images into
+          its own registry names that registry once as a group variable and passes `$CI_TPL_MIRROR/<path>@sha256:...`
+          here. GitLab expands a CI variable in `image:` at job time. The digest stays in
+          this value rather than in the variable: what runs is then still reviewable in the
+          consumer file.'
         default: docker.io/pipelinecomponents/ansible-lint@sha256:1c4d2abd372a2dce7ea1cb8e27b650db809115d410a87a4aba2438bd028de735
-        regex: ^.+@sha256:[0-9a-f]{64}$
+        regex: ^(\$[A-Z][A-Z0-9_]*/)?[A-Za-z0-9][A-Za-z0-9._/:-]*@sha256:[0-9a-f]{64}$
       runner-tags:
         type: array
         description: Runner selection from the estate profile.
@@ -330,10 +342,16 @@ components:
         regex: ^[A-Za-z0-9._/-]{0,200}$
       execution-image:
         type: string
-        description: Ansible execution environment pinned by digest. The default is the estate
+        description: 'Ansible execution environment pinned by digest. The default is the estate
           image built from the infrastructure repository.
+
+          A leading `$UPPER_SNAKE/` is accepted, so a site that mirrors these images into
+          its own registry names that registry once as a group variable and passes `$CI_TPL_MIRROR/<path>@sha256:...`
+          here. GitLab expands a CI variable in `image:` at job time. The digest stays in
+          this value rather than in the variable: what runs is then still reviewable in the
+          consumer file.'
         default: registry.example.com/shared/base/ansible-ee@sha256:64703d0cec04567ef5b5108b755528ad911db3a6ebb5dfa90d20cabc145d3c9b
-        regex: ^.+@sha256:[0-9a-f]{64}$
+        regex: ^(\$[A-Z][A-Z0-9_]*/)?[A-Za-z0-9][A-Za-z0-9._/:-]*@sha256:[0-9a-f]{64}$
       runner-tags:
         type: array
         description: Runner selection from the estate profile.
@@ -424,14 +442,20 @@ components:
         default: build
       execution-image:
         type: string
-        description: Approved BuildKit execution image. A digest pins exactly what runs; a
-          tag is accepted because a site whose only path to an image is a proxy cache names
+        description: 'Approved BuildKit execution image. A digest pins exactly what runs;
+          a tag is accepted because a site whose only path to an image is a proxy cache names
           <mirror>/moby/buildkit:v0.33.0 and lets the cache resolve it, and refusing that
           would push the site into editing this file. A reference with neither is refused
           rather than silently becoming :latest. The default is moby/buildkit v0.33.0, by
           digest.
+
+          A leading `$UPPER_SNAKE/` is accepted, so a site that mirrors these images into
+          its own registry names that registry once as a group variable and passes `$CI_TPL_MIRROR/<path>@sha256:...`
+          here. GitLab expands a CI variable in `image:` at job time. The digest stays in
+          this value rather than in the variable: what runs is then still reviewable in the
+          consumer file.'
         default: docker.io/moby/buildkit@sha256:6c2fa84a6b61ccd72899dde4239f8d5717f05f9a8ca6f3cad185fb1a95a94de3
-        regex: ^.+(@sha256:[0-9a-f]{64}|:[A-Za-z0-9._-]{1,128})$
+        regex: ^(\$[A-Z][A-Z0-9_]*/)?[A-Za-z0-9][A-Za-z0-9._/:-]*(@sha256:[0-9a-f]{64}|:[A-Za-z0-9._-]{1,128})$
       registry-username-variable:
         type: string
         description: Name of the CI variable holding the registry username. The name, never
@@ -467,6 +491,59 @@ components:
           - 0
           - 1
           - 2
+      resource-group:
+        type: string
+        description: 'GitLab resource group for this job. A resource group is project-scoped,
+          so one name serialises every job carrying it across every pipeline in the project,
+          which is what a factory pushing one moving tag needs. Empty adds no group and is
+          what every consumer has today: an empty key creates no resource group and the job
+          runs unserialised, measured on a consumer pipeline. The pattern is the one terraform-plan
+          and terraform-apply take their state-id under, so the three components that already
+          carry a resource group accept the same values.'
+        regex: ^$|^[a-z0-9][a-z0-9._-]{0,63}$
+        default: ''
+      gate-jobs:
+        type: array
+        description: 'Jobs this build waits for, as `needs:` entries. Naming any here also
+          requires gate-jobs-set, and a job that carries `needs:` is no longer held by its
+          stage, so every gate it must not overtake belongs in this one list (section 8.8).
+          Left empty, with gate-jobs-set false and upstream-image-job empty, the job keeps
+          `dependencies: []` and the stage barrier it has had since 1.0.0.'
+        default: []
+      gate-jobs-set:
+        type: boolean
+        description: 'True when the consumer supplies gate-jobs. It exists because an array
+          input cannot be tested for emptiness in an include rule: with an empty list `"$[[
+          inputs.gate-jobs ]]" == ""` never matches, and with a non-empty one GitLab refuses
+          the config with `include:rule if invalid expression syntax` (measured on gitlab.example.com
+          18.9.1-ee, 2026/09/17). Set them together: the job refuses to build when they disagree,
+          because true with an empty list is a job with no edges at all and a list with false
+          is a list nothing reads, and neither is visible in a green pipeline.'
+        default: false
+      upstream-image-job:
+        type: string
+        description: 'Name of an earlier build job in this pipeline whose image this build
+          starts from. The job reads that job''s image.json, validates it, and exports CI_TPL_UPSTREAM_IMAGE_REFERENCE
+          as repository@sha256. The artifact path is derived from the name rather than taken
+          as a second input: section 5 fixes a job name as <instance>:<component> and the
+          artifact root as .ci-artifacts/<instance>/<component>/, so the name already carries
+          both halves, and a second input would be a second place the same fact lives and
+          could disagree. Naming it here also creates the `needs:` edge that downloads the
+          artifact, with `artifacts: true` and without `optional: true`, so a consumer whose
+          parent build can be filtered out of the pipeline by a rule cannot use this input:
+          a non-optional edge to an absent job fails pipeline creation.'
+        regex: ^$|^[a-z][a-z0-9-]{0,47}:[a-z][a-z0-9-]{0,63}$
+        default: ''
+      upstream-build-arg:
+        type: string
+        description: 'Build argument the upstream reference is passed as, so a Dockerfile
+          can say `ARG BASE_REF` and `FROM $BASE_REF`. The component adds it itself because
+          a consumer cannot: `$CI_TPL_UPSTREAM_IMAGE_REFERENCE` written into build-args is
+          expanded by GitLab before the job starts, when the artifact it comes from has not
+          been downloaded yet, so the literal would reach buildctl unexpanded. Empty adds
+          no build argument. Ignored when upstream-image-job is empty.'
+        regex: ^$|^[A-Za-z_][A-Za-z0-9_]*$
+        default: BASE_REF
       run-rules:
         type: array
         description: Job eligibility set by the composition. Pushing a candidate image is
@@ -500,6 +577,16 @@ components:
       build-args:
         type: array
         description: Build arguments as NAME=VALUE entries.
+        default: []
+      build-secrets:
+        type: array
+        description: 'Secrets the build may mount, as NAME=VARIABLE entries. NAME is the id
+          a Dockerfile reads with `RUN --mount=type=secret,id=NAME`; VARIABLE is the NAME
+          of a file-type CI variable holding the secret, never its value. Each pair becomes
+          `--secret id=NAME,src=<path>`, which BuildKit mounts for one RUN step and writes
+          into no layer. A secret must never travel as a build argument: `--opt build-arg:`
+          is recorded in the image history, so an entitlement certificate or a token passed
+          that way ships inside the image.'
         default: []
       platforms:
         type: string
@@ -567,13 +654,14 @@ components:
         - yaml-parsed
         - gitlab-linted
         - integration-tested
-      verified_at: 2026/09/17
-      revision: 1.2.0
+      verified_at: 2026/09/18
+      revision: 1.3.0
       environment: 'gitlab.example.com 18.9.1-ee, POST /api/v4/projects/:id/ci/lint. Executed
         on the originating estate, 2026/09: three consumer projects built and pushed to a
         Quay 3.15.7 registry with an internally issued certificate, one of them running every
         job this composition creates on a default-branch push, green through to a signature
-        and two attestations in the registry.'
+        and two attestations in the registry. Each was repinned to 1.3.0 and re-run green
+        on that tag.'
       notes: 'Failure semantics (section 10.1). The job fails when the image repository carries
         a tag or digest, when a tag alias is not a usable tag, when a build argument is not
         NAME=VALUE, when the registry credentials are absent, when BuildKit exits non-zero,
@@ -586,7 +674,10 @@ components:
         credentials named through registry-username-variable and registry-password-variable
         and the trust anchor through ca-bundle-variable. The trace carries buildctl v0.33.0
         and the digest it recorded in image.json; a second job then read the same digest back
-        from the registry with regctl.'
+        from the registry with regctl. On 1.3.0 the component also ran included on its own,
+        outside any composition, as the first brick of kit B: it built and pushed a tagged
+        image, and the SBOM and image-scan jobs beside it read that digest out of its image.json
+        rather than resolving the tag again.'
   - name: container-build-jib
     kind: component
     path: templates/container-build-jib/template.yml
@@ -602,10 +693,16 @@ components:
         default: build
       execution-image:
         type: string
-        description: Approved Gradle execution image pinned by digest. The default is gradle:8-jdk21-alpine
-          through the estate's Docker Hub mirror.
+        description: 'Approved Gradle execution image pinned by digest. The default is gradle:8-jdk21-alpine
+          through the estate''s Docker Hub mirror.
+
+          A leading `$UPPER_SNAKE/` is accepted, so a site that mirrors these images into
+          its own registry names that registry once as a group variable and passes `$CI_TPL_MIRROR/<path>@sha256:...`
+          here. GitLab expands a CI variable in `image:` at job time. The digest stays in
+          this value rather than in the variable: what runs is then still reviewable in the
+          consumer file.'
         default: docker.io/gradle@sha256:eb2209db6d5a025a0a8711a6f1a5556b654ecc07f05dc8703d2317eab410aa8e
-        regex: ^.+@sha256:[0-9a-f]{64}$
+        regex: ^(\$[A-Z][A-Z0-9_]*/)?[A-Za-z0-9][A-Za-z0-9._/:-]*@sha256:[0-9a-f]{64}$
       registry-username-variable:
         type: string
         description: Name of the CI variable holding the registry username. The name, never
@@ -640,6 +737,49 @@ components:
           - 0
           - 1
           - 2
+      resource-group:
+        type: string
+        description: 'GitLab resource group for this job. A resource group is project-scoped,
+          so one name serialises every job carrying it across every pipeline in the project,
+          which is what a factory pushing one moving tag needs. Empty adds no group and is
+          what every consumer has today: an empty key creates no resource group and the job
+          runs unserialised, measured on a consumer pipeline. The pattern is the one terraform-plan
+          and terraform-apply take their state-id under, so the three components that already
+          carry a resource group accept the same values.'
+        regex: ^$|^[a-z0-9][a-z0-9._-]{0,63}$
+        default: ''
+      gate-jobs:
+        type: array
+        description: 'Jobs this build waits for, as `needs:` entries. Naming any here also
+          requires gate-jobs-set, and a job that carries `needs:` is no longer held by its
+          stage, so every gate it must not overtake belongs in this one list (section 8.8).
+          Left empty, with gate-jobs-set false and upstream-image-job empty, the job keeps
+          `dependencies: []` and the stage barrier it has had since 1.0.0.'
+        default: []
+      gate-jobs-set:
+        type: boolean
+        description: 'True when the consumer supplies gate-jobs. It exists because an array
+          input cannot be tested for emptiness in an include rule: with an empty list `"$[[
+          inputs.gate-jobs ]]" == ""` never matches, and with a non-empty one GitLab refuses
+          the config with `include:rule if invalid expression syntax` (measured on gitlab.example.com
+          18.9.1-ee, 2026/09/17). Set them together: the job refuses to build when they disagree,
+          because true with an empty list is a job with no edges at all and a list with false
+          is a list nothing reads, and neither is visible in a green pipeline.'
+        default: false
+      upstream-image-job:
+        type: string
+        description: 'Name of an earlier build job in this pipeline whose image this build
+          starts from. The job reads that job''s image.json, validates it, and exports CI_TPL_UPSTREAM_IMAGE_REFERENCE
+          as repository@sha256. The artifact path is derived from the name rather than taken
+          as a second input: section 5 fixes a job name as <instance>:<component> and the
+          artifact root as .ci-artifacts/<instance>/<component>/, so the name already carries
+          both halves, and a second input would be a second place the same fact lives and
+          could disagree. Naming it here also creates the `needs:` edge that downloads the
+          artifact, with `artifacts: true` and without `optional: true`, so a consumer whose
+          parent build can be filtered out of the pipeline by a rule cannot use this input:
+          a non-optional edge to an absent job fails pipeline creation.'
+        regex: ^$|^[a-z][a-z0-9-]{0,47}:[a-z][a-z0-9-]{0,63}$
+        default: ''
       run-rules:
         type: array
         description: Job eligibility set by the composition. Pushing a candidate image is
@@ -678,9 +818,13 @@ components:
           - $CI_COMMIT_SHORT_SHA
       base-image:
         type: string
-        description: Base image pinned by digest.
+        description: 'Base image pinned by digest.
+
+          A leading `$UPPER_SNAKE/` is accepted so a site names its mirror once as a group
+          variable, the same form execution-image takes; GitLab expands it before the value
+          is used. The digest stays here rather than in the variable.'
         default: gcr.io/distroless/java21-debian12@sha256:7e37784d94dccbf5ccb195c73b295f5ad00cd266512dfbac12eb9c3c28f8077d
-        regex: ^.+@sha256:[0-9a-f]{64}$
+        regex: ^(\$[A-Z][A-Z0-9_]*/)?[A-Za-z0-9][A-Za-z0-9._/:-]*@sha256:[0-9a-f]{64}$
       container-user:
         type: string
         description: UID:GID the container runs as.
@@ -769,10 +913,16 @@ components:
         default: build
       execution-image:
         type: string
-        description: Approved Go toolchain image pinned by digest. The default is golang:1.23-alpine
-          through the estate's Docker Hub mirror.
+        description: 'Approved Go toolchain image pinned by digest. The default is golang:1.23-alpine
+          through the estate''s Docker Hub mirror.
+
+          A leading `$UPPER_SNAKE/` is accepted, so a site that mirrors these images into
+          its own registry names that registry once as a group variable and passes `$CI_TPL_MIRROR/<path>@sha256:...`
+          here. GitLab expands a CI variable in `image:` at job time. The digest stays in
+          this value rather than in the variable: what runs is then still reviewable in the
+          consumer file.'
         default: docker.io/golang@sha256:383395b794dffa5b53012a212365d40c8e37109a626ca30d6151c8348d380b5f
-        regex: ^.+@sha256:[0-9a-f]{64}$
+        regex: ^(\$[A-Z][A-Z0-9_]*/)?[A-Za-z0-9][A-Za-z0-9._/:-]*@sha256:[0-9a-f]{64}$
       registry-username-variable:
         type: string
         description: Name of the CI variable holding the registry username. The name, never
@@ -807,6 +957,49 @@ components:
           - 0
           - 1
           - 2
+      resource-group:
+        type: string
+        description: 'GitLab resource group for this job. A resource group is project-scoped,
+          so one name serialises every job carrying it across every pipeline in the project,
+          which is what a factory pushing one moving tag needs. Empty adds no group and is
+          what every consumer has today: an empty key creates no resource group and the job
+          runs unserialised, measured on a consumer pipeline. The pattern is the one terraform-plan
+          and terraform-apply take their state-id under, so the three components that already
+          carry a resource group accept the same values.'
+        regex: ^$|^[a-z0-9][a-z0-9._-]{0,63}$
+        default: ''
+      gate-jobs:
+        type: array
+        description: 'Jobs this build waits for, as `needs:` entries. Naming any here also
+          requires gate-jobs-set, and a job that carries `needs:` is no longer held by its
+          stage, so every gate it must not overtake belongs in this one list (section 8.8).
+          Left empty, with gate-jobs-set false and upstream-image-job empty, the job keeps
+          `dependencies: []` and the stage barrier it has had since 1.0.0.'
+        default: []
+      gate-jobs-set:
+        type: boolean
+        description: 'True when the consumer supplies gate-jobs. It exists because an array
+          input cannot be tested for emptiness in an include rule: with an empty list `"$[[
+          inputs.gate-jobs ]]" == ""` never matches, and with a non-empty one GitLab refuses
+          the config with `include:rule if invalid expression syntax` (measured on gitlab.example.com
+          18.9.1-ee, 2026/09/17). Set them together: the job refuses to build when they disagree,
+          because true with an empty list is a job with no edges at all and a list with false
+          is a list nothing reads, and neither is visible in a green pipeline.'
+        default: false
+      upstream-image-job:
+        type: string
+        description: 'Name of an earlier build job in this pipeline whose image this build
+          starts from. The job reads that job''s image.json, validates it, and exports CI_TPL_UPSTREAM_IMAGE_REFERENCE
+          as repository@sha256. The artifact path is derived from the name rather than taken
+          as a second input: section 5 fixes a job name as <instance>:<component> and the
+          artifact root as .ci-artifacts/<instance>/<component>/, so the name already carries
+          both halves, and a second input would be a second place the same fact lives and
+          could disagree. Naming it here also creates the `needs:` edge that downloads the
+          artifact, with `artifacts: true` and without `optional: true`, so a consumer whose
+          parent build can be filtered out of the pipeline by a rule cannot use this input:
+          a non-optional edge to an absent job fails pipeline creation.'
+        regex: ^$|^[a-z][a-z0-9-]{0,47}:[a-z][a-z0-9-]{0,63}$
+        default: ''
       run-rules:
         type: array
         description: Job eligibility set by the composition. Pushing a candidate image is
@@ -836,10 +1029,14 @@ components:
           - $CI_COMMIT_SHORT_SHA
       base-image:
         type: string
-        description: Base image pinned by digest. The default is Chainguard static, whose
+        description: 'Base image pinned by digest. The default is Chainguard static, whose
           only tag is a rolling latest, resolved to the digest below.
+
+          A leading `$UPPER_SNAKE/` is accepted so a site names its mirror once as a group
+          variable, the same form execution-image takes; GitLab expands it before the value
+          is used. The digest stays here rather than in the variable.'
         default: cgr.dev/chainguard/static@sha256:bf639cba19ba56329e6907ac26a7afcdde57a80b6aa66d5100da6883196e6b82
-        regex: ^.+@sha256:[0-9a-f]{64}$
+        regex: ^(\$[A-Z][A-Z0-9_]*/)?[A-Za-z0-9][A-Za-z0-9._/:-]*@sha256:[0-9a-f]{64}$
       ko-version:
         type: string
         description: ko release to install. The Go module proxy and checksum database verify
@@ -931,11 +1128,30 @@ components:
         type: string
         description: Job that produces the reference list artifact this job consumes.
         regex: ^[a-z][a-z0-9-]{0,47}:[a-z][a-z0-9-]{0,63}$
+      gate-jobs:
+        type: array
+        description: 'Every job that must have succeeded before anything is exported, as needs
+          entries with artifacts false. Gates, not artifact sources: this job reads the registry,
+          not what they wrote. Empty exports whatever the list names with nothing having checked
+          it first, which allow-ungated must then say out loud.'
+        default: []
+      allow-ungated:
+        type: string
+        description: true exports when gate-jobs is empty, with a warning in the log instead
+          of a failure. Empty gate-jobs means nothing checked what is leaving, and that compiles
+          and goes green, so saying it is deliberate has to be deliberate.
+        default: 'false'
+        options:
+          - 'true'
+          - 'false'
       mirror-job:
         type: string
-        description: 'Mirror job that must have succeeded before anything is exported. A gate,
-          not an artifact source: this job reads the registry, not the mirror''s digest list.'
-        regex: ^[a-z][a-z0-9-]{0,47}:[a-z][a-z0-9-]{0,63}$
+        description: 'DEPRECATED, and removed in the release after this one: pass the same
+          job in gate-jobs instead. One gate where every other component takes an array, so
+          a consumer that mirrored and then verified had nowhere to name the second job. Set,
+          it is added to the needs list as a gate and the job logs that it is deprecated.'
+        regex: ^$|^[a-z][a-z0-9-]{0,47}:[a-z][a-z0-9-]{0,63}$
+        default: ''
       list-files:
         type: string
         description: Space-separated relative paths holding references, read in order, the
@@ -1025,10 +1241,16 @@ components:
         default: ''
       execution-image:
         type: string
-        description: Approved execution image pinned by digest. Needs apk, curl, python3,
+        description: 'Approved execution image pinned by digest. Needs apk, curl, python3,
           skopeo, tar and an S3 client.
+
+          A leading `$UPPER_SNAKE/` is accepted, so a site that mirrors these images into
+          its own registry names that registry once as a group variable and passes `$CI_TPL_MIRROR/<path>@sha256:...`
+          here. GitLab expands a CI variable in `image:` at job time. The digest stays in
+          this value rather than in the variable: what runs is then still reviewable in the
+          consumer file.'
         default: docker.io/alpine@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
-        regex: ^.+@sha256:[0-9a-f]{64}$
+        regex: ^(\$[A-Z][A-Z0-9_]*/)?[A-Za-z0-9][A-Za-z0-9._/:-]*@sha256:[0-9a-f]{64}$
       egress-proxy:
         type: string
         description: HTTP CONNECT proxy for outbound traffic. Empty means direct egress.
@@ -1134,25 +1356,31 @@ components:
         a real export tar written to s3://lab-transfer/image-diode/low-export/ on a default-branch
         pipeline. The merge-request pipeline creates no export, because the mirror runs there
         as a dry run.'
-      notes: 'Producers: list-job supplies the reference list and is consumed with artifacts
-        true; mirror-job is a gate consumed with artifacts false, so nothing is exported unless
-        the mirror succeeded. Neither is optional, and neither is implied by a shared stage.
-        Failure semantics: either credential source incomplete; vault-addr set without vault-role,
-        vault-kv-path or vault-s3-kv-path; a Vault login that returns no token; a list file
-        that is absent, absolute or traverses out of the checkout; an empty assembled reference
-        set; a reference the OCI layout does not carry, or a manifest blob that is not on
-        disk, which now names the reference instead of raising a KeyError; and have-key unreadable
-        for any reason other than NoSuchKey, which exits 2. The archive is uploaded only after
-        manifest.json is written. have-key is read with s3api get-object, not head-object:
-        some S3 gateways answer HeadObject with HTTP 400, which reads as "no object" and would
-        silently send the full set every run. A genuine NoSuchKey means send everything. Copies
-        out of the registry use --preserve-digests, so the layout, the source registry and
-        the receiving registry all report the same digest. That holds only because container-mirror-skopeo
-        wrote OCI manifests. No credential reaches a command line; see container-mirror-skopeo.
-        Evidence: the shape this component had at tag 0.2.0 was integration-tested by a consumer.
-        That claim is deliberately NOT carried here, because the job''s shell now comes from
-        runtime/mirror/ and nothing in this release has been executed. runtime-tested: tests/runtime/mirror/
-        covers the transfer description and the shared shell as this template embeds it. Limitations:
+      notes: 'An empty gate-jobs fails the job: nothing in the pipeline checked what is about
+        to be exported, and that is a release decision rather than a default. allow-ungated:
+        true turns the failure into a warning. The gate list is gate-jobs, an array, like
+        every other component''s. The scalar mirror-job it replaces still works and is added
+        to the list, with a deprecation warning in the job log; it goes away in the release
+        after the one that introduced gate-jobs here. Producers: list-job supplies the reference
+        list and is consumed with artifacts true; mirror-job is a gate consumed with artifacts
+        false, so nothing is exported unless the mirror succeeded. Neither is optional, and
+        neither is implied by a shared stage. Failure semantics: either credential source
+        incomplete; vault-addr set without vault-role, vault-kv-path or vault-s3-kv-path;
+        a Vault login that returns no token; a list file that is absent, absolute or traverses
+        out of the checkout; an empty assembled reference set; a reference the OCI layout
+        does not carry, or a manifest blob that is not on disk, which now names the reference
+        instead of raising a KeyError; and have-key unreadable for any reason other than NoSuchKey,
+        which exits 2. The archive is uploaded only after manifest.json is written. have-key
+        is read with s3api get-object, not head-object: some S3 gateways answer HeadObject
+        with HTTP 400, which reads as "no object" and would silently send the full set every
+        run. A genuine NoSuchKey means send everything. Copies out of the registry use --preserve-digests,
+        so the layout, the source registry and the receiving registry all report the same
+        digest. That holds only because container-mirror-skopeo wrote OCI manifests. No credential
+        reaches a command line; see container-mirror-skopeo. Evidence: the shape this component
+        had at tag 0.2.0 was integration-tested by a consumer. That claim is deliberately
+        NOT carried here, because the job''s shell now comes from runtime/mirror/ and nothing
+        in this release has been executed. runtime-tested: tests/runtime/mirror/ covers the
+        transfer description and the shared shell as this template embeds it. Limitations:
         list-files is a validated space-separated string for the same reason as in container-mirror-skopeo;
         the component uploads one object, and a receiving side that needs it split is responsible
         for splitting it.'
@@ -1184,9 +1412,15 @@ components:
         default: https://github.com/rancher/rke2/releases/download
       execution-image:
         type: string
-        description: Approved execution image pinned by digest. Needs apk, curl and python3.
+        description: 'Approved execution image pinned by digest. Needs apk, curl and python3.
+
+          A leading `$UPPER_SNAKE/` is accepted, so a site that mirrors these images into
+          its own registry names that registry once as a group variable and passes `$CI_TPL_MIRROR/<path>@sha256:...`
+          here. GitLab expands a CI variable in `image:` at job time. The digest stays in
+          this value rather than in the variable: what runs is then still reviewable in the
+          consumer file.'
         default: docker.io/alpine@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
-        regex: ^.+@sha256:[0-9a-f]{64}$
+        regex: ^(\$[A-Z][A-Z0-9_]*/)?[A-Za-z0-9][A-Za-z0-9._/:-]*@sha256:[0-9a-f]{64}$
       egress-proxy:
         type: string
         description: HTTP CONNECT proxy for outbound traffic. Empty means direct egress.
@@ -1356,10 +1590,16 @@ components:
         default: ''
       execution-image:
         type: string
-        description: Approved execution image pinned by digest. Needs apk, curl, python3 and
-          skopeo.
+        description: 'Approved execution image pinned by digest. Needs apk, curl, python3
+          and skopeo.
+
+          A leading `$UPPER_SNAKE/` is accepted, so a site that mirrors these images into
+          its own registry names that registry once as a group variable and passes `$CI_TPL_MIRROR/<path>@sha256:...`
+          here. GitLab expands a CI variable in `image:` at job time. The digest stays in
+          this value rather than in the variable: what runs is then still reviewable in the
+          consumer file.'
         default: docker.io/alpine@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
-        regex: ^.+@sha256:[0-9a-f]{64}$
+        regex: ^(\$[A-Z][A-Z0-9_]*/)?[A-Za-z0-9][A-Za-z0-9._/:-]*@sha256:[0-9a-f]{64}$
       egress-proxy:
         type: string
         description: HTTP CONNECT proxy for outbound traffic. Empty means direct egress.
@@ -1484,9 +1724,15 @@ components:
         default: publish
       execution-image:
         type: string
-        description: Approved Python execution image pinned by digest.
+        description: 'Approved Python execution image pinned by digest.
+
+          A leading `$UPPER_SNAKE/` is accepted, so a site that mirrors these images into
+          its own registry names that registry once as a group variable and passes `$CI_TPL_MIRROR/<path>@sha256:...`
+          here. GitLab expands a CI variable in `image:` at job time. The digest stays in
+          this value rather than in the variable: what runs is then still reviewable in the
+          consumer file.'
         default: docker.io/python@sha256:cd7c412d000912f29075a1b8803e43cb2f38bb67f104019df526df5ceaf30569
-        regex: ^.+@sha256:[0-9a-f]{64}$
+        regex: ^(\$[A-Z][A-Z0-9_]*/)?[A-Za-z0-9][A-Za-z0-9._/:-]*@sha256:[0-9a-f]{64}$
       runner-tags:
         type: array
         description: Runner selection from the estate profile.
@@ -1512,7 +1758,19 @@ components:
       build-job:
         type: string
         description: Exact name of the job whose image.json states the digest to promote.
-          The source is that digest, never a tag.
+          The source is that digest, never a tag. Empty when the consumer names the image
+          with subject-reference instead; exactly one of the two.
+        default: ''
+      subject-reference:
+        type: string
+        description: 'The image this job acts on, written as repository@sha256:<digest>, for
+          a consumer acting on an image this pipeline did not build. Exactly one of this and
+          build-job: neither is a default the other can imply, so the job checks at run time
+          and names both in either failure. When this is set the job writes the record a build
+          would have written into its own artefact root, so a downstream job reads one shape
+          (section 9.1).'
+        regex: ^$|^[a-z0-9.-]+(:[0-9]+)?(/[a-z0-9._-]+)+@sha256:[0-9a-f]{64}$
+        default: ''
       build-component:
         type: string
         description: Component name the build job writes its artifacts under.
@@ -1525,6 +1783,16 @@ components:
           a composition that leaves it empty publishes on the build alone, which its own review
           should catch.'
         default: []
+      allow-ungated:
+        type: string
+        description: true publishes when gate-jobs is empty, with a warning in the log instead
+          of a failure. Empty gate-jobs means no scan, no signature and no readiness check
+          ran in front of this release, and that compiles and goes green, so saying it is
+          deliberate has to be deliberate.
+        default: 'false'
+        options:
+          - 'true'
+          - 'false'
       destination-project:
         type: string
         description: Harbor project the release lands in, from .ci/estate.yml registries.release.project.
@@ -1598,25 +1866,227 @@ components:
         - runtime-tested
       verified_at: 2026/09/15
       environment: gitlab.example.com 18.9.1-ee, project 18
-      notes: 'Failure semantics: an image.json without a digest, a candidate artifact that
-        is not there, a destination project equal to the source, a refused copy, a destination
-        that cannot be read back or whose digest differs, a missing cosign signature while
-        require-signatures is true, or a tag that is not a valid tag name. allow_failure is
-        set explicitly to false because GitLab defaults manual jobs to true, which is how
-        the predecessor made a failed production publication green. Referrers: cosign stores
-        a signature and attestations as the separate tags sha256-<hex>.sig and .att. Those
-        are copied explicitly; a digest copy does not carry them. The .att tag is copied when
-        present and its absence is recorded, not fatal. Approval is a control on the environment,
-        not on this template: the default rules require a protected tag and a manual action,
-        and the environment named by the environment input carries the protection and approvers.
-        .ci/estate.yml records every environment''s protected and approvers fields as unresolved,
-        so no approval is proven to exist today. gitlab-linted through the CI Lint API; no
-        job ran. runtime-tested: unit tests cover every failure path above against a stubbed
-        Harbor API. No artifact has been promoted by this component. Status: experimental,
-        because no consumer pipeline has run this component on 1.0.0-rc.2. `released` in this
-        repository means a consumer job executed green, not that the component looks finished.
-        a consumer is the container consumer and its build source is tags-only, so no candidate
-        chain job was created at all.'
+      notes: 'An empty gate-jobs fails the job: nothing in the pipeline checked what is about
+        to be published, and that is a release decision rather than a default. allow-ungated:
+        true turns the failure into a warning. Exactly one of build-job and subject-reference.
+        build-job reads the producer''s image.json from its artifacts; subject-reference names
+        an image this pipeline did not build, and the job then writes the same record into
+        its own artefact root. Neither or both fails the job, naming both inputs. Failure
+        semantics: an image.json without a digest, a candidate artifact that is not there,
+        a destination project equal to the source, a refused copy, a destination that cannot
+        be read back or whose digest differs, a missing cosign signature while require-signatures
+        is true, or a tag that is not a valid tag name. allow_failure is set explicitly to
+        false because GitLab defaults manual jobs to true, which is how the predecessor made
+        a failed production publication green. Referrers: cosign stores a signature and attestations
+        as the separate tags sha256-<hex>.sig and .att. Those are copied explicitly; a digest
+        copy does not carry them. The .att tag is copied when present and its absence is recorded,
+        not fatal. Approval is a control on the environment, not on this template: the default
+        rules require a protected tag and a manual action, and the environment named by the
+        environment input carries the protection and approvers. .ci/estate.yml records every
+        environment''s protected and approvers fields as unresolved, so no approval is proven
+        to exist today. gitlab-linted through the CI Lint API; no job ran. runtime-tested:
+        unit tests cover every failure path above against a stubbed Harbor API. No artifact
+        has been promoted by this component. Status: experimental, because no consumer pipeline
+        has run this component on 1.0.0-rc.2. `released` in this repository means a consumer
+        job executed green, not that the component looks finished. a consumer is the container
+        consumer and its build source is tags-only, so no candidate chain job was created
+        at all.'
+  - name: container-promote-skopeo
+    kind: component
+    path: templates/container-promote-skopeo/template.yml
+    status: released
+    inputs:
+      instance:
+        type: string
+        description: Unique workload instance used in the job name.
+        regex: ^[a-z][a-z0-9-]{0,47}$
+      stage:
+        type: string
+        description: Stage supplied by the owning composition.
+        default: publish
+      source-repository:
+        type: string
+        description: Repository the digest is read from, as `registry/path`, with no tag and
+          no digest. Which digest is the source-digest or source-digest-job input.
+        regex: ^[a-z0-9][a-z0-9.-]*(:[0-9]+)?(/[a-z0-9][a-z0-9._-]*)+$
+      target-repository:
+        type: string
+        description: Repository the digest is copied to, in the same form. It may be on another
+          registry, another organisation or the same repository path under a different project;
+          the two credential pairs below decide which identity each side is contacted with.
+        regex: ^[a-z0-9][a-z0-9.-]*(:[0-9]+)?(/[a-z0-9][a-z0-9._-]*)+$
+      source-digest:
+        type: string
+        description: The digest to promote, stated explicitly. Use this when the artifact
+          was built by some earlier pipeline and this one only publishes it. Empty selects
+          source-digest-job instead, and setting neither is an error.
+        regex: ^$|^sha256:[0-9a-f]{64}$
+        default: ''
+      source-digest-job:
+        type: array
+        description: 'The build job whose image.json states the digest to promote, as zero
+          or one job name. An array because GitLab has no conditional needs: the empty list
+          is how a pipeline with no build job in it says so, and a name here becomes a needs
+          entry that downloads that job''s artifacts.'
+        default: []
+      source-digest-component:
+        type: string
+        description: Component name the job above writes its artifacts under, which is the
+          directory image.json lives in. Ignored when source-digest is set.
+        default: container-build-buildkit
+      target-tags:
+        type: array
+        description: 'Tags the promoted digest is published under. At least one is required:
+          skopeo refuses a digest as a copy destination, and an untagged manifest is what
+          a registry''s garbage collection is entitled to remove.'
+        default:
+          - $CI_COMMIT_TAG
+      source-username-variable:
+        type: string
+        description: Name of the CI variable holding the username for the source registry.
+          The name, never the value.
+        regex: ^[A-Z][A-Z0-9_]*$
+        default: HARBOR_USER
+      source-password-variable:
+        type: string
+        description: Name of the CI variable holding the source registry password or robot
+          token.
+        regex: ^[A-Z][A-Z0-9_]*$
+        default: HARBOR_PASSWORD
+      target-username-variable:
+        type: string
+        description: Name of the CI variable holding the username for the target registry.
+          The same name as the source when one identity has both ends.
+        regex: ^[A-Z][A-Z0-9_]*$
+        default: HARBOR_USER
+      target-password-variable:
+        type: string
+        description: Name of the CI variable holding the target registry password or robot
+          token.
+        regex: ^[A-Z][A-Z0-9_]*$
+        default: HARBOR_PASSWORD
+      ca-bundle-variable:
+        type: string
+        description: Name of a CI variable holding a PEM bundle to trust before any registry
+          call, for a registry whose certificate an internal authority issued. A file variable
+          (the value is a path) or an ordinary one (the value is the PEM) both work. Empty
+          skips it, and nothing is downloaded either way.
+        regex: ^$|^[A-Z][A-Z0-9_]*$
+        default: ''
+      execution-image:
+        type: string
+        description: 'Approved execution image pinned by digest. Needs apk and a busybox userland;
+          skopeo and ca-certificates are installed from the image''s own package repositories.
+          No Docker Hub image ships skopeo, which is why this is Alpine and not a skopeo image;
+          container-mirror-skopeo resolves it the same way.
+
+          A leading `$UPPER_SNAKE/` is accepted, so a site that mirrors these images into
+          its own registry names that registry once as a group variable and passes `$CI_TPL_MIRROR/library/alpine@sha256:...`
+          here. GitLab expands a CI variable in `image:` at job time. The digest stays in
+          this value rather than in the variable: what runs is then still reviewable in the
+          consumer file.'
+        default: docker.io/alpine@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
+        regex: ^(\$[A-Z][A-Z0-9_]*/)?[A-Za-z0-9][A-Za-z0-9._/:-]*@sha256:[0-9a-f]{64}$
+      gate-jobs:
+        type: array
+        description: Every gate that must pass before the promotion, as needs entries with
+          artifacts false. Empty by default because only the composition knows the instance
+          job names; a composition that leaves it empty promotes on the build alone, which
+          its own review should catch.
+        default: []
+      runner-tags:
+        type: array
+        description: Runner selection from the estate profile.
+        default: []
+      max-retries:
+        type: number
+        description: How many times the runner may retry this job. The condition is runner_system_failure
+          only, so this retries infrastructure and never a failed gate.
+        default: 1
+        options:
+          - 0
+          - 1
+          - 2
+      run-rules:
+        type: array
+        description: 'Job eligibility set by the composition. The default requires a protected
+          tag and a manual action: a release publication is never automatic, and an unprotected
+          ref cannot reach the target repository.'
+        default:
+          - if: $CI_COMMIT_TAG && $CI_COMMIT_REF_PROTECTED == "true"
+            when: manual
+          - when: never
+    introduced_in: 1.3.0
+    minimum_gitlab: '18.9'
+    emitted_jobs:
+      - pattern: '{instance}:container-promote-skopeo'
+        stage: publish
+        blocking: true
+    outputs:
+      - path: .ci-artifacts/{instance}/container-promote-skopeo/promote-result.json
+        producer: '{instance}:container-promote-skopeo'
+        format: JSON
+        schema: schema_version 1; source, target, digest, tags, created_at.
+        subject_identity: repository@sha256 digest. The source digest is an input or comes
+          from the build's image.json; the target digest is the sha256 of the manifest read
+          back from the target repository, so the two are compared as content and not as a
+          field the registry reported.
+        retention: 1 week
+    required_secrets:
+      - name: HARBOR_USER
+        kind: ci-variable
+        scope: Default only. The four credential-variable inputs name the variables this job
+          reads, so a consumer with QUAY_USER and an Artifactory identity names those instead
+          and defines neither of these. Pull on the source repository, push on the target.
+        protected_ref_required: true
+      - name: HARBOR_PASSWORD
+        kind: ci-variable
+        scope: Default only; the password or robot token for the above.
+        protected_ref_required: true
+    runtime_image:
+      reference: docker.io/alpine@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
+      pinning: digest
+      tool_versions:
+        alpine: '3.22'
+        skopeo: from the image's own package repositories
+    trust:
+      privileged: false
+      network_egress:
+        - the source registry
+        - the target registry
+        - the Alpine package mirror the execution image is configured with
+      runner_profile: 'Any unprivileged Docker executor. No image is built or loaded: skopeo
+        streams blobs the registries already hold, and mounts them where both ends are the
+        same registry.'
+      protected_ref_required: true
+    validation:
+      evidence:
+        - source-reviewed
+        - yaml-parsed
+        - gitlab-linted
+        - runtime-tested
+        - integration-tested
+      verified_at: 2026/09/18
+      revision: 1.3.0
+      environment: 'gitlab.example.com 18.9.1-ee, POST /api/v4/projects/:id/ci/lint. Executed
+        on the originating estate, 2026/09: a consumer project promoted a digest between two
+        repositories of a Quay 3.15.7 registry, first on the branch this component was written
+        on and then again on the 1.3.0 tag.'
+      notes: 'Failure semantics: neither source-digest nor a readable image.json, an image.json
+        that fails its own schema check, a digest that is not sha256 and 64 hex, an empty
+        target-tags, a tag outside [A-Za-z0-9._-], either credential pair empty, a CA bundle
+        variable carrying no certificate, a refused copy, a target that cannot be read back,
+        and a target digest that differs from the source. Verification hashes the raw target
+        manifest rather than reading a field, because `skopeo inspect` without --raw resolves
+        an index to the runner''s own platform and would report a child digest. Referrers:
+        cosign stores a signature as the separate tag sha256-<hex>.sig, which a digest copy
+        does not carry. container-promote-harbor copies those explicitly through the Harbor
+        API; this component does not, so a signed release promoted here is signed again at
+        the target or has its referrer tags promoted as further tags. integration-tested:
+        a consumer job copied a built image by digest between two repositories of a Quay registry,
+        tagged the target, read the target manifest back and got the same digest. Repeated
+        on the 1.3.0 tag with a second image. No composition ships it, so no pipeline in pipelines/
+        includes it yet.'
   - name: container-sign-attest-cosign
     kind: component
     path: templates/container-sign-attest-cosign/template.yml
@@ -1632,10 +2102,16 @@ components:
         default: attest
       execution-image:
         type: string
-        description: Approved Python execution image pinned by digest. cosign itself is downloaded
+        description: 'Approved Python execution image pinned by digest. cosign itself is downloaded
           at a pinned version and verified against the checksums committed in runtime/sign/.
+
+          A leading `$UPPER_SNAKE/` is accepted, so a site that mirrors these images into
+          its own registry names that registry once as a group variable and passes `$CI_TPL_MIRROR/<path>@sha256:...`
+          here. GitLab expands a CI variable in `image:` at job time. The digest stays in
+          this value rather than in the variable: what runs is then still reviewable in the
+          consumer file.'
         default: docker.io/python@sha256:cd7c412d000912f29075a1b8803e43cb2f38bb67f104019df526df5ceaf30569
-        regex: ^.+@sha256:[0-9a-f]{64}$
+        regex: ^(\$[A-Z][A-Z0-9_]*/)?[A-Za-z0-9][A-Za-z0-9._/:-]*@sha256:[0-9a-f]{64}$
       registry-username-variable:
         type: string
         description: Name of the CI variable holding the registry username. The name, never
@@ -1688,20 +2164,38 @@ components:
           - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG
       build-job:
         type: string
-        description: Exact name of the job whose image.json identifies the subject.
+        description: Exact name of the job whose image.json identifies the subject. Empty
+          when the consumer names the image with subject-reference instead; exactly one of
+          the two.
+        default: ''
+      subject-reference:
+        type: string
+        description: 'The image this job acts on, written as repository@sha256:<digest>, for
+          a consumer acting on an image this pipeline did not build. Exactly one of this and
+          build-job: neither is a default the other can imply, so the job checks at run time
+          and names both in either failure. When this is set the job writes the record a build
+          would have written into its own artefact root, so a downstream job reads one shape
+          (section 9.1).'
+        regex: ^$|^[a-z0-9.-]+(:[0-9]+)?(/[a-z0-9._-]+)+@sha256:[0-9a-f]{64}$
+        default: ''
       build-component:
         type: string
         description: Component name the build job writes its artifacts under.
         default: container-build-buildkit
       sbom-job:
         type: string
-        description: 'Exact name of the security-sbom-syft job. Required, not optional: the
-          SBOM this attests is the release''s evidence, and a missing producer is a missing
-          attestation.'
+        description: 'Exact name of the security-sbom-syft job. Empty means the consumer runs
+          no SBOM producer: the signature is still made, the CycloneDX attestation is skipped,
+          and the job says so in its log. Set it and the SBOM becomes evidence the job fails
+          without.'
+        default: ''
       scan-job:
         type: string
-        description: Exact name of the image scan job whose scan-result.json is attested and
-          whose gate must have passed before anything is signed.
+        description: 'Exact name of the image scan job whose scan-result.json is attested
+          and whose gate must have passed before anything is signed. Empty means the consumer
+          runs no image scan: the vulnerability attestation is skipped and logged, and nothing
+          gates the signature but gate-jobs.'
+        default: ''
       scan-component:
         type: string
         description: Component name the scan job writes its artifacts under.
@@ -1813,7 +2307,13 @@ components:
         Quay 3.15.7 registry with an internally issued certificate, one of them running every
         job this composition creates on a default-branch push, green through to a signature
         and two attestations in the registry.'
-      notes: 'Failure semantics, all hard: no ID token, a rejected Vault login, a login without
+      notes: 'Exactly one of build-job and subject-reference. build-job reads the producer''s
+        image.json from its artifacts; subject-reference names an image this pipeline did
+        not build, and the job then writes the same record into its own artefact root. Neither
+        or both fails the job, naming both inputs. sbom-job and scan-job are optional. Empty
+        means the consumer runs no such producer: the signature is still made, the matching
+        attestation is skipped and the skip is logged, and no needs entry is emitted for it.
+        Failure semantics, all hard: no ID token, a rejected Vault login, a login without
         a client token, a cosign download whose sha256 does not match runtime/sign/cosign_checksums.txt,
         an unreadable Transit key, a missing SBOM or vulnerability record while its attestation
         is enabled, an SBOM whose subject is a different image, or any non-zero cosign exit.
@@ -1847,16 +2347,26 @@ components:
         default: test
       execution-image:
         type: string
-        description: Approved Docker CLI image pinned by digest. The default is docker:27
-          through the estate's Docker Hub mirror.
+        description: 'Approved Docker CLI image pinned by digest. The default is docker:27
+          through the estate''s Docker Hub mirror.
+
+          A leading `$UPPER_SNAKE/` is accepted, so a site that mirrors these images into
+          its own registry names that registry once as a group variable and passes `$CI_TPL_MIRROR/<path>@sha256:...`
+          here. GitLab expands a CI variable in `image:` at job time. The digest stays in
+          this value rather than in the variable: what runs is then still reviewable in the
+          consumer file.'
         default: docker.io/docker@sha256:aa3df78ecf320f5fafdce71c659f1629e96e9de0968305fe1de670e0ca9176ce
-        regex: ^.+@sha256:[0-9a-f]{64}$
+        regex: ^(\$[A-Z][A-Z0-9_]*/)?[A-Za-z0-9][A-Za-z0-9._/:-]*@sha256:[0-9a-f]{64}$
       dind-image:
         type: string
-        description: Docker-in-Docker service image pinned by digest. docker:27 and docker:27-dind
+        description: 'Docker-in-Docker service image pinned by digest. docker:27 and docker:27-dind
           resolve to the same index, so the default matches execution-image.
+
+          A leading `$UPPER_SNAKE/` is accepted so a site names its mirror once as a group
+          variable, the same form execution-image takes; GitLab expands it before the value
+          is used. The digest stays here rather than in the variable.'
         default: docker.io/docker@sha256:aa3df78ecf320f5fafdce71c659f1629e96e9de0968305fe1de670e0ca9176ce
-        regex: ^.+@sha256:[0-9a-f]{64}$
+        regex: ^(\$[A-Z][A-Z0-9_]*/)?[A-Za-z0-9][A-Za-z0-9._/:-]*@sha256:[0-9a-f]{64}$
       registry-username-variable:
         type: string
         description: Name of the CI variable holding the registry username. The name, never
@@ -1904,8 +2414,20 @@ components:
         default: .
       build-job:
         type: string
-        description: Exact job that produced the image under test. Its artifacts are consumed,
-          so it is never optional.
+        description: Exact job that produced the image under test, whose artifacts carry its
+          image.json. Empty when the consumer names the image with subject-reference instead;
+          exactly one of the two.
+        default: ''
+      subject-reference:
+        type: string
+        description: 'The image this job acts on, written as repository@sha256:<digest>, for
+          a consumer acting on an image this pipeline did not build. Exactly one of this and
+          build-job: neither is a default the other can imply, so the job checks at run time
+          and names both in either failure. When this is set the job writes the record a build
+          would have written into its own artefact root, so a downstream job reads one shape
+          (section 9.1). An image-identities entry then names that path like any other image.json.'
+        regex: ^$|^[a-z0-9.-]+(:[0-9]+)?(/[a-z0-9._-]+)+@sha256:[0-9a-f]{64}$
+        default: ''
       service-image-jobs:
         type: array
         description: Further image-producing jobs whose artifacts this test consumes, for
@@ -1968,18 +2490,21 @@ components:
         - yaml-parsed
         - gitlab-linted
       verified_at: 2026/09/15
-      notes: 'Consumer contract. The working directory must hold the compose file named by
-        compose-file and a Makefile with the target named by make-target. Both were previously
-        stated only in a header comment; the compose file is now checked before the test runs.
-        Failure semantics (section 10.1). The job fails when an image-identities entry names
-        an unusable variable, when a named image.json is missing or does not validate, when
-        image-identities is empty, when the compose file is absent, and when the make target
-        exits non-zero. Daemon TLS is on: DOCKER_TLS_CERTDIR is /certs and the daemon is reached
-        on 2376, replacing the previous plaintext 2375. Known gap against section 12: make
-        is installed with apk at job time because the Docker CLI image does not carry it;
-        supplying an execution-image that already has the test tooling removes that install.
-        Not runtime-tested: no pipeline has executed this component, and the previous template
-        emitted no runnable job at all.'
+      notes: 'Exactly one of build-job and subject-reference. build-job reads the producer''s
+        image.json from its artifacts; subject-reference names an image this pipeline did
+        not build, and the job then writes the same record into its own artefact root. Neither
+        or both fails the job, naming both inputs. Consumer contract. The working directory
+        must hold the compose file named by compose-file and a Makefile with the target named
+        by make-target. Both were previously stated only in a header comment; the compose
+        file is now checked before the test runs. Failure semantics (section 10.1). The job
+        fails when an image-identities entry names an unusable variable, when a named image.json
+        is missing or does not validate, when image-identities is empty, when the compose
+        file is absent, and when the make target exits non-zero. Daemon TLS is on: DOCKER_TLS_CERTDIR
+        is /certs and the daemon is reached on 2376, replacing the previous plaintext 2375.
+        Known gap against section 12: make is installed with apk at job time because the Docker
+        CLI image does not carry it; supplying an execution-image that already has the test
+        tooling removes that install. Not runtime-tested: no pipeline has executed this component,
+        and the previous template emitted no runnable job at all.'
   - name: docs-wiki-sync
     kind: component
     path: templates/docs-wiki-sync/template.yml
@@ -2017,12 +2542,18 @@ components:
           - shell
       execution-image:
         type: string
-        description: Python execution image, ignored when `executor` is `shell`. Needs python3,
-          pip, git, tar, base64 and sha256sum. A digest is the estate's preferred form and
+        description: 'Python execution image, ignored when `executor` is `shell`. Needs python3,
+          pip, git, tar, base64 and sha256sum. A digest is the estate''s preferred form and
           the default; `name:tag` is accepted for a site whose internal mirror cannot serve
           a digest, and an empty value for a shell executor that will not pull an image at
           all.
-        regex: ^$|^[A-Za-z0-9][A-Za-z0-9._\-/:]*$|^[A-Za-z0-9][A-Za-z0-9._\-/:]*@sha256:[0-9a-f]{64}$
+
+          A leading `$UPPER_SNAKE/` is accepted, so a site that mirrors these images into
+          its own registry names that registry once as a group variable and passes `$CI_TPL_MIRROR/<path>@sha256:...`
+          here. GitLab expands a CI variable in `image:` at job time. The digest stays in
+          this value rather than in the variable: what runs is then still reviewable in the
+          consumer file.'
+        regex: ^$|^(\$[A-Z][A-Z0-9_]*/)?[A-Za-z0-9][A-Za-z0-9._/:-]*(@sha256:[0-9a-f]{64})?$
         default: docker.io/python@sha256:cd7c412d000912f29075a1b8803e43cb2f38bb67f104019df526df5ceaf30569
       runner-tags:
         type: array
@@ -2217,8 +2748,14 @@ components:
         default: false
       execution-image:
         type: string
-        description: Approved helm execution image, pinned by digest.
-        regex: ^.+@sha256:[0-9a-f]{64}$
+        description: 'Approved helm execution image, pinned by digest.
+
+          A leading `$UPPER_SNAKE/` is accepted, so a site that mirrors these images into
+          its own registry names that registry once as a group variable and passes `$CI_TPL_MIRROR/<path>@sha256:...`
+          here. GitLab expands a CI variable in `image:` at job time. The digest stays in
+          this value rather than in the variable: what runs is then still reviewable in the
+          consumer file.'
+        regex: ^(\$[A-Z][A-Z0-9_]*/)?[A-Za-z0-9][A-Za-z0-9._/:-]*@sha256:[0-9a-f]{64}$
         default: docker.io/alpine/helm@sha256:ed9dfc49d43d034df3f9880eb777caf0183e5156508672478b80412c63f3db4f
       runner-tags:
         type: array
@@ -2359,8 +2896,14 @@ components:
         default: false
       execution-image:
         type: string
-        description: Approved helm execution image, pinned by digest.
-        regex: ^.+@sha256:[0-9a-f]{64}$
+        description: 'Approved helm execution image, pinned by digest.
+
+          A leading `$UPPER_SNAKE/` is accepted, so a site that mirrors these images into
+          its own registry names that registry once as a group variable and passes `$CI_TPL_MIRROR/<path>@sha256:...`
+          here. GitLab expands a CI variable in `image:` at job time. The digest stays in
+          this value rather than in the variable: what runs is then still reviewable in the
+          consumer file.'
+        regex: ^(\$[A-Z][A-Z0-9_]*/)?[A-Za-z0-9][A-Za-z0-9._/:-]*@sha256:[0-9a-f]{64}$
         default: docker.io/alpine/helm@sha256:ed9dfc49d43d034df3f9880eb777caf0183e5156508672478b80412c63f3db4f
       runner-tags:
         type: array
@@ -2473,9 +3016,15 @@ components:
         default: false
       execution-image:
         type: string
-        description: Approved execution image, pinned by digest. Needs a POSIX shell, tar
+        description: 'Approved execution image, pinned by digest. Needs a POSIX shell, tar
           and sha256sum.
-        regex: ^.+@sha256:[0-9a-f]{64}$
+
+          A leading `$UPPER_SNAKE/` is accepted, so a site that mirrors these images into
+          its own registry names that registry once as a group variable and passes `$CI_TPL_MIRROR/<path>@sha256:...`
+          here. GitLab expands a CI variable in `image:` at job time. The digest stays in
+          this value rather than in the variable: what runs is then still reviewable in the
+          consumer file.'
+        regex: ^(\$[A-Z][A-Z0-9_]*/)?[A-Za-z0-9][A-Za-z0-9._/:-]*@sha256:[0-9a-f]{64}$
         default: docker.io/alpine@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
       runner-tags:
         type: array
@@ -2565,9 +3114,15 @@ components:
         default: .
       execution-image:
         type: string
-        description: Approved base image pinned by digest. The default is the estate mirror
+        description: 'Approved base image pinned by digest. The default is the estate mirror
           of alpine:3.20; the check needs a POSIX shell and nothing else.
-        regex: ^.+@sha256:[0-9a-f]{64}$
+
+          A leading `$UPPER_SNAKE/` is accepted, so a site that mirrors these images into
+          its own registry names that registry once as a group variable and passes `$CI_TPL_MIRROR/<path>@sha256:...`
+          here. GitLab expands a CI variable in `image:` at job time. The digest stays in
+          this value rather than in the variable: what runs is then still reviewable in the
+          consumer file.'
+        regex: ^(\$[A-Z][A-Z0-9_]*/)?[A-Za-z0-9][A-Za-z0-9._/:-]*@sha256:[0-9a-f]{64}$
         default: docker.io/alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
       runner-tags:
         type: array
@@ -2690,9 +3245,15 @@ components:
         default: .
       execution-image:
         type: string
-        description: Approved sonar-scanner image pinned by digest. The default is the estate
+        description: 'Approved sonar-scanner image pinned by digest. The default is the estate
           mirror of sonarsource/sonar-scanner-cli:11.
-        regex: ^.+@sha256:[0-9a-f]{64}$
+
+          A leading `$UPPER_SNAKE/` is accepted, so a site that mirrors these images into
+          its own registry names that registry once as a group variable and passes `$CI_TPL_MIRROR/<path>@sha256:...`
+          here. GitLab expands a CI variable in `image:` at job time. The digest stays in
+          this value rather than in the variable: what runs is then still reviewable in the
+          consumer file.'
+        regex: ^(\$[A-Z][A-Z0-9_]*/)?[A-Za-z0-9][A-Za-z0-9._/:-]*@sha256:[0-9a-f]{64}$
         default: docker.io/sonarsource/sonar-scanner-cli@sha256:46341f2c2dc560381414e90347885f5cddc716db080adcbafc1cac13e1473094
       runner-tags:
         type: array
@@ -2908,9 +3469,15 @@ components:
         default: https://vault.example.com:8200
       execution-image:
         type: string
-        description: Approved execution image pinned by digest. Needs a POSIX shell and the
+        description: 'Approved execution image pinned by digest. Needs a POSIX shell and the
           package manager used to add curl and jq.
-        regex: ^.+@sha256:[0-9a-f]{64}$
+
+          A leading `$UPPER_SNAKE/` is accepted, so a site that mirrors these images into
+          its own registry names that registry once as a group variable and passes `$CI_TPL_MIRROR/<path>@sha256:...`
+          here. GitLab expands a CI variable in `image:` at job time. The digest stays in
+          this value rather than in the variable: what runs is then still reviewable in the
+          consumer file.'
+        regex: ^(\$[A-Z][A-Z0-9_]*/)?[A-Za-z0-9][A-Za-z0-9._/:-]*@sha256:[0-9a-f]{64}$
         default: docker.io/alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
       runner-tags:
         type: array
@@ -3055,9 +3622,15 @@ components:
         default: https://vault.example.com:8200
       execution-image:
         type: string
-        description: Approved execution image pinned by digest. Needs a POSIX shell and the
+        description: 'Approved execution image pinned by digest. Needs a POSIX shell and the
           package manager used to add curl and jq.
-        regex: ^.+@sha256:[0-9a-f]{64}$
+
+          A leading `$UPPER_SNAKE/` is accepted, so a site that mirrors these images into
+          its own registry names that registry once as a group variable and passes `$CI_TPL_MIRROR/<path>@sha256:...`
+          here. GitLab expands a CI variable in `image:` at job time. The digest stays in
+          this value rather than in the variable: what runs is then still reviewable in the
+          consumer file.'
+        regex: ^(\$[A-Z][A-Z0-9_]*/)?[A-Za-z0-9][A-Za-z0-9._/:-]*@sha256:[0-9a-f]{64}$
         default: docker.io/alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
       runner-tags:
         type: array
@@ -3155,10 +3728,16 @@ components:
         default: .
       execution-image:
         type: string
-        description: Approved grype image pinned by digest. The default is the estate mirror
+        description: 'Approved grype image pinned by digest. The default is the estate mirror
           of anchore/grype:v0.118.0-debug; the non-debug image is built FROM scratch and has
           no shell, so a GitLab job cannot run a script in it.
-        regex: ^.+@sha256:[0-9a-f]{64}$
+
+          A leading `$UPPER_SNAKE/` is accepted, so a site that mirrors these images into
+          its own registry names that registry once as a group variable and passes `$CI_TPL_MIRROR/<path>@sha256:...`
+          here. GitLab expands a CI variable in `image:` at job time. The digest stays in
+          this value rather than in the variable: what runs is then still reviewable in the
+          consumer file.'
+        regex: ^(\$[A-Z][A-Z0-9_]*/)?[A-Za-z0-9][A-Za-z0-9._/:-]*@sha256:[0-9a-f]{64}$
         default: docker.io/anchore/grype@sha256:a3166cb9ec689737c4c7099c78dbd3728ca22db73d5a99c9a0b582e42d5b0926
       runner-tags:
         type: array
@@ -3173,6 +3752,25 @@ components:
           - 0
           - 1
           - 2
+      db-update-url:
+        type: string
+        description: URL grype checks for a vulnerability database, exported as GRYPE_DB_UPDATE_URL.
+          Empty keeps grype's own default, https://grype.anchore.io/databases, which reaches
+          the public internet; a site with no egress points this at its mirror of that listing.
+          This is the counterpart of the trivy components' db-repository, and it is a URL
+          rather than an OCI repository because grype's database v6 is distributed over HTTPS
+          and has no OCI form (grype v0.118.0, grype/db/v6/distribution/config.go).
+        default: ''
+      db-archive:
+        type: string
+        description: 'A database archive to import before scanning, as a local path or a URL,
+          handed to `grype db import`. When set the job imports it, exports GRYPE_DB_AUTO_UPDATE=false
+          and GRYPE_DB_REQUIRE_UPDATE_CHECK=false, and makes no call of its own: that is what
+          an air-gapped scan needs, since db-update-url still requires something to answer.
+          Empty keeps the current behaviour, `grype db update` against whatever db-update-url
+          resolves to. A URL with a `checksum=sha256:...` query parameter is verified by grype
+          against that digest.'
+        default: ''
       run-rules:
         type: array
         description: Job eligibility set by the composition.
@@ -3296,9 +3894,15 @@ components:
         default: .
       execution-image:
         type: string
-        description: Approved trivy image pinned by digest. The default is the estate mirror
+        description: 'Approved trivy image pinned by digest. The default is the estate mirror
           of aquasec/trivy:0.69.3, the last release before the 0.69.4 supply-chain compromise.
-        regex: ^.+@sha256:[0-9a-f]{64}$
+
+          A leading `$UPPER_SNAKE/` is accepted, so a site that mirrors these images into
+          its own registry names that registry once as a group variable and passes `$CI_TPL_MIRROR/<path>@sha256:...`
+          here. GitLab expands a CI variable in `image:` at job time. The digest stays in
+          this value rather than in the variable: what runs is then still reviewable in the
+          consumer file.'
+        regex: ^(\$[A-Z][A-Z0-9_]*/)?[A-Za-z0-9][A-Za-z0-9._/:-]*@sha256:[0-9a-f]{64}$
         default: docker.io/aquasec/trivy@sha256:bcc376de8d77cfe086a917230e818dc9f8528e3c852f7b1aff648949b6258d1c
       db-repository:
         type: string
@@ -3470,9 +4074,15 @@ components:
         description: 'Approved Grype image pinned by digest. The -debug variant is required:
           the default image is built FROM scratch and has no shell. Keep the client no older
           than the database schema it downloads, or `db update` fails and every scan writes
-          an empty report.'
+          an empty report.
+
+          A leading `$UPPER_SNAKE/` is accepted, so a site that mirrors these images into
+          its own registry names that registry once as a group variable and passes `$CI_TPL_MIRROR/<path>@sha256:...`
+          here. GitLab expands a CI variable in `image:` at job time. The digest stays in
+          this value rather than in the variable: what runs is then still reviewable in the
+          consumer file.'
         default: docker.io/anchore/grype@sha256:a3166cb9ec689737c4c7099c78dbd3728ca22db73d5a99c9a0b582e42d5b0926
-        regex: ^.+@sha256:[0-9a-f]{64}$
+        regex: ^(\$[A-Z][A-Z0-9_]*/)?[A-Za-z0-9][A-Za-z0-9._/:-]*@sha256:[0-9a-f]{64}$
       runner-tags:
         type: array
         description: Runner selection from the estate profile.
@@ -3486,6 +4096,25 @@ components:
           - 0
           - 1
           - 2
+      db-update-url:
+        type: string
+        description: URL grype checks for a vulnerability database, exported as GRYPE_DB_UPDATE_URL.
+          Empty keeps grype's own default, https://grype.anchore.io/databases, which reaches
+          the public internet; a site with no egress points this at its mirror of that listing.
+          This is the counterpart of the trivy components' db-repository, and it is a URL
+          rather than an OCI repository because grype's database v6 is distributed over HTTPS
+          and has no OCI form (grype v0.118.0, grype/db/v6/distribution/config.go).
+        default: ''
+      db-archive:
+        type: string
+        description: 'A database archive to import before scanning, as a local path or a URL,
+          handed to `grype db import`. When set the job imports it, exports GRYPE_DB_AUTO_UPDATE=false
+          and GRYPE_DB_REQUIRE_UPDATE_CHECK=false, and makes no call of its own: that is what
+          an air-gapped scan needs, since db-update-url still requires something to answer.
+          Empty keeps the current behaviour, `grype db update` against whatever db-update-url
+          resolves to. A URL with a `checksum=sha256:...` query parameter is verified by grype
+          against that digest.'
+        default: ''
       run-rules:
         type: array
         description: Job eligibility set by the composition.
@@ -3496,7 +4125,20 @@ components:
       build-job:
         type: string
         description: Exact name of the job whose image.json states the image this scan is
-          meant to cover. Used to validate the SBOM's subject, not as a scan target.
+          meant to cover. In SBOM mode it validates the SBOM's subject rather than being the
+          scan target; in image mode it IS the target. Empty when the consumer names the image
+          with subject-reference instead; exactly one of the two.
+        default: ''
+      subject-reference:
+        type: string
+        description: 'The image this job acts on, written as repository@sha256:<digest>, for
+          a consumer acting on an image this pipeline did not build. Exactly one of this and
+          build-job: neither is a default the other can imply, so the job checks at run time
+          and names both in either failure. When this is set the job writes the record a build
+          would have written into its own artefact root, so a downstream job reads one shape
+          (section 9.1).'
+        regex: ^$|^[a-z0-9.-]+(:[0-9]+)?(/[a-z0-9._-]+)+@sha256:[0-9a-f]{64}$
+        default: ''
       build-component:
         type: string
         description: Component name the build job writes its artifacts under.
@@ -3504,8 +4146,31 @@ components:
       sbom-job:
         type: string
         description: 'Exact name of the security-sbom-syft job whose sbom.cdx.json and subject.json
-          this scan consumes. Required: this component has no image-scanning mode, so there
-          is no file-existence fallback to get wrong.'
+          this scan consumes. Empty selects image mode: grype pulls the image named by the
+          build''s image.json and scans that instead. The mode follows this input and nothing
+          else, so no file left behind by an earlier job can redirect the scan.'
+        default: ''
+      registry-username-variable:
+        type: string
+        description: Name of the CI variable holding the registry username, for image mode.
+          The name, never the value. The default is the estate's Harbor robot variable, so
+          a consumer already using that one passes nothing here.
+        regex: ^[A-Z][A-Z0-9_]*$
+        default: HARBOR_USER
+      registry-password-variable:
+        type: string
+        description: Name of the CI variable holding the registry password or robot token.
+          The name, never the value.
+        regex: ^[A-Z][A-Z0-9_]*$
+        default: HARBOR_PASSWORD
+      ca-bundle-variable:
+        type: string
+        description: Name of a CI variable holding a PEM bundle to trust before any registry
+          call, for a registry whose certificate an internal authority issued. A file variable
+          (the value is a path) or an ordinary one (the value is the PEM) both work. Empty
+          skips it, and nothing is downloaded either way.
+        regex: ^$|^[A-Z][A-Z0-9_]*$
+        default: ''
       gate-jobs:
         type: array
         description: Additional jobs that must succeed first, as needs entries with artifacts
@@ -3588,15 +4253,23 @@ components:
         - runtime-tested
       verified_at: 2026/09/15
       environment: gitlab.example.com 18.9.1-ee, project 18
-      notes: 'Scans the authoritative SBOM only; there is no image-scanning mode and no file-existence
-        fallback. Failure semantics match security-image-trivy, plus: an SBOM whose subject
-        does not match the build''s image.json fails before the scan, and a failed `grype
-        db update` fails the job rather than producing an empty report. gitlab-linted through
-        the CI Lint API; no job ran. runtime-tested: the scan wrapper has unit tests, and
-        grype''s db update, db status, three-output SBOM scan, --only-fixed and version extraction
-        were executed against the pinned image digest on 2026/09/15. Status: experimental,
-        because no consumer pipeline has run this component on 1.0.0-rc.2. `released` in this
-        repository means a consumer job executed green, not that the component looks finished.'
+      notes: 'Exactly one of build-job and subject-reference. build-job reads the producer''s
+        image.json from its artifacts; subject-reference names an image this pipeline did
+        not build, and the job then writes the same record into its own artefact root. Neither
+        or both fails the job, naming both inputs. Two modes, chosen by sbom-job and by nothing
+        else. Set: the target is security-sbom-syft''s sbom.cdx.json, scanned only once its
+        subject record agrees with the build''s image.json. Empty: the target is the image
+        reference in image.json, pulled from the registry, and scan-result.json records the
+        target kind as image. Image mode has not run in a consumer pipeline. Scans the authoritative
+        SBOM only; there is no image-scanning mode and no file-existence fallback. Failure
+        semantics match security-image-trivy, plus: an SBOM whose subject does not match the
+        build''s image.json fails before the scan, and a failed `grype db update` fails the
+        job rather than producing an empty report. gitlab-linted through the CI Lint API;
+        no job ran. runtime-tested: the scan wrapper has unit tests, and grype''s db update,
+        db status, three-output SBOM scan, --only-fixed and version extraction were executed
+        against the pinned image digest on 2026/09/15. Status: experimental, because no consumer
+        pipeline has run this component on 1.0.0-rc.2. `released` in this repository means
+        a consumer job executed green, not that the component looks finished.'
   - name: security-image-trivy
     kind: component
     path: templates/security-image-trivy/template.yml
@@ -3612,10 +4285,16 @@ components:
         default: scan
       execution-image:
         type: string
-        description: Approved Trivy image pinned by digest. 0.69.3 is the last release before
+        description: 'Approved Trivy image pinned by digest. 0.69.3 is the last release before
           the March 2026 supply-chain compromise of 0.69.4 to 0.69.6.
+
+          A leading `$UPPER_SNAKE/` is accepted, so a site that mirrors these images into
+          its own registry names that registry once as a group variable and passes `$CI_TPL_MIRROR/<path>@sha256:...`
+          here. GitLab expands a CI variable in `image:` at job time. The digest stays in
+          this value rather than in the variable: what runs is then still reviewable in the
+          consumer file.'
         default: docker.io/aquasec/trivy@sha256:bcc376de8d77cfe086a917230e818dc9f8528e3c852f7b1aff648949b6258d1c
-        regex: ^.+@sha256:[0-9a-f]{64}$
+        regex: ^(\$[A-Z][A-Z0-9_]*/)?[A-Za-z0-9][A-Za-z0-9._/:-]*@sha256:[0-9a-f]{64}$
       registry-username-variable:
         type: string
         description: Name of the CI variable holding the registry username. The name, never
@@ -3670,7 +4349,20 @@ components:
           - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG
       build-job:
         type: string
-        description: Exact name of the job whose image.json identifies the subject.
+        description: Exact name of the job whose image.json identifies the subject. Empty
+          when the consumer names the image with subject-reference instead; exactly one of
+          the two.
+        default: ''
+      subject-reference:
+        type: string
+        description: 'The image this job acts on, written as repository@sha256:<digest>, for
+          a consumer acting on an image this pipeline did not build. Exactly one of this and
+          build-job: neither is a default the other can imply, so the job checks at run time
+          and names both in either failure. When this is set the job writes the record a build
+          would have written into its own artefact root, so a downstream job reads one shape
+          (section 9.1).'
+        regex: ^$|^[a-z0-9.-]+(:[0-9]+)?(/[a-z0-9._-]+)+@sha256:[0-9a-f]{64}$
+        default: ''
       build-component:
         type: string
         description: Component name the build job writes its artifacts under.
@@ -3767,26 +4459,34 @@ components:
         - gitlab-linted
         - runtime-tested
         - integration-tested
-      verified_at: 2026/09/17
-      revision: 1.2.0
+      verified_at: 2026/09/18
+      revision: 1.3.0
       environment: 'gitlab.example.com 18.9.1-ee, POST /api/v4/projects/:id/ci/lint. Executed
         on the originating estate, 2026/09: three consumer projects built and pushed to a
         Quay 3.15.7 registry with an internally issued certificate, one of them running every
         job this composition creates on a default-branch push, green through to a signature
-        and two attestations in the registry.'
-      notes: 'Failure semantics: a finding at or above severity-threshold fails the job in
-        blocking mode and is recorded in advisory mode. A scanner crash, a database that did
-        not download, an empty report or a report missing its SchemaVersion marker fails the
-        job in BOTH modes. Unfixed vulnerabilities gate by default, unlike the predecessor
-        template, which set TRIVY_IGNORE_UNFIXED true. gitlab-linted through the CI Lint API;
-        no job ran. runtime-tested: the scan wrapper has unit tests, and trivy''s --download-db-only,
-        convert-to-sarif, convert-to-template and version extraction were executed against
-        the pinned image digest on 2026/09/15. Status: experimental, because no consumer pipeline
-        has run this component on 1.0.0-rc.2. `released` in this repository means a consumer
-        job executed green, not that the component looks finished. a consumer''s build source
-        is tags-only, so nothing was built for it to scan. Evidence: green against an image
-        in that registry, and blocking on a second consumer whose upstream base carried 7
-        critical and 121 high findings, where it stopped the chain. Both are runs; the second
+        and two attestations in the registry. Each was repinned to 1.3.0 and re-run green
+        on that tag.'
+      notes: 'Exactly one of build-job and subject-reference. build-job reads the producer''s
+        image.json from its artifacts; subject-reference names an image this pipeline did
+        not build, and the job then writes the same record into its own artefact root. Neither
+        or both fails the job, naming both inputs. Failure semantics: a finding at or above
+        severity-threshold fails the job in blocking mode and is recorded in advisory mode.
+        A scanner crash, a database that did not download, an empty report or a report missing
+        its SchemaVersion marker fails the job in BOTH modes. Unfixed vulnerabilities gate
+        by default, unlike the predecessor template, which set TRIVY_IGNORE_UNFIXED true.
+        gitlab-linted through the CI Lint API; no job ran. runtime-tested: the scan wrapper
+        has unit tests, and trivy''s --download-db-only, convert-to-sarif, convert-to-template
+        and version extraction were executed against the pinned image digest on 2026/09/15.
+        `released` in this repository means a consumer job executed green, not that the component
+        looks finished. Both halves of the input pair have now run. On the build-job path,
+        as the third brick of kit B included directly rather than through a composition, the
+        job scanned the digest the same pipeline''s build wrote into image.json. On the subject-reference
+        path, in a jobset with no build job at all and therefore `needs: []`, it scanned an
+        image an earlier pipeline had promoted and downloaded no artifact from any job. Each
+        run recorded its own reference in scan-result.json''s subject. Evidence: green against
+        an image in that registry, and blocking on a second consumer whose upstream base carried
+        7 critical and 121 high findings, where it stopped the chain. Both are runs; the second
         is the one that shows the gate is not decorative.'
   - name: security-repository-audit
     kind: component
@@ -3839,9 +4539,15 @@ components:
         default: GROUP_SCAN_TOKEN
       execution-image:
         type: string
-        description: Approved execution image pinned by digest, carrying the gitleaks binary.
+        description: 'Approved execution image pinned by digest, carrying the gitleaks binary.
           The Terraform checks need bash, jq, git and curl, which the job adds.
-        regex: ^.+@sha256:[0-9a-f]{64}$
+
+          A leading `$UPPER_SNAKE/` is accepted, so a site that mirrors these images into
+          its own registry names that registry once as a group variable and passes `$CI_TPL_MIRROR/<path>@sha256:...`
+          here. GitLab expands a CI variable in `image:` at job time. The digest stays in
+          this value rather than in the variable: what runs is then still reviewable in the
+          consumer file.'
+        regex: ^(\$[A-Z][A-Z0-9_]*/)?[A-Za-z0-9][A-Za-z0-9._/:-]*@sha256:[0-9a-f]{64}$
         default: docker.io/zricethezav/gitleaks@sha256:0e99e8821643ea5b235718642b93bb32486af9c8162c8b8731f7cbdc951a7f46
       runner-tags:
         type: array
@@ -3961,9 +4667,15 @@ components:
         default: .
       execution-image:
         type: string
-        description: Approved semgrep image pinned by digest. The default is the estate mirror
+        description: 'Approved semgrep image pinned by digest. The default is the estate mirror
           of semgrep/semgrep:1.79.0.
-        regex: ^.+@sha256:[0-9a-f]{64}$
+
+          A leading `$UPPER_SNAKE/` is accepted, so a site that mirrors these images into
+          its own registry names that registry once as a group variable and passes `$CI_TPL_MIRROR/<path>@sha256:...`
+          here. GitLab expands a CI variable in `image:` at job time. The digest stays in
+          this value rather than in the variable: what runs is then still reviewable in the
+          consumer file.'
+        regex: ^(\$[A-Z][A-Z0-9_]*/)?[A-Za-z0-9][A-Za-z0-9._/:-]*@sha256:[0-9a-f]{64}$
         default: docker.io/semgrep/semgrep@sha256:570305f199ab668295ac0921667263cc03dcc3cbd7a8099866d3699cc0f2cdcc
       runner-tags:
         type: array
@@ -4100,9 +4812,15 @@ components:
         type: string
         description: 'Approved Syft image pinned by digest. The -debug variant is required:
           the default image is built FROM scratch and has no shell for the runner to execute
-          a script with.'
+          a script with.
+
+          A leading `$UPPER_SNAKE/` is accepted, so a site that mirrors these images into
+          its own registry names that registry once as a group variable and passes `$CI_TPL_MIRROR/anchore/syft@sha256:...`
+          here. GitLab expands a CI variable in `image:` at job time. The digest stays in
+          this value rather than in the variable: what runs is then still reviewable in the
+          consumer file.'
         default: docker.io/anchore/syft@sha256:c5a32143787730c72c58aee4227d9b0242ccc463aa42214b26e2b18f692c1a71
-        regex: ^.+@sha256:[0-9a-f]{64}$
+        regex: ^(\$[A-Z][A-Z0-9_]*/)?[A-Za-z0-9][A-Za-z0-9._/:-]*@sha256:[0-9a-f]{64}$
       registry-username-variable:
         type: string
         description: Name of the CI variable holding the registry username. The name, never
@@ -4146,9 +4864,21 @@ components:
           - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG
       build-job:
         type: string
-        description: 'Exact name of the job that built the image, whose image.json identifies
-          the subject. Required: the SBOM describes one immutable digest, never a tag resolved
-          at scan time.'
+        description: Exact name of the job that built the image, whose image.json identifies
+          the subject. Empty when the consumer names the image with subject-reference instead;
+          exactly one of the two. Either way the SBOM describes one immutable digest, never
+          a tag resolved at scan time.
+        default: ''
+      subject-reference:
+        type: string
+        description: 'The image this job acts on, written as repository@sha256:<digest>, for
+          a consumer acting on an image this pipeline did not build. Exactly one of this and
+          build-job: neither is a default the other can imply, so the job checks at run time
+          and names both in either failure. When this is set the job writes the record a build
+          would have written into its own artefact root, so a downstream job reads one shape
+          (section 9.1).'
+        regex: ^$|^[a-z0-9.-]+(:[0-9]+)?(/[a-z0-9._-]+)+@sha256:[0-9a-f]{64}$
+        default: ''
       build-component:
         type: string
         description: Component name the build job writes its artifacts under, which is the
@@ -4207,24 +4937,28 @@ components:
         - gitlab-linted
         - runtime-tested
         - integration-tested
-      verified_at: 2026/09/17
-      revision: 1.2.0
+      verified_at: 2026/09/18
+      revision: 1.3.0
       environment: 'gitlab.example.com 18.9.1-ee, POST /api/v4/projects/:id/ci/lint. Executed
         on the originating estate, 2026/09: three consumer projects built and pushed to a
         Quay 3.15.7 registry with an internally issued certificate, one of them running every
         job this composition creates on a default-branch push, green through to a signature
-        and two attestations in the registry.'
-      notes: 'gitlab-linted: the merged configuration was compiled through the CI Lint API
-        with defaults, with two instances, and with the producer removed. No job ran. runtime-tested:
-        runtime/scan/scan.sh has unit tests for the identity, subject and completeness checks,
-        and the syft invocation, its two output flags and the version extraction were executed
-        against the pinned image digest on 2026/09/15. The component''s own job has never
-        been executed in CI. Status: experimental, because no consumer pipeline has run this
-        component on 1.0.0-rc.2. `released` in this repository means a consumer job executed
-        green, not that the component looks finished. a consumer''s build source is tags-only,
-        so no image existed to describe. Evidence: catalogued an image held in that registry.
-        The SBOM stays a job artifact; the signing job is what puts it in the registry, as
-        a cosign attestation.'
+        and two attestations in the registry. Each was repinned to 1.3.0 and re-run green
+        on that tag.'
+      notes: 'Exactly one of build-job and subject-reference. build-job reads the producer''s
+        image.json from its artifacts; subject-reference names an image this pipeline did
+        not build, and the job then writes the same record into its own artefact root. Neither
+        or both fails the job, naming both inputs. gitlab-linted: the merged configuration
+        was compiled through the CI Lint API with defaults, with two instances, and with the
+        producer removed. No job ran. runtime-tested: runtime/scan/scan.sh has unit tests
+        for the identity, subject and completeness checks, and the syft invocation, its two
+        output flags and the version extraction were executed against the pinned image digest
+        on 2026/09/15. `released` in this repository means a consumer job executed green,
+        not that the component looks finished. Evidence: catalogued an image held in that
+        registry. The SBOM stays a job artifact; the signing job is what puts it in the registry,
+        as a cosign attestation. On 1.3.0 the component also ran included on its own, outside
+        any composition, as the second brick of kit B: it read the digest out of the build''s
+        image.json and recorded that image as its subject, with 14 components catalogued.'
   - name: security-sbom-upload-dtrack
     kind: component
     path: templates/security-sbom-upload-dtrack/template.yml
@@ -4240,9 +4974,15 @@ components:
         default: scan
       execution-image:
         type: string
-        description: Approved Python execution image pinned by digest.
+        description: 'Approved Python execution image pinned by digest.
+
+          A leading `$UPPER_SNAKE/` is accepted, so a site that mirrors these images into
+          its own registry names that registry once as a group variable and passes `$CI_TPL_MIRROR/<path>@sha256:...`
+          here. GitLab expands a CI variable in `image:` at job time. The digest stays in
+          this value rather than in the variable: what runs is then still reviewable in the
+          consumer file.'
         default: docker.io/python@sha256:cd7c412d000912f29075a1b8803e43cb2f38bb67f104019df526df5ceaf30569
-        regex: ^.+@sha256:[0-9a-f]{64}$
+        regex: ^(\$[A-Z][A-Z0-9_]*/)?[A-Za-z0-9][A-Za-z0-9._/:-]*@sha256:[0-9a-f]{64}$
       runner-tags:
         type: array
         description: Runner selection from the estate profile.
@@ -4367,9 +5107,15 @@ components:
         default: .
       execution-image:
         type: string
-        description: Approved gitleaks image pinned by digest. The default is the estate mirror
-          of zricethezav/gitleaks:v8.21.2.
-        regex: ^.+@sha256:[0-9a-f]{64}$
+        description: 'Approved gitleaks image pinned by digest. The default is the estate
+          mirror of zricethezav/gitleaks:v8.21.2.
+
+          A leading `$UPPER_SNAKE/` is accepted, so a site that mirrors these images into
+          its own registry names that registry once as a group variable and passes `$CI_TPL_MIRROR/<path>@sha256:...`
+          here. GitLab expands a CI variable in `image:` at job time. The digest stays in
+          this value rather than in the variable: what runs is then still reviewable in the
+          consumer file.'
+        regex: ^(\$[A-Z][A-Z0-9_]*/)?[A-Za-z0-9][A-Za-z0-9._/:-]*@sha256:[0-9a-f]{64}$
         default: docker.io/zricethezav/gitleaks@sha256:0e99e8821643ea5b235718642b93bb32486af9c8162c8b8731f7cbdc951a7f46
       runner-tags:
         type: array
@@ -4481,9 +5227,15 @@ components:
         default: attest
       execution-image:
         type: string
-        description: Approved Python execution image pinned by digest.
+        description: 'Approved Python execution image pinned by digest.
+
+          A leading `$UPPER_SNAKE/` is accepted, so a site that mirrors these images into
+          its own registry names that registry once as a group variable and passes `$CI_TPL_MIRROR/<path>@sha256:...`
+          here. GitLab expands a CI variable in `image:` at job time. The digest stays in
+          this value rather than in the variable: what runs is then still reviewable in the
+          consumer file.'
         default: docker.io/python@sha256:cd7c412d000912f29075a1b8803e43cb2f38bb67f104019df526df5ceaf30569
-        regex: ^.+@sha256:[0-9a-f]{64}$
+        regex: ^(\$[A-Z][A-Z0-9_]*/)?[A-Za-z0-9][A-Za-z0-9._/:-]*@sha256:[0-9a-f]{64}$
       runner-tags:
         type: array
         description: Runner selection from the estate profile.
@@ -4507,7 +5259,20 @@ components:
           - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG
       build-job:
         type: string
-        description: Exact name of the job whose image.json identifies the subject.
+        description: Exact name of the job whose image.json identifies the subject. Empty
+          when the consumer names the image with subject-reference instead; exactly one of
+          the two.
+        default: ''
+      subject-reference:
+        type: string
+        description: 'The image this job acts on, written as repository@sha256:<digest>, for
+          a consumer acting on an image this pipeline did not build. Exactly one of this and
+          build-job: neither is a default the other can imply, so the job checks at run time
+          and names both in either failure. When this is set the job writes the record a build
+          would have written into its own artefact root, so a downstream job reads one shape
+          (section 9.1).'
+        regex: ^$|^[a-z0-9.-]+(:[0-9]+)?(/[a-z0-9._-]+)+@sha256:[0-9a-f]{64}$
+        default: ''
       build-component:
         type: string
         description: Component name the build job writes its artifacts under.
@@ -4515,7 +5280,10 @@ components:
       sign-job:
         type: string
         description: 'Exact name of the signing job. A gate, not an artifact producer: Vigil
-          reads the signature from the registry, but it must exist first.'
+          reads the signature from the registry, but it must exist first. Empty means the
+          consumer signs nothing here, so there is no signature to wait for: the sync runs
+          ungated and says so in its log.'
+        default: ''
       gate-jobs:
         type: array
         description: Additional jobs that must succeed first, as needs entries with artifacts
@@ -4562,17 +5330,22 @@ components:
         - runtime-tested
       verified_at: 2026/09/15
       environment: gitlab.example.com 18.9.1-ee, project 18
-      notes: 'Failure semantics: an unreachable Vigil, a non-2xx webhook response, or an image.json
-        without a digest all fail the job. The predecessor swallowed the first two and carried
-        allow_failure true. The webhook path /api/v1/webhook/image-built is Vigil''s private
-        API and carries no declared version; a Vigil upgrade can break this component without
-        any change here. gitlab-linted through the CI Lint API; no job ran. runtime-tested:
-        unit tests cover the payload, the unreachable case and the rejected case against a
-        stubbed API. No request has been made to a real Vigil instance, and this estate''s
-        endpoint is unresolved in .ci/estate.yml. Status: experimental, because no consumer
-        pipeline has run this component on 1.0.0-rc.2. `released` in this repository means
-        a consumer job executed green, not that the component looks finished. No consumer
-        enables vigil.'
+      notes: 'Exactly one of build-job and subject-reference. build-job reads the producer''s
+        image.json from its artifacts; subject-reference names an image this pipeline did
+        not build, and the job then writes the same record into its own artefact root. Neither
+        or both fails the job, naming both inputs. sign-job is optional. Empty means the consumer
+        signs nothing here: no needs entry is emitted for it, the sync is not gated on a signature,
+        and the job log says so. Failure semantics: an unreachable Vigil, a non-2xx webhook
+        response, or an image.json without a digest all fail the job. The predecessor swallowed
+        the first two and carried allow_failure true. The webhook path /api/v1/webhook/image-built
+        is Vigil''s private API and carries no declared version; a Vigil upgrade can break
+        this component without any change here. gitlab-linted through the CI Lint API; no
+        job ran. runtime-tested: unit tests cover the payload, the unreachable case and the
+        rejected case against a stubbed API. No request has been made to a real Vigil instance,
+        and this estate''s endpoint is unresolved in .ci/estate.yml. Status: experimental,
+        because no consumer pipeline has run this component on 1.0.0-rc.2. `released` in this
+        repository means a consumer job executed green, not that the component looks finished.
+        No consumer enables vigil.'
   - name: security-verify-vigil
     kind: component
     path: templates/security-verify-vigil/template.yml
@@ -4588,9 +5361,15 @@ components:
         default: attest
       execution-image:
         type: string
-        description: Approved Python execution image pinned by digest.
+        description: 'Approved Python execution image pinned by digest.
+
+          A leading `$UPPER_SNAKE/` is accepted, so a site that mirrors these images into
+          its own registry names that registry once as a group variable and passes `$CI_TPL_MIRROR/<path>@sha256:...`
+          here. GitLab expands a CI variable in `image:` at job time. The digest stays in
+          this value rather than in the variable: what runs is then still reviewable in the
+          consumer file.'
         default: docker.io/python@sha256:cd7c412d000912f29075a1b8803e43cb2f38bb67f104019df526df5ceaf30569
-        regex: ^.+@sha256:[0-9a-f]{64}$
+        regex: ^(\$[A-Z][A-Z0-9_]*/)?[A-Za-z0-9][A-Za-z0-9._/:-]*@sha256:[0-9a-f]{64}$
       runner-tags:
         type: array
         description: Runner selection from the estate profile.
@@ -4614,7 +5393,20 @@ components:
           - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG
       build-job:
         type: string
-        description: Exact name of the job whose image.json identifies the subject.
+        description: Exact name of the job whose image.json identifies the subject. Empty
+          when the consumer names the image with subject-reference instead; exactly one of
+          the two.
+        default: ''
+      subject-reference:
+        type: string
+        description: 'The image this job acts on, written as repository@sha256:<digest>, for
+          a consumer acting on an image this pipeline did not build. Exactly one of this and
+          build-job: neither is a default the other can imply, so the job checks at run time
+          and names both in either failure. When this is set the job writes the record a build
+          would have written into its own artefact root, so a downstream job reads one shape
+          (section 9.1).'
+        regex: ^$|^[a-z0-9.-]+(:[0-9]+)?(/[a-z0-9._-]+)+@sha256:[0-9a-f]{64}$
+        default: ''
       build-component:
         type: string
         description: Component name the build job writes its artifacts under.
@@ -4685,17 +5477,20 @@ components:
         - runtime-tested
       verified_at: 2026/09/15
       environment: gitlab.example.com 18.9.1-ee, project 18
-      notes: 'This is a release gate and it fails closed. A Vigil that never returns a record
-        for the digest within max-wait, a response that is not an object, a response with
-        no usable readiness verdict, a response about a different digest, and a verdict below
-        require-readiness all fail the job. The predecessor exited 0 on the first three. The
-        readiness lookup is by digest taken from image.json. The predecessor derived one with
-        sed ''s/.*@//'', which returns a tag unchanged. gitlab-linted through the CI Lint
-        API; no job ran. runtime-tested: unit tests cover each failure path and the retry
-        loop against a stubbed API. No request has been made to a real Vigil instance. Status:
-        experimental, because no consumer pipeline has run this component on 1.0.0-rc.2. `released`
-        in this repository means a consumer job executed green, not that the component looks
-        finished. No consumer enables vigil.'
+      notes: 'Exactly one of build-job and subject-reference. build-job reads the producer''s
+        image.json from its artifacts; subject-reference names an image this pipeline did
+        not build, and the job then writes the same record into its own artefact root. Neither
+        or both fails the job, naming both inputs. This is a release gate and it fails closed.
+        A Vigil that never returns a record for the digest within max-wait, a response that
+        is not an object, a response with no usable readiness verdict, a response about a
+        different digest, and a verdict below require-readiness all fail the job. The predecessor
+        exited 0 on the first three. The readiness lookup is by digest taken from image.json.
+        The predecessor derived one with sed ''s/.*@//'', which returns a tag unchanged. gitlab-linted
+        through the CI Lint API; no job ran. runtime-tested: unit tests cover each failure
+        path and the retry loop against a stubbed API. No request has been made to a real
+        Vigil instance. Status: experimental, because no consumer pipeline has run this component
+        on 1.0.0-rc.2. `released` in this repository means a consumer job executed green,
+        not that the component looks finished. No consumer enables vigil.'
   - name: terraform-apply
     kind: component
     path: templates/terraform-apply/template.yml
@@ -4754,8 +5549,14 @@ components:
       execution-image:
         type: string
         description: 'Approved Terraform execution image pinned by digest. Must be the image
-          that produced the plan: the engine version is compared.'
-        regex: ^.+@sha256:[0-9a-f]{64}$
+          that produced the plan: the engine version is compared.
+
+          A leading `$UPPER_SNAKE/` is accepted, so a site that mirrors these images into
+          its own registry names that registry once as a group variable and passes `$CI_TPL_MIRROR/<path>@sha256:...`
+          here. GitLab expands a CI variable in `image:` at job time. The digest stays in
+          this value rather than in the variable: what runs is then still reviewable in the
+          consumer file.'
+        regex: ^(\$[A-Z][A-Z0-9_]*/)?[A-Za-z0-9][A-Za-z0-9._/:-]*@sha256:[0-9a-f]{64}$
         default: docker.io/hashicorp/terraform@sha256:5820b87995595425074f881500a037b0ccd41158d0d9b44d78f5f120612f2d3d
       runner-tags:
         type: array
@@ -4878,9 +5679,15 @@ components:
         default: .
       execution-image:
         type: string
-        description: Approved Terraform execution image pinned by digest. The default is hashicorp/terraform:1.11
-          (Terraform 1.11.4) through the estate's pull-through mirror.
-        regex: ^.+@sha256:[0-9a-f]{64}$
+        description: 'Approved Terraform execution image pinned by digest. The default is
+          hashicorp/terraform:1.11 (Terraform 1.11.4) through the estate''s pull-through mirror.
+
+          A leading `$UPPER_SNAKE/` is accepted, so a site that mirrors these images into
+          its own registry names that registry once as a group variable and passes `$CI_TPL_MIRROR/<path>@sha256:...`
+          here. GitLab expands a CI variable in `image:` at job time. The digest stays in
+          this value rather than in the variable: what runs is then still reviewable in the
+          consumer file.'
+        regex: ^(\$[A-Z][A-Z0-9_]*/)?[A-Za-z0-9][A-Za-z0-9._/:-]*@sha256:[0-9a-f]{64}$
         default: docker.io/hashicorp/terraform@sha256:5820b87995595425074f881500a037b0ccd41158d0d9b44d78f5f120612f2d3d
       runner-tags:
         type: array
@@ -4963,8 +5770,14 @@ components:
         type: string
         description: 'Packaging and upload image pinned by digest. The default is alpine/curl:8.12.1
           through the estate''s pull-through mirror: it carries curl, tar and awk with no
-          package installation at job time.'
-        regex: ^.+@sha256:[0-9a-f]{64}$
+          package installation at job time.
+
+          A leading `$UPPER_SNAKE/` is accepted, so a site that mirrors these images into
+          its own registry names that registry once as a group variable and passes `$CI_TPL_MIRROR/<path>@sha256:...`
+          here. GitLab expands a CI variable in `image:` at job time. The digest stays in
+          this value rather than in the variable: what runs is then still reviewable in the
+          consumer file.'
+        regex: ^(\$[A-Z][A-Z0-9_]*/)?[A-Za-z0-9][A-Za-z0-9._/:-]*@sha256:[0-9a-f]{64}$
         default: docker.io/alpine/curl@sha256:edbbe6f64e9890474df2864d7ee92941bb03ce17b07fd9cadc1d14e9453fc031
       runner-tags:
         type: array
@@ -5065,9 +5878,15 @@ components:
         default: GITLAB_TF_STATE_TOKEN
       execution-image:
         type: string
-        description: Approved Terraform execution image pinned by digest. The default is hashicorp/terraform:1.11
-          (Terraform 1.11.4) through the estate's pull-through mirror.
-        regex: ^.+@sha256:[0-9a-f]{64}$
+        description: 'Approved Terraform execution image pinned by digest. The default is
+          hashicorp/terraform:1.11 (Terraform 1.11.4) through the estate''s pull-through mirror.
+
+          A leading `$UPPER_SNAKE/` is accepted, so a site that mirrors these images into
+          its own registry names that registry once as a group variable and passes `$CI_TPL_MIRROR/<path>@sha256:...`
+          here. GitLab expands a CI variable in `image:` at job time. The digest stays in
+          this value rather than in the variable: what runs is then still reviewable in the
+          consumer file.'
+        regex: ^(\$[A-Z][A-Z0-9_]*/)?[A-Za-z0-9][A-Za-z0-9._/:-]*@sha256:[0-9a-f]{64}$
         default: docker.io/hashicorp/terraform@sha256:5820b87995595425074f881500a037b0ccd41158d0d9b44d78f5f120612f2d3d
       runner-tags:
         type: array
@@ -5224,9 +6043,15 @@ components:
         default: readonly
       execution-image:
         type: string
-        description: Approved Terraform execution image pinned by digest. The default is hashicorp/terraform:1.11
-          (Terraform 1.11.4) through the estate's pull-through mirror.
-        regex: ^.+@sha256:[0-9a-f]{64}$
+        description: 'Approved Terraform execution image pinned by digest. The default is
+          hashicorp/terraform:1.11 (Terraform 1.11.4) through the estate''s pull-through mirror.
+
+          A leading `$UPPER_SNAKE/` is accepted, so a site that mirrors these images into
+          its own registry names that registry once as a group variable and passes `$CI_TPL_MIRROR/<path>@sha256:...`
+          here. GitLab expands a CI variable in `image:` at job time. The digest stays in
+          this value rather than in the variable: what runs is then still reviewable in the
+          consumer file.'
+        regex: ^(\$[A-Z][A-Z0-9_]*/)?[A-Za-z0-9][A-Za-z0-9._/:-]*@sha256:[0-9a-f]{64}$
         default: docker.io/hashicorp/terraform@sha256:5820b87995595425074f881500a037b0ccd41158d0d9b44d78f5f120612f2d3d
       runner-tags:
         type: array
@@ -5476,19 +6301,74 @@ pipelines:
           - default-branch-and-tags
           - tags-only
         default: default-branch-and-tags
+      enable-gitleaks:
+        type: boolean
+        description: Run secret detection. Off drops the job and its gate on the signing job.
+        default: true
+      enable-semgrep:
+        type: boolean
+        description: Run the SAST scan. Off drops the job and its gate on the signing job.
+          An empty semgrep-rules has the same effect, so a project that has not chosen a ruleset
+          gets no scan rather than an uncompilable pipeline.
+        default: true
+      enable-filesystem-trivy:
+        type: boolean
+        description: Run the filesystem scan. Off drops the job and its gate on the signing
+          job.
+        default: true
+      enable-lockfiles:
+        type: boolean
+        description: Run the lockfile reproducibility check. Off drops the job and its gate
+          on the signing job. An empty lockfiles has the same effect.
+        default: true
+      enable-syft:
+        type: boolean
+        description: 'Produce the authoritative SBOM. Off also drops the signing job, the
+          Dependency-Track upload and the Vigil jobs, which read the SBOM or depend on something
+          that does: nothing signs or publishes evidence that was never produced.'
+        default: true
+      enable-image-trivy:
+        type: boolean
+        description: 'Scan the built image. Off also drops the signing job and the Vigil jobs,
+          which attest the scan result, and removes the scan gate from the promotion. An image
+          no one scanned can then be promoted: that is the consequence of turning this off,
+          not an oversight.'
+        default: true
+      enable-cosign:
+        type: boolean
+        description: Sign the digest and attach the SBOM and scan attestations. Off also drops
+          the Vigil jobs and the signature gate on the promotion; set require-signatures to
+          false as well, or the promotion refuses a digest with no signature beside it.
+        default: true
+      enable-promote:
+        type: boolean
+        description: Promote the digest that passed into the release project. Off ends the
+          pipeline after attest, leaving the candidate where the build pushed it.
+        default: true
       semgrep-rules:
         type: string
-        description: 'Rule source for the SAST scan, passed to `semgrep --config`. Required,
-          with no default, so the ruleset is a deliberate choice: a path in the consumer checkout
-          is pinned, a registry pack is fetched live.'
+        description: Rule source for the SAST scan, passed to `semgrep --config`. A path in
+          the consumer checkout is pinned, a registry pack is fetched live. Empty skips the
+          scan, the same as enable-semgrep false; a project that runs the SAST brick states
+          its ruleset, since inferring one is a choice made on the project's behalf.
+        default: ''
       lockfiles:
         type: string
-        description: 'Comma-separated list of every lockfile that must exist and be pinned,
-          each relative to working-directory. Required: inferring the set from the checkout
-          root reports a monorepo as having no dependencies at all. A project that genuinely
-          has none -- a stdlib-only Go module, whose go.sum is empty -- declares the literal
-          `none`, which cannot be combined with a path. An empty value stays an error: not
-          filling this in and having nothing to fill in are different answers.'
+        description: Comma-separated list of every lockfile that must exist and be pinned,
+          each relative to working-directory. Inferring the set from the checkout root reports
+          a monorepo as having no dependencies at all, so the set is declared. A project that
+          genuinely has none -- a stdlib-only Go module, whose go.sum is empty -- declares
+          the literal `none`, which cannot be combined with a path. Empty skips the check,
+          the same as enable-lockfiles false.
+        default: ''
+      secrets-policy-mode:
+        type: string
+        description: '`blocking` fails the pipeline on a secret-detection finding. `advisory`
+          records findings and still fails on a scanner that could not run.'
+        options:
+          - blocking
+          - advisory
+        default: blocking
       sast-policy-mode:
         type: string
         description: '`blocking` fails the pipeline on a SAST finding at or above the threshold.
@@ -5508,6 +6388,44 @@ pipelines:
           - medium
           - low
         default: high
+      filesystem-policy-mode:
+        type: string
+        description: '`blocking` fails the pipeline on a filesystem finding at or above scan-severity.
+          `advisory` records findings and still fails on a scanner that could not run.'
+        options:
+          - blocking
+          - advisory
+        default: blocking
+      image-policy-mode:
+        type: string
+        description: '`blocking` fails the pipeline on an image finding at or above scan-severity,
+          which is what keeps an unfit digest out of the release project. `advisory` records
+          findings and still fails on a scanner that could not run.'
+        options:
+          - blocking
+          - advisory
+        default: blocking
+      filesystem-ignore-unfixed:
+        type: boolean
+        description: 'Ignore filesystem findings with no fix available. The default keeps
+          them gating. Two inputs rather than one because the two bricks declare the input
+          with different types: security-filesystem-trivy takes a boolean and security-image-trivy
+          takes a string, and an input forwarded at the wrong type is rejected when the include
+          resolves.'
+        default: false
+      image-ignore-unfixed:
+        type: string
+        description: Ignore image findings with no fix available. The default keeps them gating.
+        options:
+          - 'true'
+          - 'false'
+        default: 'false'
+      push-candidate:
+        type: boolean
+        description: Push the build result to the candidate registry. False builds only, produces
+          no image.json and leaves nothing for the rest of the chain to consume, so it is
+          useful with every brick after build switched off.
+        default: true
       smoke-test:
         type: string
         description: Run a Compose smoke test against the built digest before it is scanned,
@@ -5542,6 +6460,18 @@ pipelines:
         type: string
         description: Dependency-Track API base URL. Only read when dependency-track is true.
         default: ''
+      dependency-track-wait:
+        type: string
+        description: Wait for Dependency-Track to finish analysing the uploaded SBOM. False
+          uploads and returns, which makes the upload a record rather than a gate.
+        options:
+          - 'true'
+          - 'false'
+        default: 'true'
+      dependency-track-timeout:
+        type: number
+        description: Seconds to wait for that analysis before failing the job.
+        default: 600
       vigil:
         type: string
         description: Publish the release record to Vigil and require a readiness verdict before
@@ -5554,6 +6484,26 @@ pipelines:
         type: string
         description: Vigil base URL. Only read when vigil is true.
         default: ''
+      vigil-request-timeout:
+        type: number
+        description: Seconds the release-record publish waits for Vigil.
+        default: 120
+      vigil-require-readiness:
+        type: string
+        description: Lowest readiness verdict that lets the promotion proceed.
+        options:
+          - green
+          - amber
+          - yellow
+        default: green
+      vigil-max-wait:
+        type: number
+        description: Seconds to wait for that verdict before failing the job.
+        default: 300
+      vigil-poll-interval:
+        type: number
+        description: Seconds between readiness polls.
+        default: 15
       destination-project:
         type: string
         description: Harbor project the release is promoted into.
@@ -5562,6 +6512,15 @@ pipelines:
         type: string
         description: Tags applied to the promoted digest in the release project.
         default: $CI_COMMIT_TAG
+      require-signatures:
+        type: string
+        description: Refuse to promote a digest with no cosign signature beside it in the
+          candidate project. Leave it true unless enable-cosign is false, in which case the
+          promotion would refuse every digest.
+        options:
+          - 'true'
+          - 'false'
+        default: 'true'
       environment:
         type: string
         description: GitLab environment recorded by the promotion. One of the estate's names

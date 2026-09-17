@@ -7,6 +7,14 @@ minimum_gitlab: '18.9'
 # Retry policy: the `max-retries` input (0, 1 or 2, default 1) sets `retry: max`,
 # and `retry: when` is `runner_system_failure` and nothing else. A job killed by
 # its runner runs again; a failed gate never does.
+# Vulnerability database: `db-update-url` sets GRYPE_DB_UPDATE_URL, and
+# `db-archive` is imported with `grype db import` and turns GRYPE_DB_AUTO_UPDATE
+# and GRYPE_DB_REQUIRE_UPDATE_CHECK off, so an imported database means the scan
+# makes no call of its own. Both empty keeps `grype db update` against grype's
+# default listing. A mirror is a URL, not an OCI repository: grype's database v6
+# has no OCI distribution (grype v0.118.0). An archive older than grype's
+# max-allowed-built-age (120h) still fails the scan; that limit is deliberately
+# not an input.
 emitted_jobs:
   - pattern: '{instance}:security-filesystem-grype'
     stage: verify

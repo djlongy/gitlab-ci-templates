@@ -1,0 +1,22 @@
+---
+# Give one job back the stage barrier, for the combination that asked for no
+# edges at all.
+#
+# The other half of needs.yml beside it, under the same rules: a component that
+# builds `needs:` from inputs has no key at all when every one of those inputs
+# is empty, and a job with neither `needs:` nor `dependencies:` downloads every
+# earlier stage's artifacts. `dependencies: []` is section 8.6's source-only
+# job: nothing is downloaded, and the job is still held by its stage.
+#
+# It is a separate file because the choice is made by the `rules:` on an
+# include, and one file cannot drop a key: needs.yml always writes `needs:` and
+# this one always writes `dependencies:`, so the rules pick which file survives.
+spec:
+  inputs:
+    job-name:
+      type: string
+      description: Exact name of the job this barrier belongs to.
+      regex: '^[a-z][a-z0-9-]{0,47}:[a-z][a-z0-9-]*$'
+---
+"$[[ inputs.job-name ]]":
+  dependencies: []

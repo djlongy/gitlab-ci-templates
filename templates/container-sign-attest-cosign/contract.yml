@@ -70,6 +70,13 @@ validation:
     default-branch push, green through to a signature and two attestations
     in the registry.
   notes: >-
+    Exactly one of build-job and subject-reference. build-job reads the
+    producer's image.json from its artifacts; subject-reference names an image
+    this pipeline did not build, and the job then writes the same record into
+    its own artefact root. Neither or both fails the job, naming both inputs.
+    sbom-job and scan-job are optional. Empty means the consumer runs no such
+    producer: the signature is still made, the matching attestation is skipped
+    and the skip is logged, and no needs entry is emitted for it.
     Failure semantics, all hard: no ID token, a rejected Vault login, a login without a
     client token, a cosign download whose sha256 does not match
     runtime/sign/cosign_checksums.txt, an unreadable Transit key, a missing SBOM or

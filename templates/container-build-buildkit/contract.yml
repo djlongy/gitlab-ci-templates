@@ -10,6 +10,35 @@ minimum_gitlab: '18.9'
 # Retry policy: the `max-retries` input (0, 1 or 2, default 1) sets `retry: max`,
 # and `retry: when` is `runner_system_failure` and nothing else. A job killed by
 # its runner runs again; a failed gate never does.
+# Resource group: the `resource-group` input sets `resource_group` on the job.
+# Empty is the default and adds no group; a set value serialises this job across
+# every pipeline in the project, because a resource group is project-scoped.
+# Build secrets: the `build-secrets` input takes NAME=VARIABLE pairs and emits
+# `--secret id=NAME,src=<path>`, resolving VARIABLE with printenv. A secret never
+# reaches `--opt build-arg:`, which is recorded in the image history. VARIABLE
+# must be a file-type CI variable; an ordinary one holding the secret itself is
+# refused, because its value would land in the argv and so in the trace.
+# Ordering: the job declares neither `needs:` nor `dependencies:`. One of the
+# two files under templates/_needs/ supplies one of them, chosen by mutually
+# exclusive rules on the includes. `gate-jobs-set` false with
+# `upstream-image-job` empty keeps `dependencies: []` and the stage barrier,
+# which is what every consumer gets by default and what the compositions rely
+# on. Either input set instead gives `needs:` and no `dependencies:` (section
+# 8.5), and a job carrying `needs:` is no longer held by its stage, so
+# `gate-jobs` must then name every gate this build must not overtake (section
+# 8.8).
+# `gate-jobs-set` is a boolean beside the array because an array input cannot be
+# tested for emptiness in an include rule: an empty one never matches, and a
+# non-empty one is refused with `include:rule if invalid expression syntax`.
+# Nothing in the YAML can check one against the other, so the job does it:
+# runtime/builder/gate_inputs.sh fails before the build when they disagree, in
+# either direction, naming both inputs.
+# Upstream image: `upstream-image-job` names an earlier build job, and the job
+# reads that job's .ci-artifacts/<instance>/<component>/image.json, derived from
+# the name. Naming it creates the `needs:` edge, with `artifacts: true` and
+# without `optional: true`, so a parent a rule can filter out of the pipeline
+# cannot be used here: the non-optional edge fails pipeline creation for the
+# whole pipeline. Linted, never run: no consumer has built a two-image chain.
 emitted_jobs:
   - pattern: '{instance}:container-build-buildkit'
     stage: build
@@ -71,15 +100,15 @@ validation:
     - yaml-parsed
     - gitlab-linted
     - integration-tested
-  verified_at: 2026/09/17
-  revision: '1.2.0'
+  verified_at: 2026/09/18
+  revision: '1.3.0'
   environment: >-
     gitlab.example.com 18.9.1-ee, POST /api/v4/projects/:id/ci/lint.
     Executed on the originating estate, 2026/09: three consumer projects
     built and pushed to a Quay 3.15.7 registry with an internally issued
     certificate, one of them running every job this composition creates on a
     default-branch push, green through to a signature and two attestations
-    in the registry.
+    in the registry. Each was repinned to 1.3.0 and re-run green on that tag.
   notes: >-
     Failure semantics (section 10.1). The job fails when the image repository
     carries a tag or digest, when a tag alias is not a usable tag, when a build
@@ -97,3 +126,7 @@ validation:
     anchor through ca-bundle-variable. The trace carries buildctl v0.33.0
     and the digest it recorded in image.json; a second job then read the
     same digest back from the registry with regctl.
+    On 1.3.0 the component also ran included on its own, outside any
+    composition, as the first brick of kit B: it built and pushed a tagged
+    image, and the SBOM and image-scan jobs beside it read that digest out of
+    its image.json rather than resolving the tag again.

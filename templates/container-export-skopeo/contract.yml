@@ -92,6 +92,13 @@ validation:
     pipeline. The merge-request pipeline creates no export, because the mirror runs
     there as a dry run.
   notes: >-
+    An empty gate-jobs fails the job: nothing in the pipeline checked what is
+    about to be exported, and that is a release decision rather than a default.
+    allow-ungated: true turns the failure into a warning.
+    The gate list is gate-jobs, an array, like every other component's. The
+    scalar mirror-job it replaces still works and is added to the list, with a
+    deprecation warning in the job log; it goes away in the release after the
+    one that introduced gate-jobs here.
     Producers: list-job supplies the reference list and is consumed with artifacts
     true; mirror-job is a gate consumed with artifacts false, so nothing is exported
     unless the mirror succeeded. Neither is optional, and neither is implied by a

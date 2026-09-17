@@ -51,6 +51,10 @@ validation:
     - gitlab-linted
   verified_at: 2026/09/15
   notes: >-
+    Exactly one of build-job and subject-reference. build-job reads the
+    producer's image.json from its artifacts; subject-reference names an image
+    this pipeline did not build, and the job then writes the same record into
+    its own artefact root. Neither or both fails the job, naming both inputs.
     Consumer contract. The working directory must hold the compose file named by
     compose-file and a Makefile with the target named by make-target. Both were
     previously stated only in a header comment; the compose file is now checked

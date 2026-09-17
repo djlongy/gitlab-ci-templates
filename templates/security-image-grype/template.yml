@@ -1,11 +1,16 @@
 ---
-# Grype vulnerability scan of the authoritative SBOM for one built image.
+# Grype vulnerability scan of one built image, from its SBOM or from the image.
 #
-# The scan target is always the SBOM that security-sbom-syft produced, and it is
-# only scanned once its subject record agrees with the build's image.json. The
-# predecessor picked its target with `if [ -f "sbom.cdx.json" ]`, so any earlier
-# job that left a file with that name silently redirected the scan, with no
-# subject validation at all (section 9.2, audit 5.2).
+# With `sbom-job` set the target is the SBOM that security-sbom-syft produced,
+# and it is only scanned once its subject record agrees with the build's
+# image.json. With `sbom-job` empty there is no SBOM to scan, so the target is
+# the image reference in image.json and grype pulls it from the registry.
+#
+# Which of the two is never guessed at. The predecessor picked its target with
+# `if [ -f "sbom.cdx.json" ]`, so any earlier job that left a file with that
+# name silently redirected the scan, with no subject validation at all
+# (section 9.2, audit 5.2). Here the mode comes from the input, and the subject
+# comes from image.json in both modes.
 
 #### Public interface ####
 spec:
@@ -25,8 +30,15 @@ spec:
         the default image is built FROM scratch and has no shell. Keep the
         client no older than the database schema it downloads, or `db update`
         fails and every scan writes an empty report.
+
+        A leading `$UPPER_SNAKE/` is accepted, so a site that mirrors these
+        images into its own registry names that registry once as a group
+        variable and passes `$CI_TPL_MIRROR/<path>@sha256:...` here.
+        GitLab expands a CI variable in `image:` at job time. The digest stays
+        in this value rather than in the variable: what runs is then still
+        reviewable in the consumer file.
       default: 'docker.io/anchore/grype@sha256:a3166cb9ec689737c4c7099c78dbd3728ca22db73d5a99c9a0b582e42d5b0926'
-      regex: '^.+@sha256:[0-9a-f]{64}$'
+      regex: '^(\$[A-Z][A-Z0-9_]*/)?[A-Za-z0-9][A-Za-z0-9._/:-]*@sha256:[0-9a-f]{64}$'
     runner-tags:
       type: array
       description: Runner selection from the estate profile.
@@ -39,6 +51,30 @@ spec:
         failed gate.
       default: 1
       options: [0, 1, 2]
+    db-update-url:
+      type: string
+      description: >-
+        URL grype checks for a vulnerability database, exported as
+        GRYPE_DB_UPDATE_URL. Empty keeps grype's own default,
+        https://grype.anchore.io/databases, which reaches the public internet;
+        a site with no egress points this at its mirror of that listing. This is
+        the counterpart of the trivy components' db-repository, and it is a URL
+        rather than an OCI repository because grype's database v6 is
+        distributed over HTTPS and has no OCI form (grype v0.118.0,
+        grype/db/v6/distribution/config.go).
+      default: ''
+    db-archive:
+      type: string
+      description: >-
+        A database archive to import before scanning, as a local path or a URL,
+        handed to `grype db import`. When set the job imports it, exports
+        GRYPE_DB_AUTO_UPDATE=false and GRYPE_DB_REQUIRE_UPDATE_CHECK=false, and
+        makes no call of its own: that is what an air-gapped scan needs, since
+        db-update-url still requires something to answer. Empty keeps the
+        current behaviour, `grype db update` against whatever db-update-url
+        resolves to. A URL with a `checksum=sha256:...` query parameter is
+        verified by grype against that digest.
+      default: ''
     run-rules:
       type: array
       description: Job eligibility set by the composition.
@@ -50,7 +86,22 @@ spec:
       type: string
       description: >-
         Exact name of the job whose image.json states the image this scan is
-        meant to cover. Used to validate the SBOM's subject, not as a scan target.
+        meant to cover. In SBOM mode it validates the SBOM's subject rather than
+        being the scan target; in image mode it IS the target. Empty when the
+        consumer names the image with subject-reference instead; exactly one of
+        the two.
+      default: ''
+    subject-reference:
+      type: string
+      description: >-
+        The image this job acts on, written as repository@sha256:<digest>, for
+        a consumer acting on an image this pipeline did not build. Exactly one
+        of this and build-job: neither is a default the other can imply, so the
+        job checks at run time and names both in either failure. When this is
+        set the job writes the record a build would have written into its own
+        artefact root, so a downstream job reads one shape (section 9.1).
+      regex: '^$|^[a-z0-9.-]+(:[0-9]+)?(/[a-z0-9._-]+)+@sha256:[0-9a-f]{64}$'
+      default: ''
     build-component:
       type: string
       description: Component name the build job writes its artifacts under.
@@ -59,8 +110,35 @@ spec:
       type: string
       description: >-
         Exact name of the security-sbom-syft job whose sbom.cdx.json and
-        subject.json this scan consumes. Required: this component has no
-        image-scanning mode, so there is no file-existence fallback to get wrong.
+        subject.json this scan consumes. Empty selects image mode: grype pulls
+        the image named by the build's image.json and scans that instead. The
+        mode follows this input and nothing else, so no file left behind by an
+        earlier job can redirect the scan.
+      default: ''
+    registry-username-variable:
+      type: string
+      description: >-
+        Name of the CI variable holding the registry username, for image mode.
+        The name, never the value. The default is the estate's Harbor robot
+        variable, so a consumer already using that one passes nothing here.
+      regex: '^[A-Z][A-Z0-9_]*$'
+      default: 'HARBOR_USER'
+    registry-password-variable:
+      type: string
+      description: >-
+        Name of the CI variable holding the registry password or robot token.
+        The name, never the value.
+      regex: '^[A-Z][A-Z0-9_]*$'
+      default: 'HARBOR_PASSWORD'
+    ca-bundle-variable:
+      type: string
+      description: >-
+        Name of a CI variable holding a PEM bundle to trust before any registry
+        call, for a registry whose certificate an internal authority issued. A
+        file variable (the value is a path) or an ordinary one (the value is the
+        PEM) both work. Empty skips it, and nothing is downloaded either way.
+      regex: '^$|^[A-Z][A-Z0-9_]*$'
+      default: ''
     gate-jobs:
       type: array
       description: >-
@@ -86,6 +164,46 @@ spec:
       default: 'false'
       options: ['true', 'false']
 ---
+# A `needs:` entry cannot name an empty job, so the list is assembled in
+# templates/_needs/needs.yml and this component includes the one
+# combination the consumer's inputs describe.
+include:
+  - local: '/templates/_needs/needs.yml'
+    inputs:
+      job-name: '$[[ inputs.instance ]]:security-image-grype'
+      gate-jobs: $[[ inputs.gate-jobs ]]
+      producer-needs:
+        - job: '$[[ inputs.build-job ]]'
+          artifacts: true
+        - job: '$[[ inputs.sbom-job ]]'
+          artifacts: true
+    rules:
+      - if: '"$[[ inputs.build-job ]]" != "" && "$[[ inputs.sbom-job ]]" != ""'
+  - local: '/templates/_needs/needs.yml'
+    inputs:
+      job-name: '$[[ inputs.instance ]]:security-image-grype'
+      gate-jobs: $[[ inputs.gate-jobs ]]
+      producer-needs:
+        - job: '$[[ inputs.build-job ]]'
+          artifacts: true
+    rules:
+      - if: '"$[[ inputs.build-job ]]" != "" && "$[[ inputs.sbom-job ]]" == ""'
+  - local: '/templates/_needs/needs.yml'
+    inputs:
+      job-name: '$[[ inputs.instance ]]:security-image-grype'
+      gate-jobs: $[[ inputs.gate-jobs ]]
+      producer-needs:
+        - job: '$[[ inputs.sbom-job ]]'
+          artifacts: true
+    rules:
+      - if: '"$[[ inputs.build-job ]]" == "" && "$[[ inputs.sbom-job ]]" != ""'
+  - local: '/templates/_needs/needs.yml'
+    inputs:
+      job-name: '$[[ inputs.instance ]]:security-image-grype'
+      gate-jobs: $[[ inputs.gate-jobs ]]
+    rules:
+      - if: '"$[[ inputs.build-job ]]" == "" && "$[[ inputs.sbom-job ]]" == ""'
+
 "$[[ inputs.instance ]]:security-image-grype":
   stage: $[[ inputs.stage ]]
   image:
@@ -100,20 +218,41 @@ spec:
     FF_DISABLE_UMASK_FOR_DOCKER_EXECUTOR: 'true'
     CI_TPL_RUNTIME_DIR: /tmp/ci-runtime
     CI_TPL_ARTIFACT_DIR: '.ci-artifacts/$[[ inputs.instance ]]/security-image-grype'
+    CI_TPL_DB_UPDATE_URL: $[[ inputs.db-update-url ]]
+    CI_TPL_DB_ARCHIVE: $[[ inputs.db-archive ]]
     CI_TPL_IDENTITY_FILE: '.ci-artifacts/$[[ inputs.instance ]]/$[[ inputs.build-component ]]/image.json'
     # security-sbom-syft is the one authoritative SBOM producer for an image
     # (section 9.2), so its artifact directory is fixed rather than an input.
     CI_TPL_SBOM_DIR: '.ci-artifacts/$[[ inputs.instance ]]/security-sbom-syft'
+    CI_TPL_SBOM_JOB: '$[[ inputs.sbom-job ]]'
+    CI_TPL_BUILD_JOB: '$[[ inputs.build-job ]]'
+    CI_TPL_SUBJECT_REFERENCE: '$[[ inputs.subject-reference ]]'
+    CI_TPL_DOCKER_CONFIG_DIR: '/tmp/ci-tpl-dockercfg'
+    CI_TPL_REGISTRY_USERNAME_VARIABLE: '$[[ inputs.registry-username-variable ]]'
+    CI_TPL_REGISTRY_PASSWORD_VARIABLE: '$[[ inputs.registry-password-variable ]]'
+    CI_TPL_CA_BUNDLE_VARIABLE: '$[[ inputs.ca-bundle-variable ]]'
     CI_TPL_POLICY_MODE: $[[ inputs.policy-mode ]]
     CI_TPL_SEVERITY_THRESHOLD: $[[ inputs.severity-threshold ]]
     CI_TPL_IGNORE_UNFIXED: '$[[ inputs.ignore-unfixed ]]'
-  needs:
-    - job: $[[ inputs.build-job ]]
-      artifacts: true
-    - job: $[[ inputs.sbom-job ]]
-      artifacts: true
-    - $[[ inputs.gate-jobs ]]
   before_script:
+    - |
+      # The database source, expressible in the pipeline rather than left to
+      # grype's built-in default. Exported only when set: an empty
+      # GRYPE_DB_UPDATE_URL is a URL of "", not an absent setting.
+      if [ -n "$CI_TPL_DB_UPDATE_URL" ]; then
+        GRYPE_DB_UPDATE_URL="$CI_TPL_DB_UPDATE_URL"
+        export GRYPE_DB_UPDATE_URL
+        echo "vulnerability database listing: $GRYPE_DB_UPDATE_URL"
+      fi
+      if [ -n "$CI_TPL_DB_ARCHIVE" ]; then
+        # A pre-fetched archive is the only shape that makes the scan itself
+        # call nothing: with auto-update on, grype checks the listing again at
+        # scan time whatever the database on disk says.
+        GRYPE_DB_AUTO_UPDATE=false
+        GRYPE_DB_REQUIRE_UPDATE_CHECK=false
+        export GRYPE_DB_AUTO_UPDATE GRYPE_DB_REQUIRE_UPDATE_CHECK
+        echo "vulnerability database archive: $CI_TPL_DB_ARCHIVE"
+      fi
     - |
       # BEGIN embed inline runtime/registry/image-json.sh
       #!/bin/sh
@@ -274,6 +413,39 @@ spec:
           ci_tpl_fail "'$1' is not a NAME=VALUE build argument"
       }
 
+      # A build secret is NAME=VARIABLE: the id BuildKit exposes the secret under, and
+      # the NAME of a file-type CI variable that holds it. The value is never an input
+      # and never a build argument: `--opt build-arg:` is recorded in the image
+      # history, so a certificate or a token passed that way ships inside the image
+      # and stays there. BuildKit mounts a `--secret` for one RUN step and writes it
+      # into no layer.
+      ci_tpl_require_build_secret() {
+          expr "$1" : '^[A-Za-z_][A-Za-z0-9_.-]*=[A-Z][A-Z0-9_]*$' >/dev/null && return 0
+          ci_tpl_fail "'$1' is not a NAME=VARIABLE build secret; VARIABLE names a file-type CI variable, never its value"
+      }
+
+      # Resolve one NAME=VARIABLE pair into the id=<name>,src=<path> form buildctl
+      # takes. printenv, never eval or an indirect expansion: the variable name is
+      # consumer input and must not become code. A GitLab file variable's value IS a
+      # path, so a value that is not a readable file is refused here; handing it to
+      # buildctl would mount the secret's own text as a filename and put it in the
+      # trace. Nothing in this function prints the file's contents.
+      ci_tpl_build_secret_argument() {
+          ci_tpl_require_build_secret "$1" || return 1
+          bs_id=${1%%=*}
+          bs_var=${1#*=}
+          bs_path=$(printenv "$bs_var") || bs_path=''
+          if [ -z "$bs_path" ]; then
+              ci_tpl_fail "build secret '$1' names \$${bs_var}, which is empty or not defined"
+              return 1
+          fi
+          if [ ! -f "$bs_path" ]; then
+              ci_tpl_fail "build secret '$1': \$${bs_var} is not a file-type CI variable, so its value is not a readable path"
+              return 1
+          fi
+          printf 'id=%s,src=%s\n' "$bs_id" "$bs_path"
+      }
+
       ci_tpl_json_array() {
           # Render a comma-separated list as a JSON array of strings.
           echo "$1" | awk -F, '{
@@ -348,12 +520,55 @@ spec:
           [ -n "$platforms" ] ||
               { ci_tpl_fail "$file records no platforms"; return 1; }
           case "$kind" in
-              manifest|index) ;;
-              *) ci_tpl_fail "$file subject_kind '$kind' is neither manifest nor index"; return 1 ;;
+              # `unresolved` is what ci_tpl_write_subject_record writes: the subject
+              # arrived as a reference the consumer typed, so nothing here inspected
+              # the registry and neither manifest nor index would be a fact.
+              manifest|index|unresolved) ;;
+              *) ci_tpl_fail "$file subject_kind '$kind' is not manifest, index or unresolved"; return 1 ;;
           esac
           [ -n "$created" ] ||
               { ci_tpl_fail "$file records no created_at"; return 1; }
           return 0
+      }
+
+      # Record a subject the consumer named rather than one this pipeline built.
+      #
+      # Same shape as a build's image.json so a downstream job reads one contract
+      # (section 9.1), with the two fields nothing here can know written as
+      # `unresolved`: no registry call was made, so the platform list and whether the
+      # reference points at a manifest or an index are not facts this job has.
+      # Arguments: artifact-dir reference
+      ci_tpl_write_subject_record() {
+          ci_tpl_write_image_json "$1" "${2%@*}" "${2##*@}" unresolved unresolved
+      }
+
+      # Which image.json this job acts on.
+      #
+      # Usually the build job's: the consumer named build-job, the artifact arrived,
+      # and the record is already on disk. A consumer scanning, signing or publishing
+      # an image this pipeline did not build names it with subject-reference instead,
+      # and then there is nothing to read: the record is written into this job's own
+      # artefact root.
+      #
+      # Exactly one of the two. Both set is a contradiction nobody can resolve;
+      # neither leaves the job with no subject at all. Either message names both.
+      # Arguments: build-job subject-reference build-identity-file own-artifact-dir
+      # Prints the path of the image.json to use.
+      ci_tpl_resolve_identity_file() {
+          if [ -n "$1" ] && [ -n "$2" ]; then
+              ci_tpl_fail "build-job and subject-reference are both set; this job takes exactly one (build-job '$1', subject-reference '$2')"
+              return 1
+          fi
+          if [ -z "$1" ] && [ -z "$2" ]; then
+              ci_tpl_fail "neither build-job nor subject-reference is set; this job takes exactly one: build-job names the job whose image.json states the subject, subject-reference names the image as repository@sha256:<digest>"
+              return 1
+          fi
+          if [ -z "$2" ]; then
+              echo "$3"
+              return 0
+          fi
+          ci_tpl_write_subject_record "$4" "$2" >&2 || return 1
+          echo "$4/image.json"
       }
 
       # Print the validated reference from an image.json.
@@ -426,6 +641,75 @@ spec:
           echo "${1%%/*}"
       }
       # END embed
+    - |
+      # BEGIN embed inline runtime/registry/ca-bundle.sh
+      #!/bin/sh
+      # Trust an extra certificate authority inside a job container.
+      #
+      # Its own file rather than part of image-json.sh because the signing component
+      # needs it and needs nothing else there: that job runs Python, not the shell
+      # image helpers, and embedding 250 lines of JSON handling to reach one function
+      # would be worse than either.
+      #
+      # It depends on nothing else here, deliberately: the signing component embeds
+      # this file and no other.
+      #
+      # Embedded verbatim by every component that talks to a registry over TLS;
+      # tests/runtime/registry/test_ca_bundle.py drives this copy.
+      # Trust one more certificate authority, for a registry issued by an internal
+      # one. The PEM comes from the CI variable named by CI_TPL_CA_BUNDLE_VARIABLE,
+      # which may be a GitLab file variable (the value is a path) or an ordinary one
+      # (the value is the PEM itself). Nothing is downloaded: a job that has to fetch
+      # its trust anchor cannot run at a site with no egress, which is the site that
+      # needs this input.
+      #
+      # Empty or unset skips it. A variable holding no certificate is an error rather
+      # than an empty success, because the job would otherwise fail later with a TLS
+      # error naming the registry instead of the bundle.
+      ci_tpl_trust_ca_bundle() {
+          [ -n "${CI_TPL_CA_BUNDLE_VARIABLE:-}" ] || return 0
+          bundle=$(printenv "$CI_TPL_CA_BUNDLE_VARIABLE") || bundle=''
+          if [ -z "$bundle" ]; then
+              echo "ERROR: ca-bundle-variable names \$${CI_TPL_CA_BUNDLE_VARIABLE}, which is empty or not defined" >&2
+              return 1
+          fi
+          pem=${CI_TPL_WORK:-/tmp}/ci-tpl-ca-bundle.pem
+          if [ -f "$bundle" ]; then
+              cat "$bundle" > "$pem"
+          else
+              printf '%s\n' "$bundle" > "$pem"
+          fi
+          certs=$(grep -c 'BEGIN CERTIFICATE' "$pem") || certs=0
+          if [ "$certs" -eq 0 ]; then
+              echo "ERROR: \$${CI_TPL_CA_BUNDLE_VARIABLE} carries no PEM certificate" >&2
+              return 1
+          fi
+          store=${CI_TPL_CA_STORE:-/etc/ssl/certs/ca-certificates.crt}
+          if cat "$pem" >> "$store" 2>/dev/null; then
+              echo "trusted ${certs} extra certificate(s) from \$${CI_TPL_CA_BUNDLE_VARIABLE}"
+              return 0
+          fi
+          # A non-root execution image cannot write the system store, and refusing
+          # there would mean the input works only for images that run as root.
+          # Combine the store with the extra anchors and name the copy in the three
+          # variables the clients in these jobs read: Go (buildctl, trivy, syft,
+          # cosign) reads SSL_CERT_FILE, python-requests reads REQUESTS_CA_BUNDLE and
+          # curl reads CURL_CA_BUNDLE.
+          combined=${CI_TPL_WORK:-/tmp}/ci-tpl-ca-combined.pem
+          if [ -r "$store" ]; then
+              cat "$store" "$pem" > "$combined"
+          else
+              cat "$pem" > "$combined"
+          fi
+          SSL_CERT_FILE=$combined
+          REQUESTS_CA_BUNDLE=$combined
+          CURL_CA_BUNDLE=$combined
+          export SSL_CERT_FILE REQUESTS_CA_BUNDLE CURL_CA_BUNDLE
+          echo "trusted ${certs} extra certificate(s) from \$${CI_TPL_CA_BUNDLE_VARIABLE}"
+          echo "the trust store at ${store} is not writable here, so SSL_CERT_FILE names ${combined}"
+      }
+      # END embed
+      ci_tpl_trust_ca_bundle || exit 1
     - |
       # BEGIN embed inline runtime/scan/scan.sh
       #!/bin/sh
@@ -706,14 +990,51 @@ spec:
     - |
       mkdir -p "$CI_TPL_ARTIFACT_DIR" || exit 1
       ci_tpl_write_scan_templates "$CI_TPL_RUNTIME_DIR" || exit 1
-      # Fails unless the SBOM's declared subject is the image under test.
-      CI_TPL_SUBJECT=$(ci_tpl_match_sbom_subject \
-        "$CI_TPL_SBOM_DIR/subject.json" "$CI_TPL_IDENTITY_FILE") || exit 1
+      # The mode is the input, never a file that happens to be on disk. Either
+      # way the subject comes from the build's image.json, so the two modes
+      # report the same identity for the same image.
+      # Exactly one of build-job and subject-reference. With a build job this is
+      # the artefact that arrived; with a reference it is a record written here.
+      CI_TPL_IDENTITY_FILE=$(ci_tpl_resolve_identity_file \
+        "$CI_TPL_BUILD_JOB" "$CI_TPL_SUBJECT_REFERENCE" \
+        "$CI_TPL_IDENTITY_FILE" "$CI_TPL_ARTIFACT_DIR") || exit 1
+      if [ -n "$CI_TPL_SBOM_JOB" ]; then
+        # Fails unless the SBOM's declared subject is the image under test.
+        CI_TPL_SUBJECT=$(ci_tpl_match_sbom_subject \
+          "$CI_TPL_SBOM_DIR/subject.json" "$CI_TPL_IDENTITY_FILE") || exit 1
+        CI_TPL_SCAN_TARGET="sbom:$CI_TPL_SBOM_DIR/sbom.cdx.json"
+        CI_TPL_TARGET_KIND=sbom
+      else
+        CI_TPL_SUBJECT=$(ci_tpl_image_reference "$CI_TPL_IDENTITY_FILE") || exit 1
+        # `registry:` and not a bare reference: grype would otherwise try the
+        # docker daemon first and fall back, and no daemon is attached here.
+        CI_TPL_SCAN_TARGET="registry:$CI_TPL_SUBJECT"
+        CI_TPL_TARGET_KIND=image
+        echo "no sbom-job is set: scanning the image itself"
+        # Credentials are used only when both are present: a public candidate
+        # registry needs none, and the same rule is what syft applies.
+        ci_tpl_load_registry_credentials
+        if [ -n "$CI_TPL_REGISTRY_USER" ] && [ -n "$CI_TPL_REGISTRY_PASSWORD" ]; then
+          # Exported here rather than declared as a job variable: nothing is
+          # pulled in SBOM mode, so nothing there needs a docker config.
+          DOCKER_CONFIG=$CI_TPL_DOCKER_CONFIG_DIR
+          export DOCKER_CONFIG
+          ci_tpl_write_registry_auth "$DOCKER_CONFIG" \
+            "$(ci_tpl_registry_host "$CI_TPL_SUBJECT")" || exit 1
+          echo "registry authentication configured for $(ci_tpl_registry_host "$CI_TPL_SUBJECT")"
+        fi
+      fi
       echo "scan subject: $CI_TPL_SUBJECT"
 
       # Hydrate the database loudly. A client too old for the current schema
       # fails here instead of writing an empty report the gate reads as clean.
-      /grype db update || exit 1
+      # An imported archive replaces the update entirely: importing and then
+      # updating would put the network call back.
+      if [ -n "$CI_TPL_DB_ARCHIVE" ]; then
+        /grype db import "$CI_TPL_DB_ARCHIVE" || exit 1
+      else
+        /grype db update || exit 1
+      fi
       # `grep X | sed s/X//` aborts the job when X is absent: grep exits 1 and
       # the runner's `set -eo pipefail` makes that the pipeline's status, so the
       # `:-` fallback below was unreachable. sed does both jobs and exits 0
@@ -729,7 +1050,7 @@ spec:
       fi
       # One pass, three outputs, and no --fail-on: a non-zero exit from grype is
       # an execution error and nothing else. The gate comes from the counts.
-      /grype "sbom:$CI_TPL_SBOM_DIR/sbom.cdx.json" \
+      /grype "$CI_TPL_SCAN_TARGET" \
         $CI_TPL_UNFIXED_FLAG \
         -o "json=$CI_TPL_ARTIFACT_DIR/grype-image.json" \
         -o "sarif=$CI_TPL_ARTIFACT_DIR/grype-image.sarif" \
@@ -742,7 +1063,7 @@ spec:
         "$CI_TPL_ARTIFACT_DIR/severities.txt" \
         "$CI_TPL_ARTIFACT_DIR/scan-result.json" \
         grype "${CI_TPL_SCANNER_VERSION:-unknown}" \
-        "$CI_TPL_SUBJECT" sbom \
+        "$CI_TPL_SUBJECT" "$CI_TPL_TARGET_KIND" \
         "$CI_TPL_SEVERITY_THRESHOLD" "$CI_TPL_POLICY_MODE" "$CI_TPL_IGNORE_UNFIXED" \
         "${CI_TPL_DB_UPDATED_AT:-unresolved}" \
         "$CI_TPL_ARTIFACT_DIR/grype-image.json" \

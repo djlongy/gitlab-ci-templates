@@ -121,7 +121,9 @@ def test_required_inputs_are_declared(component):
     assert declared["run-rules"]["type"] == "array"
 
     image = declared["execution-image"]
-    assert image["regex"] == r"^.+@sha256:[0-9a-f]{64}$"
+    assert image["regex"] == (
+        r"^(\$[A-Z][A-Z0-9_]*/)?[A-Za-z0-9][A-Za-z0-9._/:-]*@sha256:[0-9a-f]{64}$"
+    )
     assert DIGEST_PINNED.match(image["default"]), (
         f"{component}: the execution-image default is not digest-pinned. "
         "Section 1: a tag is not a digest."

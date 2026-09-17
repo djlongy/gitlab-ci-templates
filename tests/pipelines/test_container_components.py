@@ -26,6 +26,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
@@ -311,6 +312,32 @@ def test_the_smoke_test_lints_with_its_producer_and_its_service_producers():
 
 
 @needs_token
+def test_the_smoke_test_runs_against_an_image_it_did_not_build():
+    """Coupling: the subject may be named rather than produced here."""
+    reference = f"{REPOSITORY}@sha256:" + "ab" * 32
+    jobs = render.render(
+        SMOKE,
+        instance="api",
+        **{
+            "subject-reference": reference,
+            "image-identities": [
+                "API_IMAGE=.ci-artifacts/api/container-smoke-test/image.json"
+            ],
+            "run-rules": ALWAYS,
+        },
+    )
+    assert jobs["api:container-smoke-test"]["needs"] == []
+    script = "\n".join(jobs["api:container-smoke-test"]["before_script"])
+    assert "ci_tpl_resolve_identity_file" in script
+
+    result = lint_module.lint(
+        render.compose(["build", "test"], jobs), include_jobs=True, dry_run=True
+    )
+    assert result["valid"], result.get("errors")
+    assert names(result) == ["api:container-smoke-test"]
+
+
+@needs_token
 def test_the_smoke_test_fails_lint_when_its_producer_is_absent():
     """Section 8.10: the missing-producer case is validated before release. The
     old smoke-test template took its image from a free-text variable, so a
@@ -412,3 +439,206 @@ j:
 """
     result = lint_module.lint(config, include_jobs=True, dry_run=True)
     assert result["valid"], result.get("errors")
+
+
+# --- resource groups ---------------------------------------------------------
+
+
+@needs_token
+@pytest.mark.parametrize("template", [BUILDKIT, KO, JIB])
+def test_a_builder_carries_no_resource_group_by_default(template: Path):
+    """The empty default has to compile, or every existing consumer breaks on
+    the upgrade. What an empty key does at pipeline creation is not something a
+    lint can answer: a consumer pipeline answered it."""
+    rendered = render.render(template, instance="api", **{"image-repository": REPOSITORY})
+    job = next(iter(rendered.values()))
+    assert job["resource_group"] == ""
+    config = render.compose(["build"], rendered)
+    result = lint_module.lint(config, include_jobs=True, dry_run=True)
+    assert result["valid"], result.get("errors")
+    assert "resource_group: ''" in result["merged_yaml"], result["merged_yaml"]
+
+
+@needs_token
+@pytest.mark.parametrize("template", [BUILDKIT, KO, JIB])
+def test_a_builder_serialises_on_the_group_it_is_given(template: Path):
+    config = render.compose(
+        ["build"],
+        render.render(
+            template,
+            instance="api",
+            **{
+                "image-repository": REPOSITORY,
+                "resource-group": "runner-images-factory",
+            },
+        ),
+    )
+    result = lint_module.lint(config, include_jobs=True, dry_run=True)
+    assert result["valid"], result.get("errors")
+    assert "resource_group: runner-images-factory" in result["merged_yaml"]
+
+
+# --- build secrets -----------------------------------------------------------
+
+
+@needs_token
+def test_buildkit_accepts_build_secrets_and_keeps_them_out_of_the_build_args():
+    config = render.compose(
+        ["build"],
+        render.render(
+            BUILDKIT,
+            instance="api",
+            **{
+                "image-repository": REPOSITORY,
+                "build-args": ["BASE_REF=registry.example/base:1"],
+                "build-secrets": ["cert=ENTITLEMENT_PEM"],
+            },
+        ),
+    )
+    result = lint_module.lint(config, include_jobs=True, dry_run=True)
+    assert result["valid"], result.get("errors")
+    merged = result["merged_yaml"]
+    assert 'CI_TPL_BUILD_SECRETS: json ["cert=ENTITLEMENT_PEM"]' in merged
+    assert "build-arg:cert" not in merged
+
+
+# --- ordering: a stage barrier by default, edges only when asked (C12) -------
+
+
+def two_image_config(*, base_rules: list | None = None) -> str:
+    """base builds, child builds FROM what base pushed."""
+    return render.compose(
+        ["build"],
+        render.render(
+            BUILDKIT,
+            instance="base",
+            **{
+                "image-repository": REPOSITORY,
+                "run-rules": base_rules if base_rules is not None else ALWAYS,
+            },
+        ),
+        render.render(
+            BUILDKIT,
+            instance="child",
+            **{
+                "image-repository": REPOSITORY,
+                "run-rules": ALWAYS,
+                "upstream-image-job": "base:container-build-buildkit",
+            },
+        ),
+    )
+
+
+@pytest.mark.parametrize("template", [BUILDKIT, KO, JIB])
+def test_a_builder_asked_for_nothing_keeps_its_stage_barrier(template: Path):
+    """Section 8.6, and the reason the choice is made on an `include:` rather
+    than in the job body: a component cannot drop a key, so a builder that
+    built `needs:` from its inputs carried `needs:` for every consumer, empty
+    list and all, and lost the stage barrier for the ones that asked for
+    nothing."""
+    job = render.render(template, instance="api", **{"image-repository": REPOSITORY})[
+        f"api:{template.parent.name}"
+    ]
+    assert job["dependencies"] == []
+    assert "needs" not in job
+
+
+@pytest.mark.parametrize("template", [BUILDKIT, KO, JIB])
+def test_gate_jobs_turn_the_barrier_into_edges(template: Path):
+    """Section 8.5: the two keys are never both present."""
+    gates = [{"job": "api:security-secrets-gitleaks", "artifacts": False}]
+    job = render.render(
+        template,
+        instance="api",
+        **{
+            "image-repository": REPOSITORY,
+            "gate-jobs": gates,
+            "gate-jobs-set": True,
+        },
+    )[f"api:{template.parent.name}"]
+    assert job["needs"] == gates
+    assert "dependencies" not in job
+
+
+@pytest.mark.parametrize("template", [BUILDKIT, KO, JIB])
+def test_an_upstream_image_job_becomes_an_artifact_edge(template: Path):
+    """The edge has to download the parent's image.json, so `artifacts: true`,
+    and it comes first because it is the producer rather than a gate."""
+    gates = [{"job": "api:security-secrets-gitleaks", "artifacts": False}]
+    job = render.render(
+        template,
+        instance="api",
+        **{
+            "image-repository": REPOSITORY,
+            "gate-jobs": gates,
+            "gate-jobs-set": True,
+            "upstream-image-job": "base:container-build-buildkit",
+        },
+    )[f"api:{template.parent.name}"]
+    assert job["needs"] == [
+        {"job": "base:container-build-buildkit", "artifacts": True}
+    ] + gates
+    assert "dependencies" not in job
+
+
+@pytest.mark.parametrize("template", [BUILDKIT, KO, JIB])
+def test_an_upstream_image_job_alone_is_enough(template: Path):
+    """gate-jobs-set stays false: the upstream input selects the edges on its
+    own, because a string input can be tested for emptiness in a rule where an
+    array input cannot."""
+    job = render.render(
+        template,
+        instance="api",
+        **{
+            "image-repository": REPOSITORY,
+            "upstream-image-job": "base:container-build-buildkit",
+        },
+    )[f"api:{template.parent.name}"]
+    assert job["needs"] == [{"job": "base:container-build-buildkit", "artifacts": True}]
+    assert "dependencies" not in job
+
+
+@needs_token
+@pytest.mark.parametrize("template", [BUILDKIT, KO, JIB])
+def test_a_builder_at_its_defaults_lints_with_the_barrier(template: Path):
+    config = render.compose(
+        ["build"], render.render(template, instance="api", **{"image-repository": REPOSITORY})
+    )
+    result = lint_module.lint(config, include_jobs=True, dry_run=True)
+    assert result["valid"], result.get("errors")
+    # The parsed job, not a substring of the document: every builder embeds
+    # runtime/build/gate_inputs.sh, whose comments discuss the very keys this
+    # asserts over, so a text search answers a question about prose.
+    job = yaml.safe_load(result["merged_yaml"])[f"api:{template.parent.name}"]
+    assert "needs" not in job
+    assert job["dependencies"] == []
+
+
+@needs_token
+def test_a_child_build_can_name_the_parent_build_it_starts_from():
+    result = lint_module.lint(two_image_config(), include_jobs=True, dry_run=True)
+    assert result["valid"], result.get("errors")
+    assert names(result) == [
+        "base:container-build-buildkit",
+        "child:container-build-buildkit",
+    ]
+    merged = result["merged_yaml"]
+    assert "CI_TPL_UPSTREAM_IMAGE_JOB: base:container-build-buildkit" in merged
+    assert "CI_TPL_UPSTREAM_BUILD_ARG: BASE_REF" in merged
+
+
+@needs_token
+def test_a_parent_filtered_out_by_its_own_rules_fails_pipeline_creation():
+    """The limitation upstream-image-job carries, measured rather than quoted.
+    The edge it creates is not `optional: true`, so a parent a rule can remove
+    from the pipeline cannot be named here; such a consumer keeps its own
+    ordering in gate-jobs and passes the reference another way."""
+    never = [{"if": '$THIS_VARIABLE_IS_NEVER_SET == "yes"'}]
+    result = lint_module.lint(
+        two_image_config(base_rules=never), include_jobs=True, dry_run=True
+    )
+    assert not result["valid"]
+    assert any("does not exist in the pipeline" in error for error in result["errors"]), result[
+        "errors"
+    ]
+    assert any("needs:optional" in error for error in result["errors"])

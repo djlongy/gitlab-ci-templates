@@ -53,7 +53,11 @@ def job_script(component: str) -> str:
         yaml.safe_load_all((TEMPLATES_DIR / component / "template.yml").read_text())
     )
     commands: list[str] = []
-    for job in documents[1].values():
+    # `include:` is not a job. The three builders choose between a stage
+    # barrier and a needs list with an include carrying rules.
+    for name, job in documents[1].items():
+        if name == "include":
+            continue
         for key in ("before_script", "script", "after_script"):
             commands.extend(job.get(key, []))
     return "\n".join(commands) + "\n"
@@ -169,23 +173,32 @@ def test_the_inventory_of_embedded_regions_is_the_expected_one():
     assert INVENTORY == [
         ("ansible-lint", "dir $CI_TPL_RUNTIME_DIR runtime/scan/scan-gate.sh"),
         ("container-build-buildkit", "file $CI_TPL_HELPER runtime/registry/image-json.sh"),
+        ("container-build-buildkit", "inline runtime/builder/gate_inputs.sh"),
         ("container-build-buildkit", "inline runtime/registry/ca-bundle.sh"),
         ("container-build-jib", "file $CI_TPL_HELPER runtime/registry/image-json.sh"),
+        ("container-build-jib", "inline runtime/builder/gate_inputs.sh"),
         ("container-build-jib", "inline runtime/registry/ca-bundle.sh"),
         ("container-build-ko", "file $CI_TPL_HELPER runtime/registry/image-json.sh"),
+        ("container-build-ko", "inline runtime/builder/gate_inputs.sh"),
         ("container-build-ko", "inline runtime/registry/ca-bundle.sh"),
         ("container-export-skopeo", "file $CI_TPL_RUNTIME runtime/mirror/transfer_manifest.py"),
         ("container-export-skopeo", "inline runtime/mirror/egress.sh"),
         ("container-export-skopeo", "inline runtime/mirror/registry.sh"),
+        ("container-export-skopeo", "inline runtime/publish/gate.sh"),
         ("container-list-rke2", "file $CI_TPL_RUNTIME runtime/mirror/release_list.py"),
         ("container-list-rke2", "inline runtime/mirror/egress.sh"),
         ("container-mirror-skopeo", "inline runtime/mirror/egress.sh"),
         ("container-mirror-skopeo", "inline runtime/mirror/registry.sh"),
         ("container-promote-harbor",
-         "dir $CI_TPL_RUNTIME_DIR runtime/httpjson.py runtime/promote/harbor.py"),
+         "dir $CI_TPL_RUNTIME_DIR runtime/httpjson.py runtime/promote/harbor.py "
+         "runtime/subject.py"),
+        ("container-promote-harbor", "inline runtime/publish/gate.sh"),
+        ("container-promote-skopeo", "inline runtime/promote/skopeo.sh"),
+        ("container-promote-skopeo", "inline runtime/registry/ca-bundle.sh"),
+        ("container-promote-skopeo", "inline runtime/registry/image-json.sh"),
         ("container-sign-attest-cosign",
          "dir $CI_TPL_RUNTIME_DIR runtime/httpjson.py runtime/sign/cosign_attest.py "
-         "runtime/sign/cosign_checksums.txt"),
+         "runtime/sign/cosign_checksums.txt runtime/subject.py"),
         ("container-sign-attest-cosign", "inline runtime/registry/ca-bundle.sh"),
         ("container-smoke-test", "file $CI_TPL_HELPER runtime/registry/image-json.sh"),
         ("container-smoke-test", "inline runtime/registry/ca-bundle.sh"),
@@ -208,6 +221,7 @@ def test_the_inventory_of_embedded_regions_is_the_expected_one():
          "dir $CI_PROJECT_DIR/.ci-tpl runtime/scan/scan-gate.sh"),
         ("security-filesystem-trivy",
          "dir $CI_PROJECT_DIR/.ci-tpl runtime/scan/scan-gate.sh"),
+        ("security-image-grype", "inline runtime/registry/ca-bundle.sh"),
         ("security-image-grype", "inline runtime/registry/image-json.sh"),
         ("security-image-grype", "inline runtime/scan/scan.sh"),
         ("security-image-trivy", "inline runtime/registry/ca-bundle.sh"),
@@ -226,9 +240,11 @@ def test_the_inventory_of_embedded_regions_is_the_expected_one():
         ("security-secrets-gitleaks",
          "dir $CI_PROJECT_DIR/.ci-tpl runtime/scan/scan-gate.sh"),
         ("security-sync-vigil",
-         "dir $CI_TPL_RUNTIME_DIR runtime/httpjson.py runtime/vigil/vigil.py"),
+         "dir $CI_TPL_RUNTIME_DIR runtime/httpjson.py runtime/vigil/vigil.py "
+         "runtime/subject.py"),
         ("security-verify-vigil",
-         "dir $CI_TPL_RUNTIME_DIR runtime/httpjson.py runtime/vigil/vigil.py"),
+         "dir $CI_TPL_RUNTIME_DIR runtime/httpjson.py runtime/vigil/vigil.py "
+         "runtime/subject.py"),
         ("terraform-apply", "file $CI_TPL_RUNTIME runtime/terraform/tfguard.sh"),
         ("terraform-module-publish", "file $CI_TPL_RUNTIME runtime/terraform/tfguard.sh"),
         ("terraform-plan", "file $CI_TPL_RUNTIME runtime/terraform/tfguard.sh"),

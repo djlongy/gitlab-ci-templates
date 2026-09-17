@@ -45,7 +45,9 @@ CASES = [
 
 def script_text(component: str) -> str:
     documents = list(yaml.safe_load_all((TEMPLATES / component / "template.yml").read_text()))
-    (job,) = documents[1].values()
+    # `include:` is not a job: a component that chooses its ordering from its
+    # inputs includes one of the files under templates/_needs/.
+    (job,) = (job for name, job in documents[1].items() if name != "include")
     return "\n".join(job.get("before_script", []) + job.get("script", []))
 
 
@@ -133,9 +135,11 @@ def test_no_probe_still_pipes_a_capture_through_grep():
     for path in sorted(TEMPLATES.glob("*/template.yml")):
         documents = list(yaml.safe_load_all(path.read_text()))
         # Hidden parents included: a probe would hide in one just as well.
+        # `include:` is not a job, so it carries no script to hide one in.
         body = "\n".join(
             line
-            for job in documents[1].values()
+            for name, job in documents[1].items()
+            if name != "include"
             for line in job.get("before_script", []) + job.get("script", [])
         )
         for line in body.splitlines():

@@ -43,7 +43,9 @@ def documents(path: Path) -> list:
 def jobs_document(component: str) -> dict:
     parsed = documents(TEMPLATES_DIR / component / "template.yml")
     assert len(parsed) == 2, "a component is exactly two documents: spec, then jobs"
-    return parsed[1]
+    # `include:` is not a job. A component that chooses its ordering from its
+    # inputs includes one of the files under templates/_needs/ to carry it.
+    return {name: job for name, job in parsed[1].items() if name != "include"}
 
 
 def inputs(component: str) -> dict:
