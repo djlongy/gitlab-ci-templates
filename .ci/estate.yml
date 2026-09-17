@@ -46,7 +46,7 @@ shared_ci:
   # "ref does not exist" from its include, not a silently wrong pipeline.
   #
   # Section 14.2 forbids `main`: a moving ref is not an approved ref.
-  approved_ref: 1.1.1
+  approved_ref: 1.2.0
   verified_at: 2026/09/16
 
 runners:

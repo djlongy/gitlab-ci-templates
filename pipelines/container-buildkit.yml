@@ -199,15 +199,65 @@ spec:
         names in .ci/estate.yml.
       options: ['mgt', 'dev', 'prod']
       default: 'prod'
+    registry-username-variable:
+      type: string
+      description: >-
+        Name of the CI variable holding the registry username. The name, never
+        the value: the build, test, scan and signing jobs read it with printenv
+        at job time. The default is the name this library read before the input
+        existed.
+      regex: '^[A-Z][A-Z0-9_]*$'
+      default: 'HARBOR_USER'
+    registry-password-variable:
+      type: string
+      description: >-
+        Name of the CI variable holding the registry password or robot token.
+        The name, never the value.
+      regex: '^[A-Z][A-Z0-9_]*$'
+      default: 'HARBOR_PASSWORD'
+    ca-bundle-variable:
+      type: string
+      description: >-
+        Name of a CI variable holding a PEM bundle every registry-facing job
+        trusts before its first call, for a registry whose certificate an
+        internal authority issued. A file variable (the value is a path) or an
+        ordinary one (the value is the PEM). Empty skips it and downloads
+        nothing.
+      regex: '^$|^[A-Z][A-Z0-9_]*$'
+      default: ''
+    trivy-db-repository:
+      type: string
+      description: >-
+        OCI repository both trivy scans pull the vulnerability database from.
+        Empty keeps trivy's default, which reaches ghcr.io directly. A site with
+        no egress points this at its own mirror of that repository.
+      default: ''
+    trivy-java-db-repository:
+      type: string
+      description: >-
+        OCI repository for trivy's Java database, fetched only when a scan finds
+        a jar. Empty keeps trivy's default.
+      default: ''
+    cosign-release-url:
+      type: string
+      description: >-
+        Base URL the signing job downloads the pinned cosign binary from. The
+        checksum is pinned, so a mirror changes where the bytes come from and
+        not which bytes are accepted.
+      default: 'https://github.com/sigstore/cosign/releases/download'
     runner-tags:
       type: array
       description: Approved runner selection from the estate profile.
       default: []
     build-image:
       type: string
-      description: Approved BuildKit image pinned by digest.
-      regex: '^.+@sha256:[0-9a-f]{64}$'
-      default: 'docker.io/moby/buildkit@sha256:86c0ad9d1137c186e9d455912167df20e530bdf7f7c19de802e892bb8ca16552'
+      description: >-
+        Approved BuildKit image. A digest pins what runs; a tag is accepted so a
+        site whose only path to an image is a proxy cache can name
+        <mirror>/moby/buildkit:v0.33.0 and let the cache resolve it. The default
+        is moby/buildkit v0.33.0, by digest.
+      regex: '^.+(@sha256:[0-9a-f]{64}|:[A-Za-z0-9._-]{1,128})$'
+      default: 'docker.io/moby/buildkit@sha256:6c2fa84a6b61ccd72899dde4239f8d5717f05f9a8ca6f3cad185fb1a95a94de3'
     trivy-image:
       type: string
       description: Approved Trivy image pinned by digest, used by both scans.
@@ -317,6 +367,8 @@ include:
         - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
         - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
         - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG'
+      db-repository: $[[ inputs.trivy-db-repository ]]
+      java-db-repository: $[[ inputs.trivy-java-db-repository ]]
 
   - local: '/templates/quality-dependency-lockfiles/template.yml'
     inputs:
@@ -351,6 +403,9 @@ include:
       build-args: $[[ inputs.build-args ]]
       platforms: $[[ inputs.platforms ]]
       push-candidate: true
+      registry-username-variable: $[[ inputs.registry-username-variable ]]
+      registry-password-variable: $[[ inputs.registry-password-variable ]]
+      ca-bundle-variable: $[[ inputs.ca-bundle-variable ]]
       run-rules:
         - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
         - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG'
@@ -371,6 +426,9 @@ include:
       build-args: $[[ inputs.build-args ]]
       platforms: $[[ inputs.platforms ]]
       push-candidate: true
+      registry-username-variable: $[[ inputs.registry-username-variable ]]
+      registry-password-variable: $[[ inputs.registry-password-variable ]]
+      ca-bundle-variable: $[[ inputs.ca-bundle-variable ]]
       run-rules:
         - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG && $CI_COMMIT_REF_PROTECTED == "true"'
 
@@ -391,6 +449,9 @@ include:
         - '$[[ inputs.smoke-test-image-variable ]]=.ci-artifacts/$[[ inputs.instance ]]/container-build-buildkit/image.json'
       compose-file: $[[ inputs.smoke-test-compose-file ]]
       make-target: $[[ inputs.smoke-test-make-target ]]
+      registry-username-variable: $[[ inputs.registry-username-variable ]]
+      registry-password-variable: $[[ inputs.registry-password-variable ]]
+      ca-bundle-variable: $[[ inputs.ca-bundle-variable ]]
       run-rules:
         - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
         - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG'
@@ -411,6 +472,9 @@ include:
         - '$[[ inputs.smoke-test-image-variable ]]=.ci-artifacts/$[[ inputs.instance ]]/container-build-buildkit/image.json'
       compose-file: $[[ inputs.smoke-test-compose-file ]]
       make-target: $[[ inputs.smoke-test-make-target ]]
+      registry-username-variable: $[[ inputs.registry-username-variable ]]
+      registry-password-variable: $[[ inputs.registry-password-variable ]]
+      ca-bundle-variable: $[[ inputs.ca-bundle-variable ]]
       run-rules:
         - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG && $CI_COMMIT_REF_PROTECTED == "true"'
 
@@ -431,6 +495,9 @@ include:
       run-rules:
         - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
         - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG'
+      registry-username-variable: $[[ inputs.registry-username-variable ]]
+      registry-password-variable: $[[ inputs.registry-password-variable ]]
+      ca-bundle-variable: $[[ inputs.ca-bundle-variable ]]
 
   - local: '/templates/security-sbom-syft/template.yml'
     rules:
@@ -445,6 +512,9 @@ include:
       gate-jobs: []
       run-rules:
         - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG && $CI_COMMIT_REF_PROTECTED == "true"'
+      registry-username-variable: $[[ inputs.registry-username-variable ]]
+      registry-password-variable: $[[ inputs.registry-password-variable ]]
+      ca-bundle-variable: $[[ inputs.ca-bundle-variable ]]
 
   - local: '/templates/security-image-trivy/template.yml'
     rules:
@@ -464,6 +534,11 @@ include:
       run-rules:
         - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
         - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG'
+      registry-username-variable: $[[ inputs.registry-username-variable ]]
+      registry-password-variable: $[[ inputs.registry-password-variable ]]
+      ca-bundle-variable: $[[ inputs.ca-bundle-variable ]]
+      db-repository: $[[ inputs.trivy-db-repository ]]
+      java-db-repository: $[[ inputs.trivy-java-db-repository ]]
 
   - local: '/templates/security-image-trivy/template.yml'
     rules:
@@ -482,6 +557,11 @@ include:
       scanners: vuln
       run-rules:
         - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG && $CI_COMMIT_REF_PROTECTED == "true"'
+      registry-username-variable: $[[ inputs.registry-username-variable ]]
+      registry-password-variable: $[[ inputs.registry-password-variable ]]
+      ca-bundle-variable: $[[ inputs.ca-bundle-variable ]]
+      db-repository: $[[ inputs.trivy-db-repository ]]
+      java-db-repository: $[[ inputs.trivy-java-db-repository ]]
 
   - local: '/templates/security-sbom-upload-dtrack/template.yml'
     rules:
@@ -550,6 +630,10 @@ include:
       run-rules:
         - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
         - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG'
+      registry-username-variable: $[[ inputs.registry-username-variable ]]
+      registry-password-variable: $[[ inputs.registry-password-variable ]]
+      ca-bundle-variable: $[[ inputs.ca-bundle-variable ]]
+      cosign-release-url: $[[ inputs.cosign-release-url ]]
 
   - local: '/templates/container-sign-attest-cosign/template.yml'
     rules:
@@ -575,6 +659,10 @@ include:
           artifacts: false
       run-rules:
         - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG && $CI_COMMIT_REF_PROTECTED == "true"'
+      registry-username-variable: $[[ inputs.registry-username-variable ]]
+      registry-password-variable: $[[ inputs.registry-password-variable ]]
+      ca-bundle-variable: $[[ inputs.ca-bundle-variable ]]
+      cosign-release-url: $[[ inputs.cosign-release-url ]]
 
   - local: '/templates/container-sign-attest-cosign/template.yml'
     rules:
@@ -603,6 +691,10 @@ include:
       run-rules:
         - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
         - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG'
+      registry-username-variable: $[[ inputs.registry-username-variable ]]
+      registry-password-variable: $[[ inputs.registry-password-variable ]]
+      ca-bundle-variable: $[[ inputs.ca-bundle-variable ]]
+      cosign-release-url: $[[ inputs.cosign-release-url ]]
 
   - local: '/templates/container-sign-attest-cosign/template.yml'
     rules:
@@ -630,6 +722,10 @@ include:
           artifacts: false
       run-rules:
         - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG && $CI_COMMIT_REF_PROTECTED == "true"'
+      registry-username-variable: $[[ inputs.registry-username-variable ]]
+      registry-password-variable: $[[ inputs.registry-password-variable ]]
+      ca-bundle-variable: $[[ inputs.ca-bundle-variable ]]
+      cosign-release-url: $[[ inputs.cosign-release-url ]]
 
   - local: '/templates/security-sync-vigil/template.yml'
     rules:

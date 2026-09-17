@@ -1,7 +1,7 @@
 ---
 name: quality-dependency-lockfiles
 kind: component
-status: experimental
+status: released
 introduced_in: 1.0.0
 minimum_gitlab: '18.9'
 # Retry policy: the `max-retries` input (0, 1 or 2, default 1) sets `retry: max`,
@@ -38,8 +38,16 @@ validation:
     - yaml-parsed
     - gitlab-linted
     - runtime-tested
-  verified_at: 2026/09/15
-  environment: 'gitlab.example.com 18.9.1-ee, project 18'
+    - integration-tested
+  verified_at: 2026/09/17
+  revision: '1.2.0'
+  environment: >-
+    gitlab.example.com 18.9.1-ee, POST /api/v4/projects/:id/ci/lint.
+    Executed on the originating estate, 2026/09: three consumer projects
+    built and pushed to a Quay 3.15.7 registry with an internally issued
+    certificate, one of them running every job this composition creates on a
+    default-branch push, green through to a signature and two attestations
+    in the registry.
   notes: >-
     Scope. Checks that every lockfile the consumer declares exists, is non-empty, and
     where it is a requirements-style file, that every requirement line is pinned.
@@ -69,3 +77,5 @@ validation:
     empty declaration is a usage error. The `none` sentinel added in 1.0.0 is the fix,
     and it has not itself been run in a pipeline, so there is still no green consumer
     run to promote on.
+    Evidence: green on an earlier consumer run and again on two of the three
+    container consumers, with the `none` sentinel.

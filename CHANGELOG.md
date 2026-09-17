@@ -3,6 +3,84 @@
 Release changes, migration instructions and deprecation deadlines for
 `platform/gitlab-ci-templates`. Dates are yyyy/mm/dd.
 
+## 1.2.0 — 2026/09/17
+
+The container components can be pointed at any registry: the credential
+variables are named by the consumer, an internal certificate authority is
+trustable from inside a job, and the three downloads that reached the public
+internet are inputs. Every default reproduces 1.1.1, so a consumer upgrades
+by changing its `ref`.
+
+### Fixed
+
+- **The credentials come from the variables the consumer names.** The container
+  components mapped their internal credential variables from `$HARBOR_USER` and
+  `$HARBOR_PASSWORD`. Those two names are this library's history rather than
+  anything a consumer chose, so a consumer that had set its own two variables
+  got "registry credentials are not set" from a
+  job that had never looked at them, and the message named neither what it read
+  nor what it wanted.
+
+  `registry-username-variable` and `registry-password-variable` take the NAMES,
+  and the runtime resolves them with `printenv`, never with `eval` or an
+  indirect expansion. Both default to the names the components read before. The
+  failure now reads
+
+  ```
+  ERROR: registry credentials are not set; this job cannot push to <registry>
+  ERROR: username, from $QUAY_USER: set
+  ERROR: password, from $QUAY_TOKEN: empty or not defined
+  ```
+
+  On `container-build-buildkit`, `container-build-jib`, `container-build-ko`,
+  `container-smoke-test`, `security-sbom-syft`, `security-image-trivy` and
+  `container-sign-attest-cosign`. The `container-buildkit` composition forwards
+  both; the ko, Jib and helm compositions keep the defaults.
+
+### Added
+
+- **`ca-bundle-variable`**, on the same components and the `container-buildkit`
+  composition. It names a CI variable holding a PEM bundle, a file variable
+  (the value is a path) or an ordinary one (the value is the PEM), and the job
+  trusts it before its first registry call. A variable rather than a URL
+  because the site that needs an internal authority is usually the site with no
+  egress to fetch one from. Where the execution image runs as a non-root user
+  and the trust store is read-only, the job writes a combined bundle and names
+  it in `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE` and `CURL_CA_BUNDLE` instead of
+  failing.
+
+- **`db-repository` and `java-db-repository`** on both trivy components,
+  forwarded by the composition as `trivy-db-repository` and
+  `trivy-java-db-repository`. Empty keeps trivy's default, which is
+  `mirror.gcr.io/aquasec/trivy-db:2` and reaches the public internet. This
+  closes the P10 item: offline mode was not expressible in the YAML.
+
+- **`cosign-release-url`** on the signing component and the composition. The
+  binary's checksum stays pinned, so a mirror changes where the bytes come from
+  and not which bytes are accepted.
+
+- **A how-to**, `docs/howto/build-and-push-to-quay.md`: the whole consumer
+  file, the Quay organisation, repository, robot and permission steps, what a
+  successful pipeline prints, what Quay keeps of the signature and attestations
+  and what it drops, and the three failures that actually happen.
+
+### Changed
+
+- **BuildKit v0.33.0**, and `execution-image` accepts `name:tag` as well as a
+  digest. A site that mirrors an image into its own registry gets a digest of
+  its own, so a digest pinned here names nothing there; standard 1.0.5 and
+  section 12 allow the form where the contract declares it. The shipped default
+  is still digest-pinned. The build job prints `buildctl --version`, so the
+  trace says which builder ran rather than leaving it to be inferred from an
+  image digest.
+
+### Upgrading from 1.1.1
+
+Change your `ref` to `1.2.0`. Nothing else, unless you are pushing somewhere
+other than the one those two names describe, in which case add
+`registry-username-variable`, `registry-password-variable` and, for an
+internally issued certificate, `ca-bundle-variable`.
+
 ## 1.1.1 — 2026/09/16
 
 One fix. The webhook reconcile step added in 1.1.0 could stop wiki edits

@@ -44,7 +44,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from httpjson import HttpError, request  # noqa: E402
 
 COSIGN_VERSION = "v2.4.1"
-COSIGN_RELEASE_URL = "https://github.com/sigstore/cosign/releases/download"
+# Where the pinned binary is fetched from, one directory above the version. A
+# site with no path to the upstream releases sets CI_TPL_COSIGN_RELEASE_URL to
+# its own mirror. The checksum in cosign_checksums.txt is verified either way,
+# so pointing this elsewhere changes where the bytes come from and not which
+# bytes are accepted.
+COSIGN_RELEASE_URL = os.environ.get(
+    "CI_TPL_COSIGN_RELEASE_URL", "https://github.com/sigstore/cosign/releases/download"
+).rstrip("/")
 ARCHITECTURES = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}
 
 

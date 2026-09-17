@@ -237,8 +237,13 @@ def test_no_input_carries_a_secret(component: str):
         assert not re.search(r"(password|token|api-key|secret)$", name), (
             f"{component} input {name} looks like a secret"
         )
+        # A URL default is an endpoint this component talks to, which belongs
+        # in the contract's egress list and is checked there. The rule this
+        # test enforces is that a default never carries a credential, and a URL
+        # that did would be caught by the name check above.
         assert "://" not in str(options.get("default", "")) or name in (
             "cosign-key", "vault-address", "vault-jwt-audience",
+            "cosign-release-url",
         )
 
 

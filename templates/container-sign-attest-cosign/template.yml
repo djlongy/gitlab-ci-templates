@@ -31,6 +31,38 @@ spec:
         committed in runtime/sign/.
       default: 'docker.io/python@sha256:cd7c412d000912f29075a1b8803e43cb2f38bb67f104019df526df5ceaf30569'
       regex: '^.+@sha256:[0-9a-f]{64}$'
+    registry-username-variable:
+      type: string
+      description: >-
+        Name of the CI variable holding the registry username. The name, never
+        the value. The default is the name this library read before the input
+        existed, so a consumer already using it passes nothing here.
+      regex: '^[A-Z][A-Z0-9_]*$'
+      default: 'HARBOR_USER'
+    registry-password-variable:
+      type: string
+      description: >-
+        Name of the CI variable holding the registry password or robot token.
+        The name, never the value.
+      regex: '^[A-Z][A-Z0-9_]*$'
+      default: 'HARBOR_PASSWORD'
+    ca-bundle-variable:
+      type: string
+      description: >-
+        Name of a CI variable holding a PEM bundle to trust before any registry
+        call, for a registry whose certificate an internal authority issued. A
+        file variable (the value is a path) or an ordinary one (the value is the
+        PEM) both work. Empty skips it, and nothing is downloaded either way.
+      regex: '^$|^[A-Z][A-Z0-9_]*$'
+      default: ''
+    cosign-release-url:
+      type: string
+      description: >-
+        Base URL the pinned cosign binary is downloaded from, one directory
+        above the version. A site with no path to the upstream releases points
+        this at its own mirror; the checksum is pinned either way, so a mirror
+        cannot serve a different binary.
+      default: 'https://github.com/sigstore/cosign/releases/download'
     runner-tags:
       type: array
       description: Runner selection from the estate profile.
@@ -150,6 +182,8 @@ spec:
     CI_TPL_ATTEST_SBOM: '$[[ inputs.attest-sbom ]]'
     CI_TPL_ATTEST_VULNERABILITIES: '$[[ inputs.attest-vulnerabilities ]]'
     CI_TPL_TLOG_UPLOAD: '$[[ inputs.tlog-upload ]]'
+    CI_TPL_CA_BUNDLE_VARIABLE: '$[[ inputs.ca-bundle-variable ]]'
+    CI_TPL_COSIGN_RELEASE_URL: $[[ inputs.cosign-release-url ]]
   needs:
     - job: $[[ inputs.build-job ]]
       artifacts: true
@@ -159,6 +193,75 @@ spec:
       artifacts: true
     - $[[ inputs.gate-jobs ]]
   before_script:
+    - |
+      # BEGIN embed inline runtime/registry/ca-bundle.sh
+      #!/bin/sh
+      # Trust an extra certificate authority inside a job container.
+      #
+      # Its own file rather than part of image-json.sh because the signing component
+      # needs it and needs nothing else there: that job runs Python, not the shell
+      # image helpers, and embedding 250 lines of JSON handling to reach one function
+      # would be worse than either.
+      #
+      # It depends on nothing else here, deliberately: the signing component embeds
+      # this file and no other.
+      #
+      # Embedded verbatim by every component that talks to a registry over TLS;
+      # tests/runtime/registry/test_ca_bundle.py drives this copy.
+      # Trust one more certificate authority, for a registry issued by an internal
+      # one. The PEM comes from the CI variable named by CI_TPL_CA_BUNDLE_VARIABLE,
+      # which may be a GitLab file variable (the value is a path) or an ordinary one
+      # (the value is the PEM itself). Nothing is downloaded: a job that has to fetch
+      # its trust anchor cannot run at a site with no egress, which is the site that
+      # needs this input.
+      #
+      # Empty or unset skips it. A variable holding no certificate is an error rather
+      # than an empty success, because the job would otherwise fail later with a TLS
+      # error naming the registry instead of the bundle.
+      ci_tpl_trust_ca_bundle() {
+          [ -n "${CI_TPL_CA_BUNDLE_VARIABLE:-}" ] || return 0
+          bundle=$(printenv "$CI_TPL_CA_BUNDLE_VARIABLE") || bundle=''
+          if [ -z "$bundle" ]; then
+              echo "ERROR: ca-bundle-variable names \$${CI_TPL_CA_BUNDLE_VARIABLE}, which is empty or not defined" >&2
+              return 1
+          fi
+          pem=${CI_TPL_WORK:-/tmp}/ci-tpl-ca-bundle.pem
+          if [ -f "$bundle" ]; then
+              cat "$bundle" > "$pem"
+          else
+              printf '%s\n' "$bundle" > "$pem"
+          fi
+          certs=$(grep -c 'BEGIN CERTIFICATE' "$pem") || certs=0
+          if [ "$certs" -eq 0 ]; then
+              echo "ERROR: \$${CI_TPL_CA_BUNDLE_VARIABLE} carries no PEM certificate" >&2
+              return 1
+          fi
+          store=${CI_TPL_CA_STORE:-/etc/ssl/certs/ca-certificates.crt}
+          if cat "$pem" >> "$store" 2>/dev/null; then
+              echo "trusted ${certs} extra certificate(s) from \$${CI_TPL_CA_BUNDLE_VARIABLE}"
+              return 0
+          fi
+          # A non-root execution image cannot write the system store, and refusing
+          # there would mean the input works only for images that run as root.
+          # Combine the store with the extra anchors and name the copy in the three
+          # variables the clients in these jobs read: Go (buildctl, trivy, syft,
+          # cosign) reads SSL_CERT_FILE, python-requests reads REQUESTS_CA_BUNDLE and
+          # curl reads CURL_CA_BUNDLE.
+          combined=${CI_TPL_WORK:-/tmp}/ci-tpl-ca-combined.pem
+          if [ -r "$store" ]; then
+              cat "$store" "$pem" > "$combined"
+          else
+              cat "$pem" > "$combined"
+          fi
+          SSL_CERT_FILE=$combined
+          REQUESTS_CA_BUNDLE=$combined
+          CURL_CA_BUNDLE=$combined
+          export SSL_CERT_FILE REQUESTS_CA_BUNDLE CURL_CA_BUNDLE
+          echo "trusted ${certs} extra certificate(s) from \$${CI_TPL_CA_BUNDLE_VARIABLE}"
+          echo "the trust store at ${store} is not writable here, so SSL_CERT_FILE names ${combined}"
+      }
+      # END embed
+      ci_tpl_trust_ca_bundle || exit 1
     - |
       # BEGIN embed dir $CI_TPL_RUNTIME_DIR runtime/httpjson.py runtime/sign/cosign_attest.py runtime/sign/cosign_checksums.txt
       mkdir -p "$CI_TPL_RUNTIME_DIR" "$CI_TPL_RUNTIME_DIR/sign" || exit 1
@@ -298,7 +401,14 @@ spec:
       from httpjson import HttpError, request  # noqa: E402
 
       COSIGN_VERSION = "v2.4.1"
-      COSIGN_RELEASE_URL = "https://github.com/sigstore/cosign/releases/download"
+      # Where the pinned binary is fetched from, one directory above the version. A
+      # site with no path to the upstream releases sets CI_TPL_COSIGN_RELEASE_URL to
+      # its own mirror. The checksum in cosign_checksums.txt is verified either way,
+      # so pointing this elsewhere changes where the bytes come from and not which
+      # bytes are accepted.
+      COSIGN_RELEASE_URL = os.environ.get(
+          "CI_TPL_COSIGN_RELEASE_URL", "https://github.com/sigstore/cosign/releases/download"
+      ).rstrip("/")
       ARCHITECTURES = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}
 
 
@@ -620,8 +730,8 @@ spec:
         --vault-auth-path "$CI_TPL_VAULT_AUTH_PATH" \
         --vault-role "$CI_TPL_VAULT_ROLE" \
         --id-token-variable VAULT_ID_TOKEN \
-        --username-variable HARBOR_USER \
-        --password-variable HARBOR_PASSWORD \
+        --username-variable '$[[ inputs.registry-username-variable ]]' \
+        --password-variable '$[[ inputs.registry-password-variable ]]' \
         --checksums "$CI_TPL_RUNTIME_DIR/sign/cosign_checksums.txt" \
         --attest-sbom "$CI_TPL_ATTEST_SBOM" \
         --attest-vulnerabilities "$CI_TPL_ATTEST_VULNERABILITIES" \

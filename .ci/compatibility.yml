@@ -40,6 +40,28 @@ combinations:
       server. Nothing else in this release has been proven to reach a report
       sink.
 
+  - gitlab: 18.9.1-ee
+    runner: 18.9.0
+    executor: docker
+    report_mode: artifact-only
+    verified_at: 2026/09/17
+    evidence:
+      - integration-tested
+    notes: >-
+      The container chain past `verify`, run for the first time, on shared ref
+      1.2.0 and against a Quay 3.15.7 registry rather than the estate's usual
+      one. One consumer ran all eight jobs the container-buildkit composition
+      creates on a default-branch push and every one went green, through to a
+      cosign signature and two attestations in the registry. A second ran the
+      builder alone and then read the pushed digest back with regctl from a
+      separate job. A third built a GitLab Runner image and pushed it; its
+      image scan then failed on 7 critical and 121 high findings in the
+      upstream base, which is the gate working and is why that pipeline is red.
+      The registry credentials came from variables the consumer named, and the
+      registry's internal certificate authority from a file variable. The
+      promotion job is gated on a protected tag and nobody has run one, so the
+      composition itself stays experimental.
+
 runner_behaviour:
   # Not a combination row: nothing here was earned by a green pipeline. These
   # are measured facts about how a docker-executor runner treats the build
@@ -150,14 +172,19 @@ evidence:
   # are not reproduced here; each component's own contract.yml records the run
   # that promoted it.
   integration-tested:
+    - container-build-buildkit
     - container-export-skopeo
     - container-list-rke2
     - container-mirror-skopeo
+    - container-sign-attest-cosign
     - docs-wiki-sync
     - kubernetes-validate
+    - quality-dependency-lockfiles
     - quality-sonarqube
     - security-filesystem-trivy
+    - security-image-trivy
     - security-sast-semgrep
+    - security-sbom-syft
     - security-secrets-gitleaks
     - terraform-fmt
     - terraform-plan
@@ -185,15 +212,11 @@ evidence:
     - ansible-lint
     - ansible-syntax
     - container-promote-harbor
-    - container-sign-attest-cosign
     - helm-package-publish
     - helm-validate
-    - quality-dependency-lockfiles
     - security-filesystem-grype
     - security-image-grype
-    - security-image-trivy
     - security-repository-audit
-    - security-sbom-syft
     - security-sbom-upload-dtrack
     - security-sync-vigil
     - security-verify-vigil
@@ -203,7 +226,6 @@ evidence:
   # The merged configuration compiles, and that is all. These components carry
   # no separable runtime, or their runtime is the job script itself.
   gitlab-linted:
-    - container-build-buildkit
     - container-build-jib
     - container-build-ko
     - container-smoke-test

@@ -317,10 +317,7 @@ def test_registry_auth_is_written_without_a_wrapped_base64_line(tmp_path):
     result = run(
         f"ci_tpl_write_registry_auth '{tmp_path}/dockercfg' 'registry.example.com'",
         tmp_path,
-        env={
-            "CI_TPL_REGISTRY_USER": "robot$dev+ci",
-            "CI_TPL_REGISTRY_PASSWORD": long_password,
-        },
+        env={"HARBOR_USER": "robot$dev+ci", "HARBOR_PASSWORD": long_password},
     )
     assert result.returncode == 0, result.stderr
     raw = (tmp_path / "dockercfg" / "config.json").read_text()
@@ -331,6 +328,49 @@ def test_registry_auth_is_written_without_a_wrapped_base64_line(tmp_path):
     assert base64.b64decode(auth).decode() == f"robot$dev+ci:{long_password}"
 
 
+def test_the_consumers_own_variable_names_are_what_gets_read(tmp_path):
+    """The defect this fixes: the component read $HARBOR_USER and
+    $HARBOR_PASSWORD, two names from this estate, so a consumer that had set its
+    own variables was told its credentials were not set. The names are inputs
+    now and nothing about them is compiled in."""
+    result = run(
+        f"ci_tpl_write_registry_auth '{tmp_path}/dockercfg' 'registry.example.com'",
+        tmp_path,
+        env={
+            "CI_TPL_REGISTRY_USERNAME_VARIABLE": "QUAY_USER",
+            "CI_TPL_REGISTRY_PASSWORD_VARIABLE": "QUAY_TOKEN",
+            "QUAY_USER": "platform+ci",
+            "QUAY_TOKEN": "t" * 64,
+            # The estate's names are present and hold something else entirely:
+            # reading them here would be the bug, not a fallback.
+            "HARBOR_USER": "robot$dev+ci",
+            "HARBOR_PASSWORD": "harbor-secret",
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    import base64
+
+    auth = json.loads((tmp_path / "dockercfg" / "config.json").read_text())
+    encoded = auth["auths"]["registry.example.com"]["auth"]
+    assert base64.b64decode(encoded).decode() == "platform+ci:" + "t" * 64
+
+
+def test_a_variable_name_is_never_executed(tmp_path):
+    """printenv, not eval: a name is data. A name that is not a variable
+    resolves to nothing, which is a missing credential, not a shell error."""
+    result = run(
+        f"ci_tpl_write_registry_auth '{tmp_path}/dockercfg' 'registry.example.com'",
+        tmp_path,
+        env={
+            "CI_TPL_REGISTRY_USERNAME_VARIABLE": "QUAY_USER",
+            "CI_TPL_REGISTRY_PASSWORD_VARIABLE": "QUAY_TOKEN",
+            "QUAY_USER": "platform+ci",
+        },
+    )
+    assert result.returncode != 0
+    assert not (tmp_path / "dockercfg").exists()
+
+
 def test_registry_auth_fails_when_credentials_are_absent(tmp_path):
     """Section 10.1: a push job whose credentials are unavailable fails."""
     result = run(
@@ -339,6 +379,43 @@ def test_registry_auth_fails_when_credentials_are_absent(tmp_path):
     )
     assert result.returncode != 0
     assert "cannot push" in result.stderr
+
+
+def test_the_failure_names_both_variables_and_which_one_was_empty(tmp_path):
+    """"credentials are not set" alone sent a consumer looking in the wrong
+    place for a year. The message names what was read and what was found."""
+    result = run(
+        f"ci_tpl_write_registry_auth '{tmp_path}/dockercfg' 'registry.example.com'",
+        tmp_path,
+        env={
+            "CI_TPL_REGISTRY_USERNAME_VARIABLE": "QUAY_USER",
+            "CI_TPL_REGISTRY_PASSWORD_VARIABLE": "QUAY_TOKEN",
+            "QUAY_USER": "platform+ci",
+            "QUAY_TOKEN": "",
+        },
+    )
+    assert result.returncode != 0
+    assert "$QUAY_USER: set" in result.stderr
+    assert "$QUAY_TOKEN: empty or not defined" in result.stderr
+    assert "registry-password-variable" in result.stderr
+    # The registry it could not push to, so the reader knows which one failed.
+    assert "registry.example.com" in result.stderr
+
+
+def test_no_credential_value_reaches_the_failure_message(tmp_path):
+    """A diagnostic that helpfully prints what it read is a credential in a job
+    log, and a job log is not a private place."""
+    result = run(
+        f"ci_tpl_write_registry_auth '{tmp_path}/dockercfg' 'registry.example.com'",
+        tmp_path,
+        env={
+            "CI_TPL_REGISTRY_USERNAME_VARIABLE": "QUAY_USER",
+            "CI_TPL_REGISTRY_PASSWORD_VARIABLE": "QUAY_TOKEN",
+            "QUAY_USER": "platform+ci",
+            "QUAY_TOKEN": "",
+        },
+    )
+    assert "platform+ci" not in result.stderr + result.stdout
 
 
 def test_the_registry_host_is_the_first_path_segment(tmp_path):

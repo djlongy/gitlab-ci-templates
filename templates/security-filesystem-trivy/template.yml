@@ -21,6 +21,20 @@ spec:
         compromise.
       regex: '^.+@sha256:[0-9a-f]{64}$'
       default: 'docker.io/aquasec/trivy@sha256:bcc376de8d77cfe086a917230e818dc9f8528e3c852f7b1aff648949b6258d1c'
+    db-repository:
+      type: string
+      description: >-
+        OCI repository the vulnerability database is pulled from, passed as
+        TRIVY_DB_REPOSITORY. Empty keeps trivy's own default, which reaches
+        ghcr.io directly; a site with no egress points this at its mirror of
+        that repository.
+      default: ''
+    java-db-repository:
+      type: string
+      description: >-
+        OCI repository for the Java database, passed as TRIVY_JAVA_DB_REPOSITORY.
+        Only fetched when a scan finds a jar. Empty keeps trivy's default.
+      default: ''
     runner-tags:
       type: array
       description: Runner selection from the estate profile.
@@ -100,12 +114,29 @@ spec:
     CI_TPL_POLICY_MODE: $[[ inputs.policy-mode ]]
     CI_TPL_SEVERITY_THRESHOLD: $[[ inputs.severity-threshold ]]
     CI_TPL_SCANNERS: $[[ inputs.scanners ]]
+    CI_TPL_DB_REPOSITORY: $[[ inputs.db-repository ]]
+    CI_TPL_JAVA_DB_REPOSITORY: $[[ inputs.java-db-repository ]]
     CI_TPL_SKIP_DIRS: $[[ inputs.skip-dirs ]]
     CI_TPL_IGNORE_UNFIXED: "$[[ inputs.ignore-unfixed ]]"
     CI_TPL_EXECUTION_IMAGE: $[[ inputs.execution-image ]]
     TRIVY_NO_PROGRESS: 'true'
   dependencies: []
   before_script:
+    - |
+      # An explicit database mirror, so the one network call this job cannot
+      # avoid is expressible in the pipeline rather than left to trivy's
+      # built-in default. Exported only when set: an empty TRIVY_DB_REPOSITORY
+      # is a repository named "", not an absent setting.
+      if [ -n "$CI_TPL_DB_REPOSITORY" ]; then
+        TRIVY_DB_REPOSITORY="$CI_TPL_DB_REPOSITORY"
+        export TRIVY_DB_REPOSITORY
+        echo "vulnerability database: $TRIVY_DB_REPOSITORY"
+      fi
+      if [ -n "$CI_TPL_JAVA_DB_REPOSITORY" ]; then
+        TRIVY_JAVA_DB_REPOSITORY="$CI_TPL_JAVA_DB_REPOSITORY"
+        export TRIVY_JAVA_DB_REPOSITORY
+        echo "java database: $TRIVY_JAVA_DB_REPOSITORY"
+      fi
     - |
       project_root=$(cd "$CI_PROJECT_DIR" && pwd -P)
       cd "$CI_PROJECT_DIR/$CI_TPL_WORKING_DIRECTORY"

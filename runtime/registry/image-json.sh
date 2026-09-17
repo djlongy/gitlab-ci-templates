@@ -244,16 +244,60 @@ ci_tpl_image_reference() {
     ci_tpl_json_string "$1" reference
 }
 
-# Write a registry auth file from CI_TPL_REGISTRY_USER and
-# CI_TPL_REGISTRY_PASSWORD. The credentials are read from the environment, never
-# passed as arguments, so they do not appear in the process table. base64 wraps
-# at 76 columns in both busybox and coreutils, so the newlines are stripped:
-# a wrapped credential produces a config.json that no client can parse.
+# Read the registry credentials from the CI variables the consumer named.
+# CI_TPL_REGISTRY_USERNAME_VARIABLE and CI_TPL_REGISTRY_PASSWORD_VARIABLE hold
+# variable NAMES, never values, and printenv resolves them: an input must not
+# become code, which is what eval or an indirect expansion would make it. The
+# estate's own names are the defaults, so a consumer that passes neither input
+# keeps the behaviour it had.
+#
+# Sets CI_TPL_REGISTRY_USER and CI_TPL_REGISTRY_PASSWORD, either of which may be
+# empty. A job that may run unauthenticated tests them; a job that must push
+# calls ci_tpl_write_registry_auth, which refuses an empty one.
+ci_tpl_load_registry_credentials() {
+    CI_TPL_REGISTRY_USERNAME_VARIABLE=${CI_TPL_REGISTRY_USERNAME_VARIABLE:-HARBOR_USER}
+    CI_TPL_REGISTRY_PASSWORD_VARIABLE=${CI_TPL_REGISTRY_PASSWORD_VARIABLE:-HARBOR_PASSWORD}
+    CI_TPL_REGISTRY_USER=$(printenv "$CI_TPL_REGISTRY_USERNAME_VARIABLE") ||
+        CI_TPL_REGISTRY_USER=''
+    CI_TPL_REGISTRY_PASSWORD=$(printenv "$CI_TPL_REGISTRY_PASSWORD_VARIABLE") ||
+        CI_TPL_REGISTRY_PASSWORD=''
+}
+
+# "set" or "empty or not defined" for one credential. The state, never the value.
+ci_tpl_credential_state() {
+    if [ -n "$1" ]; then
+        echo 'set'
+    else
+        echo 'empty or not defined'
+    fi
+}
+
+# Write a registry auth file for one registry host. The credentials are read
+# from the environment, never passed as arguments, so they do not appear in the
+# process table. base64 wraps at 76 columns in both busybox and coreutils, so
+# the newlines are stripped: a wrapped credential produces a config.json that no
+# client can parse.
+#
+# The failure names the two variables it read and which of them was empty.
+# "registry credentials are not set" on its own is what made a consumer who had
+# set its own variables believe the component could not see them, when the
+# component was reading two names that consumer had never heard of.
 ci_tpl_write_registry_auth() {
     config_dir=$1
     registry=$2
-    [ -n "$CI_TPL_REGISTRY_USER" ] && [ -n "$CI_TPL_REGISTRY_PASSWORD" ] ||
-        { ci_tpl_fail "registry credentials are not set; this job cannot push"; return 1; }
+    ci_tpl_load_registry_credentials
+    user_state=$(ci_tpl_credential_state "$CI_TPL_REGISTRY_USER")
+    secret_state=$(ci_tpl_credential_state "$CI_TPL_REGISTRY_PASSWORD")
+    if [ "$user_state" != 'set' ] || [ "$secret_state" != 'set' ]; then
+        ci_tpl_fail "registry credentials are not set; this job cannot push to ${registry}"
+        echo "ERROR: username, from \$${CI_TPL_REGISTRY_USERNAME_VARIABLE}: ${user_state}" >&2
+        echo "ERROR: password, from \$${CI_TPL_REGISTRY_PASSWORD_VARIABLE}: ${secret_state}" >&2
+        echo 'ERROR: define both as CI variables on this project, or name the variables you' >&2
+        echo 'ERROR: already have through the registry-username-variable and' >&2
+        echo 'ERROR: registry-password-variable inputs. A protected variable reaches' >&2
+        echo 'ERROR: protected branches and protected tags only.' >&2
+        return 1
+    fi
     mkdir -p "$config_dir"
     auth=$(printf '%s:%s' "$CI_TPL_REGISTRY_USER" "$CI_TPL_REGISTRY_PASSWORD" | base64 | tr -d '\n')
     printf '{"auths":{"%s":{"auth":"%s"}}}' "$registry" "$auth" > "$config_dir/config.json"
