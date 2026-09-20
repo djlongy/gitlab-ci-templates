@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/gitlab-ci-templates/mirrored-images.schema.json",
+  "title": "Mirrored tool image catalogue",
+  "description": "images/mirrored-images.yml: the third-party tool images this library runs, copied by digest into a registry the runners can reach. Empty is a valid catalogue: it says nothing has been mirrored yet.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "images"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "images": {
+      "type": "array",
+      "minItems": 0,
+      "items": {
+        "$ref": "#/$defs/image"
+      }
+    }
+  },
+  "$defs": {
+    "image": {
+      "type": "object",
+      "required": [
+        "name",
+        "source",
+        "repository",
+        "digest",
+        "tag",
+        "verified_at"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "The mirror repository name. One level, because some registries allow only one: a double dash stands in for the slash the upstream path had.",
+          "pattern": "^[a-z0-9][a-z0-9.-]{0,63}$"
+        },
+        "source": {
+          "type": "string",
+          "description": "Where the manifest was copied from, fully qualified, with no tag and no digest attached.",
+          "pattern": "^[a-z0-9][a-z0-9.-]*(:[0-9]+)?(/[a-z0-9][a-z0-9._-]*)+$"
+        },
+        "repository": {
+          "type": "string",
+          "description": "The mirror, fully qualified, with no tag and no digest. Its registry and namespace have to match the mirror_prefix in .ci/estate.yml, which tests/contracts/test_mirrored_images.py checks.",
+          "pattern": "^[a-z0-9][a-z0-9.-]*(:[0-9]+)?(/[a-z0-9][a-z0-9._-]*)+$"
+        },
+        "digest": {
+          "type": "string",
+          "description": "Unchanged by the copy: skopeo runs with --preserve-digests so a consumer's pin keeps its meaning.",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "tag": {
+          "type": "string",
+          "description": "The upstream tag the digest was published under, and the tag the mirror is pushed under. Mandatory: a registry that garbage-collects untagged manifests will reap a mirror nothing tags.",
+          "pattern": "^[A-Za-z0-9_][A-Za-z0-9._-]{0,126}$",
+          "not": {
+            "description": "A tag shaped like a commit and a pipeline number is a build artefact, and registries commonly auto-prune those by age. An upstream release tag never looks like this.",
+            "pattern": "^[0-9a-f]{7,12}-[0-9]+$"
+          }
+        },
+        "verified_at": {
+          "type": "string",
+          "description": "yyyy/mm/dd, the day the digest was read back from the mirror.",
+          "pattern": "^[0-9]{4}/[0-9]{2}/[0-9]{2}$"
+        },
+        "pinned_by": {
+          "type": "array",
+          "description": "The consumer projects that pin this mirror in their own pipeline. Present only when no template in this repository pins it: the mirror still has to be pinned by somebody, and this says who. Every path has to be a row in .ci/consumers.yml, which tests/contracts/test_mirrored_images.py checks.",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "description": "A GitLab project path, namespace and all, as .ci/consumers.yml writes it.",
+            "pattern": "^[a-z0-9][a-z0-9._-]*(/[a-z0-9][a-z0-9._-]*)+$"
+          }
+        }
+      }
+    }
+  }
+}

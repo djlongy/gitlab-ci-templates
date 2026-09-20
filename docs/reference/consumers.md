@@ -16,3 +16,8 @@ digest until the tag it pins moves.
 
 Add a row when a new project pins a tag. Remove a row when it stops. The
 ref in this file must match the committed pipeline, not an intention.
+
+`images/mirrored-images.yml` reads the project paths in this file. A mirror
+entry carrying `pinned_by` names the consumers whose own pipelines pin it,
+and every project it names has to be a row here. Remove a row and that check
+fails until the mirror entry goes too.

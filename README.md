@@ -235,6 +235,9 @@ pipelines.
   a fresh clone.
 - [`docs/howto/local-testing.md`](docs/howto/local-testing.md) — running a
   component's job locally, in its own image, before pushing.
+- [`docs/howto/mirror-tool-images.md`](docs/howto/mirror-tool-images.md) —
+  copying the tool images this library runs into a registry your runners can
+  reach, and keeping the catalogue honest once you have.
 
 ## Working in this repository
 

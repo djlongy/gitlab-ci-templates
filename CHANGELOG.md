@@ -3,14 +3,27 @@
 Release changes, migration instructions and deprecation deadlines for
 `platform/gitlab-ci-templates`. Dates are yyyy/mm/dd.
 
-## 1.3.1 — 2026/09/21
+## 1.4.0 — 2026/09/21
 
-Three components could not run where the network they assume is unavailable,
-and one piece of review evidence had no independent home. Every new input
-defaults to the value its component used before, so a consumer that changes
-nothing sees no change.
+Everything in this release is about running where the network you assume is
+not there. Three components fetched from a host with no way to redirect them,
+and there was no recorded way to move the tool images themselves. Every new
+input defaults to the value its component used before, so a consumer that
+changes nothing sees no change.
 
 ### Added
+
+- **`images/mirrored-images.yml`**, a catalogue of the tool images this
+  library runs, copied by digest into a registry your own runners can reach,
+  with a schema and a drift check. A component pinning a digest that was never
+  copied fails at pull time on every consumer at once, with a message about
+  the registry rather than about the pin;
+  `tests/contracts/test_mirrored_images.py` turns that into a test failure
+  here instead. An entry a consumer pins rather than this library carries
+  `pinned_by`, and every project it names has to be a row in
+  `.ci/consumers.yml`. The catalogue ships empty, because this repository
+  pins upstream: `docs/howto/mirror-tool-images.md` is how to fill it in, and
+  why the copy has to preserve digests.
 
 - **`ignore-file` on `security-image-trivy`**, and `image-trivy-ignore-file`
   on the `container-buildkit` composition, passing a repository path to trivy
@@ -39,8 +52,9 @@ nothing sees no change.
 
 ### Upgrading from 1.3.0
 
-Change your `ref` to `1.3.1`. No input changed its default and no job changed
-its name.
+Change your `ref` to `1.4.0`. No input changed its default and no job changed
+its name. Nothing reads the new catalogue at pipeline time, so an estate that
+pulls its tool images straight from upstream can ignore it.
 
 ## 1.3.0 — 2026/09/18
 

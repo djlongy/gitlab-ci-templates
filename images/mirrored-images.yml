@@ -1,0 +1,62 @@
+---
+# EXAMPLE mirror catalogue.
+#
+# Every third-party tool image this library runs, copied into a registry your
+# own runners can reach. This is the file you fill in when the machines that
+# run your jobs cannot pull from the registry the component defaults name.
+#
+# NO PIPELINE READS THIS FILE. No component, no composition and no job consumes
+# an entry. One thing reads it: tests/contracts/test_mirrored_images.py, which
+# checks it against the schema and against the references the templates
+# actually pin. It is the reviewed list, so adding a tool image is a merge
+# request rather than a push nobody saw.
+#
+# Why a catalogue rather than a script that copies whatever it finds: a mirror
+# is a second place a digest can be wrong. A component pinning a digest that
+# was never copied fails on every consumer at once, at pull time, with a
+# message about the registry rather than about the pin. The drift check turns
+# that into a test failure in this repository instead.
+#
+# Naming. Some registries allow only one level of repository name, so the
+# upstream path is flattened and can be read back:
+#
+#   library image        alpine         -> alpine
+#   namespaced image     anchore/syft   -> anchore--syft
+#
+# A double dash joins the namespace to the name, so `anchore--syft` recovers to
+# `anchore/syft` by replacing `--` with `/`. If your registry takes nested
+# names, keep the upstream path and the same check still holds.
+#
+# Schema (tests/contracts/mirrored-images.schema.json):
+#
+#   schema_version  1
+#   images[]
+#     name          the mirror repository name, flattened per the rule above
+#     source        where the manifest was copied from, no tag and no digest
+#     repository    the mirror, matching mirror_prefix in .ci/estate.yml
+#     digest        sha256: and 64 hex characters, unchanged by the copy
+#     tag           the upstream tag the digest was published under, and the
+#                   tag the mirror is pushed under. Mandatory: a registry that
+#                   collects untagged manifests will reap an untagged mirror.
+#     verified_at   yyyy/mm/dd, the day the digest was read back from the
+#                   mirror, not the day the row was written
+#     pinned_by     optional. The consumer projects that pin this mirror in
+#                   their own pipeline, for an entry no template here names.
+#                   Every path has to be a row in .ci/consumers.yml.
+#
+# Copy each entry by digest, never by tag:
+#
+#   skopeo copy --all --preserve-digests \
+#     docker://<source>@<digest> docker://<repository>:<tag>
+#
+# --preserve-digests is what keeps a consumer's pin meaning the same image on
+# both sides. Without it the copy may re-encode the manifest and the digest a
+# component pins will not be the digest the mirror holds.
+#
+# The list is empty because this repository ships `mirror_prefix: docker.io/`
+# in .ci/estate.yml: the components pin upstream, so there is nothing to
+# mirror. Set that prefix to your own registry, add a row per tool image, and
+# the drift checks start enforcing that the two agree. An empty catalogue is a
+# valid state and says so; a catalogue with a made-up digest would not be.
+schema_version: 1
+images: []
