@@ -42,6 +42,24 @@ spec:
         Accept a resource whose schema kubeconform cannot find. Off by default:
         a CRD-backed resource with no schema is unvalidated, not valid.
       default: false
+    kubeconform-release-url:
+      type: string
+      description: >-
+        Base URL the pinned kubeconform release is downloaded from, one
+        directory above the version. A site with no path to the upstream
+        releases points this at its own mirror; the archive checksum is pinned
+        either way, so a mirror cannot serve a different binary.
+      default: 'https://github.com/yannh/kubeconform/releases/download'
+      regex: '^https?://[A-Za-z0-9._~%+-]+(/[A-Za-z0-9._~%+-]+)*$'
+    kustomize-release-url:
+      type: string
+      description: >-
+        Base URL the pinned kustomize release is downloaded from, one directory
+        above the version. A site with no path to the upstream releases points
+        this at its own mirror; the archive checksum is pinned either way, so a
+        mirror cannot serve a different binary.
+      default: 'https://github.com/kubernetes-sigs/kustomize/releases/download'
+      regex: '^https?://[A-Za-z0-9._~%+-]+(/[A-Za-z0-9._~%+-]+)*$'
     execution-image:
       type: string
       description: >-
@@ -241,14 +259,16 @@ spec:
       CI_TPL_KUBERNETES_VERSION='$[[ inputs.kubernetes-version ]]'
       CI_TPL_IGNORE_MISSING_SCHEMAS='$[[ inputs.ignore-missing-schemas ]]'
       export CI_TPL_KUBERNETES_VERSION CI_TPL_IGNORE_MISSING_SCHEMAS
+      ci_tpl_kubeconform_url='$[[ inputs.kubeconform-release-url ]]'
+      ci_tpl_kustomize_url='$[[ inputs.kustomize-release-url ]]'
       ci_tpl_install_tool kubeconform \
-        'https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz' \
-        'https://github.com/yannh/kubeconform/releases/download/v0.6.7/CHECKSUMS' \
+        "${ci_tpl_kubeconform_url}/v0.6.7/kubeconform-linux-amd64.tar.gz" \
+        "${ci_tpl_kubeconform_url}/v0.6.7/CHECKSUMS" \
         '5946c6300e94d5f43c877cb41ff7117c63130f1710ce20f04fd721f99fb0485e' \
         'kubeconform-linux-amd64.tar.gz' kubeconform /tmp/ci-tpl-bin
       ci_tpl_install_tool kustomize \
-        'https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.5.0/kustomize_v5.5.0_linux_amd64.tar.gz' \
-        'https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.5.0/checksums.txt' \
+        "${ci_tpl_kustomize_url}/kustomize%2Fv5.5.0/kustomize_v5.5.0_linux_amd64.tar.gz" \
+        "${ci_tpl_kustomize_url}/kustomize%2Fv5.5.0/checksums.txt" \
         '5070120f7ec21a36d213ebea62f405901e5af5a77597f32355f78963dc0910c2' \
         'kustomize_v5.5.0_linux_amd64.tar.gz' kustomize /tmp/ci-tpl-bin
       PATH="/tmp/ci-tpl-bin:$PATH"

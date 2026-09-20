@@ -174,6 +174,11 @@ One thing to understand before relying on the file: a value of `unresolved`
 means nobody has verified that fact, and it is not a blank to be filled in by
 guessing. It is deliberately recorded as unknown.
 
+The list of who pins this library is
+[`.ci/consumers.yml`](../../.ci/consumers.yml). A release bump is one
+grep-and-replace merge request per row. Field guide:
+[`docs/reference/consumers.md`](../reference/consumers.md).
+
 ## The project record
 
 Each consuming repository keeps a `.ci/project.yml`: which composition it

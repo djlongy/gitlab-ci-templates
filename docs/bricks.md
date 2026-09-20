@@ -167,7 +167,7 @@ Sign one built image with cosign and attach the evidence the release requires.
 - Producer inputs: none
 - Reads: `.ci-artifacts/{instance}/security-sbom-syft`, `.ci-artifacts/{instance}/{build-component}/image.json`, `.ci-artifacts/{instance}/{scan-component}`
 - Files: `templates/container-sign-attest-cosign/template.yml`, `templates/container-sign-attest-cosign/contract.yml`, `runtime/httpjson.py`, `runtime/registry/ca-bundle.sh`, `runtime/sign/cosign_attest.py`, `runtime/sign/cosign_checksums.txt`, `runtime/subject.py`
-- Test: `python3 -m pytest tests/pipelines/test_compositions.py tests/pipelines/test_security_image_components.py tests/runtime/embed/test_generate.py tests/runtime/registry/test_ca_bundle.py tests/runtime/sign/test_cosign_attest.py tests/runtime/test_subject.py`
+- Test: `python3 -m pytest tests/contracts/test_cosign_inventory.py tests/pipelines/test_compositions.py tests/pipelines/test_security_image_components.py tests/runtime/embed/test_generate.py tests/runtime/registry/test_ca_bundle.py tests/runtime/sign/test_cosign_attest.py tests/runtime/test_subject.py`
 - Egress: `registry.example.com`, `vault.example.com`, `github.com (the pinned cosign release asset)`
 
 ## container-smoke-test

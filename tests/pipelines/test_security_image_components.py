@@ -663,3 +663,13 @@ def test_grype_takes_a_database_mirror_and_an_archive():
     merged = result["merged_yaml"]
     assert "CI_TPL_DB_UPDATE_URL: https://artifactory.example.com/grype/databases" in merged
     assert 'CI_TPL_DB_ARCHIVE: "/opt/grype-db/vulnerability-db.tar.zst"' in merged
+
+
+def test_trivy_ignore_file_defaults_empty():
+    """An ignore file is opt-in. Empty skips --ignorefile, so 1.3.0 consumers
+    see no change. A named path that is missing fails the job at run time."""
+    spec = declared("security-image-trivy")
+    assert spec["ignore-file"]["default"] == ""
+    text = template_path("security-image-trivy").read_text()
+    assert "--ignorefile" in text
+    assert "CI_TPL_IGNORE_FILE" in text

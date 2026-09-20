@@ -256,6 +256,13 @@ spec:
         gating.
       options: ['true', 'false']
       default: 'false'
+    image-trivy-ignore-file:
+      type: string
+      description: >-
+        Path to a Trivy ignore file forwarded to security-image-trivy as
+        ignore-file. Empty skips the flag.
+      default: ''
+      regex: '^$|^[A-Za-z0-9._][A-Za-z0-9._/-]{0,191}$'
     push-candidate:
       type: boolean
       description: >-
@@ -699,6 +706,7 @@ include:
       policy-mode: $[[ inputs.image-policy-mode ]]
       severity-threshold: $[[ inputs.scan-severity ]]
       ignore-unfixed: $[[ inputs.image-ignore-unfixed ]]
+      ignore-file: $[[ inputs.image-trivy-ignore-file ]]
       scanners: vuln
       run-rules:
         - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
@@ -723,6 +731,7 @@ include:
       policy-mode: $[[ inputs.image-policy-mode ]]
       severity-threshold: $[[ inputs.scan-severity ]]
       ignore-unfixed: $[[ inputs.image-ignore-unfixed ]]
+      ignore-file: $[[ inputs.image-trivy-ignore-file ]]
       scanners: vuln
       run-rules:
         - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG && $CI_COMMIT_REF_PROTECTED == "true"'
