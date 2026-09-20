@@ -147,6 +147,14 @@ spec:
       type: string
       description: Trivy scanners to run against the image.
       default: vuln
+    ignore-file:
+      type: string
+      description: >-
+        Path to a Trivy ignore file in the repository, passed as --ignorefile.
+        Empty skips the flag. Each ignored finding needs an id, a reason and
+        an expiry date in that file. A missing path fails the job.
+      default: ''
+      regex: '^$|^[A-Za-z0-9._][A-Za-z0-9._/-]{0,191}$'
 ---
 # A `needs:` entry cannot name an empty job, so the list is assembled in
 # templates/_needs/needs.yml and this component includes the one
@@ -189,6 +197,7 @@ include:
     CI_TPL_SEVERITY_THRESHOLD: $[[ inputs.severity-threshold ]]
     CI_TPL_IGNORE_UNFIXED: '$[[ inputs.ignore-unfixed ]]'
     CI_TPL_SCANNERS: $[[ inputs.scanners ]]
+    CI_TPL_IGNORE_FILE: '$[[ inputs.ignore-file ]]'
     CI_TPL_DB_REPOSITORY: $[[ inputs.db-repository ]]
     CI_TPL_JAVA_DB_REPOSITORY: $[[ inputs.java-db-repository ]]
     # Credential variable NAMES, never values. The runtime resolves them with
@@ -983,12 +992,28 @@ include:
       if [ "$CI_TPL_IGNORE_UNFIXED" = "true" ]; then
         CI_TPL_UNFIXED_FLAG='--ignore-unfixed'
       fi
-      trivy image \
-        --scanners "$CI_TPL_SCANNERS" \
-        $CI_TPL_UNFIXED_FLAG \
-        --format json \
-        --output "$CI_TPL_ARTIFACT_DIR/trivy-image.json" \
-        "$CI_TPL_SUBJECT" || exit 1
+      if [ -n "$CI_TPL_IGNORE_FILE" ]; then
+        case "$CI_TPL_IGNORE_FILE" in
+          *..*|/*)
+            echo "ERROR: ignore-file must be a path inside the repository" >&2
+            exit 1
+            ;;
+        esac
+        if [ ! -f "$CI_TPL_IGNORE_FILE" ]; then
+          echo "ERROR: ignore-file $CI_TPL_IGNORE_FILE is missing" >&2
+          exit 1
+        fi
+        echo "ignore-file: $CI_TPL_IGNORE_FILE"
+      fi
+      set -- trivy image --scanners "$CI_TPL_SCANNERS"
+      if [ -n "$CI_TPL_UNFIXED_FLAG" ]; then
+        set -- "$@" --ignore-unfixed
+      fi
+      if [ -n "$CI_TPL_IGNORE_FILE" ]; then
+        set -- "$@" --ignorefile "$CI_TPL_IGNORE_FILE"
+      fi
+      set -- "$@" --format json --output "$CI_TPL_ARTIFACT_DIR/trivy-image.json" "$CI_TPL_SUBJECT"
+      "$@" || exit 1
 
       trivy convert --format sarif \
         --output "$CI_TPL_ARTIFACT_DIR/trivy-image.sarif" \

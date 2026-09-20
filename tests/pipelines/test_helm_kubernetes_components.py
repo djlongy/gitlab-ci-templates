@@ -300,6 +300,42 @@ def test_every_runtime_download_is_pinned_by_a_checksum():
             f"{component} installs a tool this test does not pin"
 
 
+def test_every_runtime_download_can_be_redirected_to_a_mirror():
+    """Section 12. A site with no path to the upstream release needs a mirror.
+
+    The default names the upstream release root, so nothing changes for a
+    consumer that can reach it. The checksum stays a literal argument, so a
+    mirror can serve a different host but not a different binary.
+    """
+    expected = {
+        "helm-validate": {
+            "kubeconform-release-url": "https://github.com/yannh/kubeconform/releases/download",
+        },
+        "kubernetes-validate": {
+            "kubeconform-release-url": "https://github.com/yannh/kubeconform/releases/download",
+            "kustomize-release-url": "https://github.com/kubernetes-sigs/kustomize/releases/download",
+        },
+    }
+    mirror = "https://mirror.example.com/releases"
+    for component, urls in expected.items():
+        spec = yaml.safe_load(template_text(component).partition("\n---\n")[0])
+        inputs = spec["spec"]["inputs"]
+        for name, default in urls.items():
+            assert inputs[name]["default"] == default, f"{component}: {name} default moved"
+            assert inputs[name]["regex"], f"{component}: {name} has no regex"
+
+        overrides = {"instance": "demo", **REQUIRED_INPUTS[component]}
+        overrides.update({name: mirror for name in urls})
+        job = render_module.render(component, overrides)
+        script = "\n".join(next(iter(job.values()))["before_script"])
+        assert "github.com" not in script, f"{component} still fetches from the upstream default"
+        for name in urls:
+            variable = "ci_tpl_%s_url" % name.split("-")[0]
+            assert f"{variable}='{mirror}'" in script, f"{component}: {name} does not reach the job"
+            assert script.count("${%s}/" % variable) == 2, \
+                f"{component}: {name} does not reach both the asset and its checksum file"
+
+
 def test_the_publish_component_does_not_default_to_running_on_a_branch():
     """Section 6.1: never default a mutation to unconditional execution.
 

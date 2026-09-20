@@ -7,9 +7,10 @@ component, no composition, no generator. These tests are the whole of its
 enforcement, so they are written to fail against the two ways a hand-edited
 digest catalogue goes wrong rather than only to accept the shipped one.
 
-The shipped catalogue is empty, because no runner-images project exists yet, so
-every check that matters is also run against synthetic documents. A test that
-only walked an empty list would pass whatever the schema said.
+Every check that matters is also run against synthetic documents rather than
+only against the shipped file, which carries five entries all built by one
+pipeline. A test that only walked what happens to be shipped would pass
+whatever the schema said.
 """
 
 from __future__ import annotations

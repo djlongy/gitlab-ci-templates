@@ -40,7 +40,10 @@ trust:
   network_egress:
     # The execution image.
     - registry.example.com
-    # The pinned kubeconform release and its checksum file.
+    # The pinned kubeconform release and its checksum file. This is where
+    # kubeconform-release-url points by default; a site with no path upstream
+    # redirects it at its own mirror and this egress goes away. The archive
+    # checksum is pinned either way.
     - github.com
     - objects.githubusercontent.com
     # kubeconform's built-in schema catalogue. This is a MOVING remote: the

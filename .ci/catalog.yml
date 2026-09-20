@@ -2894,6 +2894,14 @@ components:
         description: 'Accept a resource whose schema kubeconform cannot find. Off by default:
           a CRD-backed resource with no schema is unvalidated, not valid.'
         default: false
+      kubeconform-release-url:
+        type: string
+        description: Base URL the pinned kubeconform release is downloaded from, one directory
+          above the version. A site with no path to the upstream releases points this at its
+          own mirror; the archive checksum is pinned either way, so a mirror cannot serve
+          a different binary.
+        default: https://github.com/yannh/kubeconform/releases/download
+        regex: ^https?://[A-Za-z0-9._~%+-]+(/[A-Za-z0-9._~%+-]+)*$
       execution-image:
         type: string
         description: 'Approved helm execution image, pinned by digest.
@@ -3014,6 +3022,22 @@ components:
         description: 'Accept a resource whose schema kubeconform cannot find. Off by default:
           a CRD-backed resource with no schema is unvalidated, not valid.'
         default: false
+      kubeconform-release-url:
+        type: string
+        description: Base URL the pinned kubeconform release is downloaded from, one directory
+          above the version. A site with no path to the upstream releases points this at its
+          own mirror; the archive checksum is pinned either way, so a mirror cannot serve
+          a different binary.
+        default: https://github.com/yannh/kubeconform/releases/download
+        regex: ^https?://[A-Za-z0-9._~%+-]+(/[A-Za-z0-9._~%+-]+)*$
+      kustomize-release-url:
+        type: string
+        description: Base URL the pinned kustomize release is downloaded from, one directory
+          above the version. A site with no path to the upstream releases points this at its
+          own mirror; the archive checksum is pinned either way, so a mirror cannot serve
+          a different binary.
+        default: https://github.com/kubernetes-sigs/kustomize/releases/download
+        regex: ^https?://[A-Za-z0-9._~%+-]+(/[A-Za-z0-9._~%+-]+)*$
       execution-image:
         type: string
         description: 'Approved execution image, pinned by digest. Needs a POSIX shell, tar
@@ -4404,6 +4428,13 @@ components:
         type: string
         description: Trivy scanners to run against the image.
         default: vuln
+      ignore-file:
+        type: string
+        description: Path to a Trivy ignore file in the repository, passed as --ignorefile.
+          Empty skips the flag. Each ignored finding needs an id, a reason and an expiry date
+          in that file. A missing path fails the job.
+        default: ''
+        regex: ^$|^[A-Za-z0-9._][A-Za-z0-9._/-]{0,191}$
     introduced_in: 1.0.0
     minimum_gitlab: '18.9'
     emitted_jobs:
@@ -4470,24 +4501,26 @@ components:
       notes: 'Exactly one of build-job and subject-reference. build-job reads the producer''s
         image.json from its artifacts; subject-reference names an image this pipeline did
         not build, and the job then writes the same record into its own artefact root. Neither
-        or both fails the job, naming both inputs. Failure semantics: a finding at or above
-        severity-threshold fails the job in blocking mode and is recorded in advisory mode.
-        A scanner crash, a database that did not download, an empty report or a report missing
-        its SchemaVersion marker fails the job in BOTH modes. Unfixed vulnerabilities gate
-        by default, unlike the predecessor template, which set TRIVY_IGNORE_UNFIXED true.
-        gitlab-linted through the CI Lint API; no job ran. runtime-tested: the scan wrapper
-        has unit tests, and trivy''s --download-db-only, convert-to-sarif, convert-to-template
-        and version extraction were executed against the pinned image digest on 2026/09/15.
-        `released` in this repository means a consumer job executed green, not that the component
-        looks finished. Both halves of the input pair have now run. On the build-job path,
-        as the third brick of kit B included directly rather than through a composition, the
-        job scanned the digest the same pipeline''s build wrote into image.json. On the subject-reference
-        path, in a jobset with no build job at all and therefore `needs: []`, it scanned an
-        image an earlier pipeline had promoted and downloaded no artifact from any job. Each
-        run recorded its own reference in scan-result.json''s subject. Evidence: green against
-        an image in that registry, and blocking on a second consumer whose upstream base carried
-        7 critical and 121 high findings, where it stopped the chain. Both are runs; the second
-        is the one that shows the gate is not decorative.'
+        or both fails the job, naming both inputs. ignore-file, when set, is passed as trivy
+        --ignorefile; a missing path fails the job in both modes. Empty (the default) skips
+        the flag. Failure semantics: a finding at or above severity-threshold fails the job
+        in blocking mode and is recorded in advisory mode. A scanner crash, a database that
+        did not download, an empty report or a report missing its SchemaVersion marker fails
+        the job in BOTH modes. Unfixed vulnerabilities gate by default, unlike the predecessor
+        template, which set TRIVY_IGNORE_UNFIXED true. gitlab-linted through the CI Lint API;
+        no job ran. runtime-tested: the scan wrapper has unit tests, and trivy''s --download-db-only,
+        convert-to-sarif, convert-to-template and version extraction were executed against
+        the pinned image digest on 2026/09/15. `released` in this repository means a consumer
+        job executed green, not that the component looks finished. Both halves of the input
+        pair have now run. On the build-job path, as the third brick of kit B included directly
+        rather than through a composition, the job scanned the digest the same pipeline''s
+        build wrote into image.json. On the subject-reference path, in a jobset with no build
+        job at all and therefore `needs: []`, it scanned an image an earlier pipeline had
+        promoted and downloaded no artifact from any job. Each run recorded its own reference
+        in scan-result.json''s subject. Evidence: green against an image in that registry,
+        and blocking on a second consumer whose upstream base carried 7 critical and 121 high
+        findings, where it stopped the chain. Both are runs; the second is the one that shows
+        the gate is not decorative.'
   - name: security-repository-audit
     kind: component
     path: templates/security-repository-audit/template.yml
@@ -6420,6 +6453,12 @@ pipelines:
           - 'true'
           - 'false'
         default: 'false'
+      image-trivy-ignore-file:
+        type: string
+        description: Path to a Trivy ignore file forwarded to security-image-trivy as ignore-file.
+          Empty skips the flag.
+        default: ''
+        regex: ^$|^[A-Za-z0-9._][A-Za-z0-9._/-]{0,191}$
       push-candidate:
         type: boolean
         description: Push the build result to the candidate registry. False builds only, produces

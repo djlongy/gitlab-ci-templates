@@ -1,0 +1,31 @@
+---
+# EXAMPLE consumer list.
+#
+# Projects that pin this library, the ref each one pins, and the files that
+# hold the include. Nothing reads this at pipeline time: the pin in the
+# committed .gitlab-ci.yml is what runs. The file exists so that a release
+# bump is a known list of merge requests rather than a search.
+#
+# This is the file you replace when you fork this repository. The rows below
+# describe a fictional estate so the shape and the schema are runnable out of
+# the box. Nothing here is a fact about anyone's projects.
+#
+# Contract: docs/reference/consumers.md.
+
+schema_version: 1
+
+consumers:
+  - project: platform/image-factory
+    ref: '1.4.0'
+    files:
+      - .gitlab-ci.yml
+      - ci/image.yml
+    notes: >-
+      Several include refs in two files. A digest catalogue bump in
+      images/runner-images.yml is a release of its own.
+
+  - project: platform/docs-site
+    ref: '1.0.1'
+    files:
+      - .gitlab-ci.yml
+    notes: Direct component includes, not a composition.

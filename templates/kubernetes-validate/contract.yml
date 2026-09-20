@@ -39,6 +39,9 @@ trust:
     # The execution image.
     - registry.example.com
     # The pinned kubeconform and kustomize releases and their checksum files.
+    # This is where kubeconform-release-url and kustomize-release-url point by
+    # default; a site with no path upstream redirects both at its own mirror
+    # and this egress goes away. The archive checksums are pinned either way.
     - github.com
     - objects.githubusercontent.com
     # kubeconform's built-in schema catalogue. This is a MOVING remote: the

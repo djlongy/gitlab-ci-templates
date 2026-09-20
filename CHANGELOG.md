@@ -3,6 +3,59 @@
 Release changes, migration instructions and deprecation deadlines for
 `platform/gitlab-ci-templates`. Dates are yyyy/mm/dd.
 
+## 1.4.0 — 2026/09/21
+
+Everything in this release is about running where the network you assume is
+not there. Three components fetched from a host with no way to redirect them,
+and there was no recorded way to move the tool images themselves. Every new
+input defaults to the value its component used before, so a consumer that
+changes nothing sees no change.
+
+### Added
+
+- **`images/mirrored-images.yml`**, a catalogue of the tool images this
+  library runs, copied by digest into a registry your own runners can reach,
+  with a schema and a drift check. A component pinning a digest that was never
+  copied fails at pull time on every consumer at once, with a message about
+  the registry rather than about the pin;
+  `tests/contracts/test_mirrored_images.py` turns that into a test failure
+  here instead. An entry a consumer pins rather than this library carries
+  `pinned_by`, and every project it names has to be a row in
+  `.ci/consumers.yml`. The catalogue ships empty, because this repository
+  pins upstream: `docs/howto/mirror-tool-images.md` is how to fill it in, and
+  why the copy has to preserve digests.
+
+- **`ignore-file` on `security-image-trivy`**, and `image-trivy-ignore-file`
+  on the `container-buildkit` composition, passing a repository path to trivy
+  as `--ignorefile`. A path outside the checkout, or a path that does not
+  exist, fails the job rather than being ignored. Empty, the default, passes
+  no flag. This is how a finding that a rebuild cannot clear gets recorded and
+  reviewed in the repository instead of lowering the whole gate to advisory.
+- **`kubeconform-release-url` on `helm-validate` and `kubernetes-validate`,
+  and `kustomize-release-url` on `kubernetes-validate`.** Both components
+  install their toolchain at job time, and the release host was written into
+  the script with no way to change it, so neither could run where that host is
+  unreachable. Each input defaults to the release root it used before. The
+  archive checksums stay literal arguments in the template, so a mirror may
+  serve a different host and still cannot serve a different binary.
+- **`.ci/consumers.yml`**, the list of repositories that pin this library,
+  with the ref and the files holding each include. Nothing reads it at
+  pipeline time; it exists so a release bump is a known list of merge requests
+  rather than a search. Field guide: `docs/reference/consumers.md`.
+- **`templates/container-sign-attest-cosign/README.md`**, on publishing the
+  signing public key. Verifying a pipeline with a key that pipeline printed
+  into its own log proves only that the pipeline agrees with itself. Commit
+  the public half beside the component and reviewers verify against a file
+  with history. `tests/contracts/test_cosign_inventory.py` checks that key is
+  a public PEM and, with cosign on PATH, that it verifies every digest in
+  `images/runner-images.yml`; both skip while no key is committed.
+
+### Upgrading from 1.3.0
+
+Change your `ref` to `1.4.0`. No input changed its default and no job changed
+its name. Nothing reads the new catalogue at pipeline time, so an estate that
+pulls its tool images straight from upstream can ignore it.
+
 ## 1.3.0 — 2026/09/18
 
 Every brick of the container chain can be dropped on its own, a component can
