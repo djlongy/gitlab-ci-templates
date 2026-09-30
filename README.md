@@ -1,299 +1,60 @@
 # gitlab-ci-templates
 
-A shared GitLab CI library, built to one written standard. A consuming
-project's whole `.gitlab-ci.yml` is one `include:` of a composition plus the
-inputs that describe the workload. No stages, no job bodies, no jobs disabled.
+GitLab CI components and complete pipelines for builds, infrastructure checks, security scans and wiki sync.
 
-Three layers: `templates/` holds 36 single-capability **components**,
-`pipelines/` holds 11 **compositions** that wire them into a working pipeline,
-and `runtime/` holds the scripts those jobs execute — carried inside the
-templates so a component is one include and not an include plus a checkout.
+## Requirements
 
-Every component ships a `contract.yml` recording its inputs, the jobs it emits,
-its artifacts, the secrets it needs, the image it runs and, in particular, the
-**evidence** behind its status. `.ci/catalog.yml` is generated from those
-contracts, so the inventory cannot drift from the thing it inventories.
-
-The repository is governed by
-[`docs/gitlab-ci-agent-standard.md`](docs/gitlab-ci-agent-standard.md), which
-defines the layout, naming, input, artifact and gate contracts every file here
-meets.
-
-This is the public copy of a library that runs on a private GitLab. Host names,
-registries, project ids and consumer names throughout are illustrative — see
-**Forking** below for what to change.
-
-## Start here: two-way wiki sync in five minutes
-
-The most-adopted thing here mirrors a repository's `docs/` folder to its GitLab
-wiki and brings wiki edits back as commits by their author. Set `WIKI_TOKEN` as
-a group CI variable, add three lines to a repository's `.gitlab-ci.yml`, and the
-job wires its own webhook on the first default-branch run.
-
-[**`docs/howto/docs-wiki-sync.md`**](docs/howto/docs-wiki-sync.md) is the whole
-adoption, for a reader with no context: what it mirrors, how conflicts resolve,
-every input, the token and its scope, how to verify a first run, rolling it out
-across many repositories, and a troubleshooting table. Getting the library onto
-your own GitLab first is
-[**`docs/howto/consuming-the-library.md`**](docs/howto/consuming-the-library.md).
+- GitLab 18.9 or newer; component contracts record runner and runtime requirements.
+- For the wiki example: GitLab Runner 16.0+ with an untagged Docker executor, access to GitLab, Docker Hub and your Python package index.
 
 ## Usage
 
-Pick a composition from the table below, include it, and supply its inputs.
+This example syncs your repository's `docs/` folder with its GitLab wiki.
+Complete the preconditions below in a project that does not already have a pipeline.
 
-```yaml
-include:
-  - project: 'platform/gitlab-ci-templates'
-    ref: '<full commit SHA or protected release tag>'
-    file: '/pipelines/container-buildkit.yml'
-    inputs:
-      instance: api
-      image-repository: 'registry.example.com/dev/platform/api'
-      dockerfile: 'Dockerfile'
-      semgrep-rules: 'ci/semgrep-rules.yml'
-      lockfiles: 'go.sum'
-```
+1. Save this as your consumer project's `.gitlab-ci.yml`, replacing the project path with your GitLab copy of this library:
 
-That is the complete `.gitlab-ci.yml` of a project that builds one image from a
-Dockerfile and releases it. `instance` names the workload: it becomes the
-prefix of every job name (`api:container-build-buildkit`,
-`api:security-image-trivy`, …) and the directory every artifact lands in
-(`.ci-artifacts/api/<component>/`). Two workloads in one project are two
-includes with two instance names.
+   ```yaml
+   include:
+     - project: 'platform/gitlab-ci-templates'
+       ref: '1.4.0'
+       file: '/pipelines/docs-wiki.yml'
+   ```
 
-`ref` must be a full commit SHA or a protected release tag. `.ci/estate.yml`
-records `shared_ci.approved_ref`, which is the tag to pin; a reviewed commit SHA
-is equally valid. A branch name is a moving target and section 14.2 forbids it.
+2. Stage your pipeline and documentation: `git add .gitlab-ci.yml docs/index.md`
+3. Commit them on your default branch: `git commit -m "ci: sync documentation with the project wiki"`
+4. Push the commit: `git push origin HEAD`
 
-A worked example for every composition, with the comments explaining each
-input, is in [`examples/`](examples/).
+## Preconditions
 
-New here? [`docs/howto/consuming-the-library.md`](docs/howto/consuming-the-library.md)
-explains why components and compositions are separate, how the naming works, why
-`ref: main` is refused, what `.ci/estate.yml` and `.ci/project.yml` are for, and
-the two ways to consume this library from a GitLab that is not this host.
+- Import this library, including tag `1.4.0`, into your GitLab; protect the tag and grant consumers read access. Compositions use nested local includes and require `include:project`.
+- Enable your consumer project's wiki and create `docs/index.md` with the content you want on its home page.
+- Set a masked `WIKI_TOKEN` CI/CD variable using a group access token with Maintainer access and `api` scope. Its identity must be allowed to push to the default branch. A protected variable requires a protected default branch.
+- Set `PIP_INDEX_URL` to a package index your runner can reach for the pinned Python dependencies, or supply an execution image with PyYAML installed.
 
-## Supported compositions
+## Behaviour
 
-`released` means a consumer pipeline ran every job the composition creates and
-they went green. `experimental` means it has not, and each contract says why —
-usually that a gated half (an apply, a build, a publish) has never been
-triggered.
+Each composition owns `workflow:` and `stages:`; include one per pipeline.
+For an existing pipeline, use a component from `templates/` and supply its stage and required inputs.
+An `instance` prefixes job names and artifact paths when the component produces artifacts.
 
-Three things that are deliberately NOT a run: a job GitLab created and nobody
-started, a job a rule skipped, and a lint. The merged configuration of every
-composition here compiles against GitLab 18.9.1-ee and every runtime helper has
-unit tests, and neither of those promotes anything. The evidence labels are
-cumulative — `source-reviewed`, `yaml-parsed`, `gitlab-linted`,
-`runtime-tested`, `integration-tested`, `report-ingestion-tested` — and
-`.ci/compatibility.yml` records which each unit holds. Read the status and
-evidence for a composition in [`.ci/catalog.yml`](.ci/catalog.yml) before
-depending on it.
+Wiki sync runs on default-branch pushes, wiki triggers and schedules when `WIKI_TOKEN` is available.
+It imports wiki edits into your default branch, regenerates the wiki from `docs/`, and reconciles its webhook and pipeline trigger.
+It does not create a periodic schedule.
 
-| Composition | Required inputs | Jobs it emits | Status |
-| --- | --- | --- | --- |
-| [`container-buildkit`](pipelines/container-buildkit.yml) | `instance`, `image-repository`, `semgrep-rules`, `lockfiles` | verify (4), build, scan (2), attest, publish | experimental |
-| [`container-ko`](pipelines/container-ko.yml) | `instance`, `image-repository`, `semgrep-rules`, `lockfiles` | same chain, built by ko, no Dockerfile | experimental |
-| [`container-jib`](pipelines/container-jib.yml) | `instance`, `image-repository`, `semgrep-rules`, `lockfiles` | same chain, built by Jib from Gradle | experimental |
-| [`terraform-verify`](pipelines/terraform-verify.yml) | `instance` | `terraform-fmt`, `terraform-validate`, `security-filesystem-trivy` | experimental |
-| [`terraform-deploy`](pipelines/terraform-deploy.yml) | `instance`, `environment`, `state-id` | verify (3), `terraform-plan`, `terraform-apply` | experimental |
-| [`terraform-module`](pipelines/terraform-module.yml) | `instance`, `module-name`, `module-system` | verify (2), `terraform-module-publish` | experimental |
-| [`ansible-verify`](pipelines/ansible-verify.yml) | `instance`, `playbook` | `ansible-lint`, `ansible-syntax`, `security-secrets-gitleaks`, optional `ansible-check` | experimental |
-| [`helm-chart`](pipelines/helm-chart.yml) | `instance`, `chart-paths`, `chart-path`, `chart-repository` | `helm-validate`, `security-secrets-gitleaks`, `helm-package-publish` | experimental |
-| [`kubernetes-gitops`](pipelines/kubernetes-gitops.yml) | `instance`, `manifest-paths` | `kubernetes-validate`, `security-secrets-gitleaks`, optional `helm-validate` | released |
-| [`docs-wiki`](pipelines/docs-wiki.yml) | none | `docs-wiki-sync` | released |
-| [`container-mirror`](pipelines/container-mirror.yml) | `instance`, `repository-prefix`, `s3-endpoint`, `s3-bucket`, `s3-prefix`, `have-key` | `container-list-rke2`, `container-mirror-skopeo`, `container-export-skopeo` | released |
+## Contents
 
-The 36 components these compositions are built from are individually
-includable, for a project whose pipeline is mostly its own. Their inputs,
-emitted job names, outputs, required secret names and evidence level are all in
-[`.ci/catalog.yml`](.ci/catalog.yml) — the generated inventory, and the only
-place to check what actually exists at a given revision.
+- [`pipelines/`](pipelines/) — complete compositions; each YAML file declares its inputs in `spec:inputs`.
+- [`templates/`](templates/) — individual components; each `contract.yml` declares jobs, outputs, secrets and execution requirements.
+- [`.ci/catalog.yml`](.ci/catalog.yml) — generated component and composition inventory, including availability and execution evidence.
+- [`.ci/estate.yml`](.ci/estate.yml) — example environment profile to replace in your fork; it does not configure GitLab or inject inputs.
+- [`examples/`](examples/) — consumer pipeline configurations.
+- [`runtime/`](runtime/) — job helpers embedded in the templates.
+- [`images/`](images/) — execution-image build definitions.
+- [`tools/ci-local.py`](tools/ci-local.py) — local execution of one component job in its pinned image.
+- [`AGENTS.md`](AGENTS.md) — repository editing and verification commands.
 
-`container-mirror` is the one composition that takes its credentials from
-CI/CD variables by default: `REGISTRY_USER` and `REGISTRY_PASSWORD` for the
-registry, `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` for the object
-store. Setting its `vault-addr` input swaps all four for a Vault JWT login.
+## Expected result
 
-## Prerequisites
-
-Per composition, not universally:
-
-- **GitLab 18.9 or newer.** Every component declares `minimum_gitlab: 18.9` and
-  uses typed `spec:inputs`.
-- **Runners with the `docker` executor.** The profile these were written
-  against registers them untagged and unprivileged, so `runner-tags` defaults
-  to `[]`. The `container-smoke-test` component needs a privileged runner.
-  `docs-wiki` is the exception: it also runs on a shell executor, with no image
-  and no registry. See [Shell executor, air-gapped](#shell-executor-air-gapped).
-- **An OCI registry**, for any container composition: CI variables
-  `HARBOR_USER` and `HARBOR_PASSWORD`, a candidate project and a release
-  project. `container-promote-harbor` drives the Harbor API specifically; the
-  build, scan and sign components are registry-agnostic.
-- **HashiCorp Vault**, for signing: a JWT role and the id_token the composition
-  declares. The signing key never leaves Vault.
-- **SonarQube**, for `quality-sonarqube`: `SONAR_TOKEN` and `SONAR_HOST_URL`.
-- **Protected tags**, for anything that publishes or promotes. Those jobs are
-  gated on a protected tag and, where the composition says so, on `when:
-  manual` as well.
-- **`WIKI_TOKEN`**, for `docs-wiki`: a group access token, masked and
-  protected, which means the default branch must be protected. Give it the `api`
-  scope, or set an `api` token in `WIKI_ADMIN_TOKEN`, if the sync job is to
-  repair its own wiki webhook. Step by step:
-  [`docs/howto/docs-wiki-sync.md`](docs/howto/docs-wiki-sync.md).
-
-Which of these your estate actually provides is recorded in
-[`.ci/estate.yml`](.ci/estate.yml). A value marked `unresolved` there was not
-verified; it is not a blank to fill in by guessing.
-
-### Execution images
-
-Every job runs a digest-pinned image, and every third-party image is pulled
-from `docker.io`. If your estate fronts Docker Hub with a pull-through cache,
-set `images.mirror_prefix` in `.ci/estate.yml` to that cache and rewrite the
-references: **the digests do not change**, because a pull-through cache serves
-the upstream manifest unchanged, so `<cache>/<ref>@sha256:<d>` and
-`docker.io/<ref>@sha256:<d>` are the same image. That equivalence was checked
-against a live cache before this release was published. Keep the Renovate
-lookup names pointing at Docker Hub either way; a bot that cannot authenticate
-to your registry logs "found no results" and silently stops proposing updates.
-
-### Shell executor, air-gapped
-
-`docs-wiki` is the one composition that runs without a container image at all.
-Pass `executor: shell` and the sync job renders with no `image:` key, which is
-what a shell-executor runner needs: it ignores `image:` and runs the script on
-the host.
-
-```yaml
-inputs:
-  instance: docs
-  working-directory: 'docs'
-  executor: shell
-  runner-tags: [your-shell-runner-tag]
-```
-
-The host supplies python3, git and tar. The one Python dependency is pyyaml,
-and the job resolves it in this order:
-
-1. `python3 -c 'import yaml'`. On EL9 `dnf install python3-pyyaml` is enough,
-   and then nothing is fetched at all. The version there is 5.4.1, which the
-   runtime is tested against alongside 6.0.2.
-2. `pip install --user -r requirements.txt`, using whatever `PIP_INDEX_URL` and
-   `PIP_TRUSTED_HOST` you set as CI variables. Set `PIP_TRUSTED_HOST` when the
-   index serves plain HTTP.
-3. Neither: the job fails with one line naming both options. It does not fall
-   through to pypi.org.
-
-`execution-image` is ignored in this mode, and its regex accepts an empty
-value, a `name:tag` reference and a digest. A digest is still the default and
-still the preferred form; standard 1.0.5 in
-[`docs/gitlab-ci-agent-standard.md`](docs/gitlab-ci-agent-standard.md) records
-why it is not required. Every other component still requires one, because none
-of them has been exercised on a shell executor.
-
-The runtime is exercised on python 3.9 and 3.12. The rest of the repository's
-test suite needs 3.11 or newer.
-
-## Forking
-
-1. Push this repository to your own GitLab, as the project that consumers will
-   `include:` from.
-2. Rewrite [`.ci/estate.yml`](.ci/estate.yml). It ships describing a fictional
-   estate, and it is the file every later reader trusts instead of rediscovering
-   yours: GitLab host and version, the shared-CI project and its numeric id, the
-   runners, the registry endpoints, the Vault address and roles, your
-   environment names. Set `EXAMPLE_PROFILE = False` in
-   `tests/contracts/test_estate.py` once it describes something real — that
-   turns on the check that no illustration was left behind.
-3. Empty [`.ci/exceptions.yml`](.ci/exceptions.yml) of its one illustrative
-   entry and record your own.
-4. Set `images.mirror_prefix` if you do not pull from Docker Hub directly, and
-   rewrite the references to match.
-5. Cut a protected release tag. Consumers pin that tag, never a branch.
-
-## Migrating from the old include paths
-
-The flat include paths are gone. Every one of them was deleted in 1.0.0, and a
-consumer still pinned to one must move to the component or composition that
-replaced it. Pin the 1.0.0 tag, migrate, then move off the old ref.
-
-[`docs/migrations/0.x-to-1.0.md`](docs/migrations/0.x-to-1.0.md) maps every
-removed path to its replacement and works through three real consumer
-pipelines.
-
-## Guides
-
-- [`docs/howto/docs-wiki-sync.md`](docs/howto/docs-wiki-sync.md) — mirroring a
-  repository's `docs/` to its wiki, end to end: adoption, the token, the
-  webhook, verification and troubleshooting.
-- [`docs/howto/consuming-the-library.md`](docs/howto/consuming-the-library.md) —
-  the structure of this library, how to get it onto your GitLab, and how to pin
-  and adopt it.
-- [`docs/howto/new-admin-quickstart.md`](docs/howto/new-admin-quickstart.md) — a
-  numbered walkthrough from `git clone` to a cut release, every command run from
-  a fresh clone.
-- [`docs/howto/local-testing.md`](docs/howto/local-testing.md) — running a
-  component's job locally, in its own image, before pushing.
-- [`docs/howto/mirror-tool-images.md`](docs/howto/mirror-tool-images.md) —
-  copying the tool images this library runs into a registry your runners can
-  reach, and keeping the catalogue honest once you have.
-
-## Working in this repository
-
-- [`AGENTS.md`](AGENTS.md) — what to read before editing, and the verification
-  commands.
-- [`CHANGELOG.md`](CHANGELOG.md) — release changes and deprecation deadlines.
-- [`docs/gitlab-ci-agent-standard.md`](docs/gitlab-ci-agent-standard.md) — the
-  standard itself.
-- [`docs/howto/local-testing.md`](docs/howto/local-testing.md) — the three tiers
-  of local check, and what each one is still silent about.
-
-## Running the tests
-
-Needs Python 3.11 or newer and `pyyaml`, `jsonschema`, `pytest`, `yamllint`.
-`jq` and `git` are needed by the audit-script tests, which run the shell for
-real rather than mocking it.
-
-```bash
-pip install pyyaml jsonschema pytest yamllint
-
-yamllint -d "{extends: default, rules: {line-length: disable, truthy: disable}}" \
-  .gitlab-ci.yml .ci/ tests/ runtime/ templates/ pipelines/ examples/
-python3 runtime/catalog/generate.py --check     # catalogue drift
-python3 runtime/embed/generate.py --check       # embedded-runtime drift
-GIT_CONFIG_GLOBAL=/dev/null python3 -m pytest -q tests/
-
-# One job's script, in the image the component pins. See docs/howto/local-testing.md.
-python3 tools/ci-local.py --template quality-dependency-lockfiles \
-  --input instance=demo --input lockfiles=none \
-  --job demo:quality-dependency-lockfiles --checkout ~/src/myapp
-```
-
-`GIT_CONFIG_GLOBAL=/dev/null` isolates the tests from your own git config; set
-it per command, not as an exported variable, or git rejects `/dev/null` with
-"bad config line 1".
-
-Everything under `tests/pipelines/` validates **merged** configuration through
-the GitLab CI Lint API, which is the only check here that resolves `include:`
-for real. It needs a server, so those tests **skip without `GITLAB_TOKEN`** — a
-run with no token is green and proves nothing about merged configuration. To
-run them against your own GitLab:
-
-```bash
-export GITLAB_URL=https://gitlab.example.com   # default: https://gitlab.com
-export GITLAB_PROJECT_ID=42                    # default: .ci/estate.yml shared_ci.project_id
-export GITLAB_TOKEN=...                        # personal or group token, api scope
-GIT_CONFIG_GLOBAL=/dev/null python3 -m pytest -q tests/pipelines/
-```
-
-The endpoint is project-scoped because `include:` resolution depends on project
-context, so `GITLAB_PROJECT_ID` must name the project holding your copy of these
-templates. `CI_JOB_TOKEN` is not accepted by the CI Lint API.
-
-`python3 tests/pipelines/lint.py path/to/.gitlab-ci.yml` lints one file
-directly, with `--host` and `--project-id` overriding the variables above.
-
-## Licence
-
-MIT. See [`LICENSE`](LICENSE).
+You know it works when `docs:docs-wiki-sync` succeeds and your wiki home page contains `docs/index.md`.
+Verify repository access with `git ls-remote '<your-wiki-clone-url>' HEAD`, substituting your wiki's clone URL and using your normal Git credentials.

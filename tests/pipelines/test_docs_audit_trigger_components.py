@@ -48,7 +48,7 @@ resolve_component = load("resolve_component", HERE / "resolve_component.py")
 
 needs_token = pytest.mark.skipif(
     not os.environ.get("GITLAB_TOKEN"),
-    reason="GITLAB_TOKEN is not set; see README.md, Running the tests",
+    reason="GITLAB_TOKEN is not set; see AGENTS.md, Verification commands",
 )
 
 # Inputs with no default, per component.

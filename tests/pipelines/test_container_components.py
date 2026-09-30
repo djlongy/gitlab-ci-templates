@@ -55,7 +55,7 @@ from tools.resolve import render_component as render  # noqa: E402
 
 needs_token = pytest.mark.skipif(
     not os.environ.get("GITLAB_TOKEN"),
-    reason="GITLAB_TOKEN is not set; see README.md, Running the tests",
+    reason="GITLAB_TOKEN is not set; see AGENTS.md, Verification commands",
 )
 
 
