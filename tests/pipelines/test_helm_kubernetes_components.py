@@ -49,7 +49,7 @@ render_module = load("ci_render", "render.py")
 
 needs_token = pytest.mark.skipif(
     not os.environ.get("GITLAB_TOKEN"),
-    reason="GITLAB_TOKEN is not set; see README.md, Running the tests",
+    reason="GITLAB_TOKEN is not set; see AGENTS.md, Verification commands",
 )
 
 

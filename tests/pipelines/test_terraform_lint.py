@@ -40,7 +40,7 @@ lint_module = load_lint_module()
 
 needs_token = pytest.mark.skipif(
     not os.environ.get("GITLAB_TOKEN"),
-    reason="GITLAB_TOKEN is not set; see README.md, Running the tests",
+    reason="GITLAB_TOKEN is not set; see AGENTS.md, Verification commands",
 )
 
 # A rule that always matches, so a component whose own default deliberately

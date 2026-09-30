@@ -106,22 +106,26 @@ def test_the_release_promoted_something():
     assert "ansible-lint" not in released, "a skipped job is not a run"
 
 
-def test_the_readme_table_agrees_with_the_contracts():
-    """The table is the first thing a consumer reads, and it is hand-written.
-
-    A status that is right in `.ci/catalog.yml` and stale in README.md is worse
-    than one that is wrong in both: the reader has no reason to doubt it.
-    """
+def test_the_readme_example_uses_a_released_composition_with_required_inputs():
+    """The first-run example must name an available pipeline with valid inputs."""
     import re
+    import textwrap
 
     readme = (REPO_ROOT / "README.md").read_text()
-    row = re.compile(
-        r"\| \[`(?P<name>[a-z0-9-]+)`\]\(pipelines/[a-z0-9-]+\.yml\)"
-        r" \|[^|]*\|[^|]*\| (?P<status>[a-z]+) \|"
-    )
-    table = {m.group("name"): m.group("status") for m in row.finditer(readme)}
-    assert len(table) >= 11, table
+    snippet = re.search(r"```yaml\n(.*?)```", readme, re.DOTALL)
+    assert snippet, "README must contain a runnable include example"
+    includes = yaml.safe_load(textwrap.dedent(snippet.group(1)))["include"]
+    assert len(includes) == 1, "a consumer pipeline has one owning composition"
 
-    for name, status in table.items():
-        declared = contract(REPO_ROOT / "pipelines" / f"{name}.contract.yml")["status"]
-        assert status == declared, f"README says {name} is {status}, its contract says {declared}"
+    include = includes[0]
+    assert include["project"], "compositions require project include context"
+    assert re.fullmatch(r"(?:[0-9]+\.[0-9]+\.[0-9]+|[0-9a-f]{40})", include["ref"])
+    path = REPO_ROOT / include["file"].lstrip("/")
+    assert path.parent == REPO_ROOT / "pipelines"
+    assert contract(path.with_suffix(".contract.yml"))["status"] == "released"
+
+    interface = next(yaml.safe_load_all(path.read_text()))["spec"]["inputs"]
+    supplied = include.get("inputs", {})
+    required = {name for name, spec in interface.items() if "default" not in spec}
+    assert required <= supplied.keys(), f"missing required inputs: {required - supplied.keys()}"
+    assert supplied.keys() <= interface.keys(), "example passes unknown inputs"
